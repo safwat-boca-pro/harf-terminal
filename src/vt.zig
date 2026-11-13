@@ -97,15 +97,43 @@ pub const Terminal = struct {
         c.ghostty_terminal_vt_write(self.handle, bytes.ptr, bytes.len);
     }
 
-    /// Points `row_cells` at the cells of visible row `row`. False if the row does not exist.
-    fn selectRow(self: *Terminal, row: u16) bool {
-        if (c.ghostty_render_state_update(self.render_state, self.handle) != c.GHOSTTY_SUCCESS) return false;
+    /// Refreshes the render state from the terminal. Call once per frame, before `selectRow`,
+    /// `cellInRow` and `cursor`. False on failure.
+    pub fn update(self: *Terminal) bool {
+        return c.ghostty_render_state_update(self.render_state, self.handle) == c.GHOSTTY_SUCCESS;
+    }
+
+    /// Points `row_cells` at the cells of visible row `row` of the last `update`. False if the row does not exist.
+    pub fn selectRow(self: *Terminal, row: u16) bool {
         if (c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, @ptrCast(&self.row_iter)) != c.GHOSTTY_SUCCESS) return false;
         var i: u32 = 0;
         while (i <= row) : (i += 1) {
             if (!c.ghostty_render_state_row_iterator_next(self.row_iter)) return false;
         }
         return c.ghostty_render_state_row_get(self.row_iter, c.GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, @ptrCast(&self.row_cells)) == c.GHOSTTY_SUCCESS;
+    }
+
+    /// The cell at `col` of the row chosen by `selectRow`; blank if `col` is out of range.
+    pub fn cellInRow(self: *Terminal, col: u16, buf: *[16]u21) Cell {
+        const blank: Cell = .{ .cps = buf[0..0], .wide = .narrow };
+        if (c.ghostty_render_state_row_cells_select(self.row_cells, col) != c.GHOSTTY_SUCCESS) return blank;
+        return self.readCell(buf);
+    }
+
+    pub const Cursor = struct { col: u16, row: u16, visible: bool };
+
+    /// The cursor of the last `update`; null when it is outside the viewport.
+    pub fn cursor(self: *Terminal) ?Cursor {
+        var has: bool = false;
+        _ = c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE, &has);
+        if (!has) return null;
+        var x: u16 = 0;
+        var y: u16 = 0;
+        var vis: bool = true;
+        _ = c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X, &x);
+        _ = c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &y);
+        _ = c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE, &vis);
+        return .{ .col = x, .row = y, .visible = vis };
     }
 
     /// Number of history rows above the visible screen.
@@ -133,6 +161,7 @@ pub const Terminal = struct {
     pub fn title(self: *Terminal) []const u8 {
         var str: c.GhosttyString = undefined;
         if (c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_TITLE, &str) != c.GHOSTTY_SUCCESS) return "";
+        if (str.len == 0) return ""; // the pointer may be null when no title is set
         return str.ptr[0..str.len];
     }
 
@@ -146,7 +175,9 @@ pub const Terminal = struct {
         var cps: [16]u32 = undefined;
         var gb = c.GhosttyCodepointBuffer{ .ptr = &cps, .cap = cps.len, .len = 0 };
         var n: usize = 0;
-        if (c.ghostty_render_state_row_cells_get(self.row_cells, c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, &gb) == c.GHOSTTY_SUCCESS) {
+        // OUT_OF_SPACE still wrote the first 16 codepoints and set `len` to the real count.
+        const got = c.ghostty_render_state_row_cells_get(self.row_cells, c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, &gb);
+        if (got == c.GHOSTTY_SUCCESS or got == c.GHOSTTY_OUT_OF_SPACE) {
             n = @min(gb.len, cps.len);
         }
         for (cps[0..n], 0..) |cp, i| buf[i] = @intCast(cp);
@@ -162,15 +193,14 @@ pub const Terminal = struct {
     /// `buf` backs the returned codepoints.
     pub fn cell(self: *Terminal, col: u16, row: u16, buf: *[16]u21) Cell {
         const blank: Cell = .{ .cps = buf[0..0], .wide = .narrow };
-        if (!self.selectRow(row)) return blank;
-        if (c.ghostty_render_state_row_cells_select(self.row_cells, col) != c.GHOSTTY_SUCCESS) return blank;
-        return self.readCell(buf);
+        if (!self.update() or !self.selectRow(row)) return blank;
+        return self.cellInRow(col, buf);
     }
 
     /// UTF-8 text of visible row `row`: blank cells are spaces, the spacer after a wide cell is
     /// skipped, trailing blanks are trimmed. The result is a slice of `out`; text that does not fit is cut off.
     pub fn rowText(self: *Terminal, row: u16, out: []u8) []const u8 {
-        if (!self.selectRow(row)) return out[0..0];
+        if (!self.update() or !self.selectRow(row)) return out[0..0];
         var n: usize = 0;
         var end: usize = 0; // length after the last non-blank cell
         var cps: [16]u21 = undefined;
@@ -383,4 +413,45 @@ test "resize to 500x200 and to 1x1 keeps working" {
     try std.testing.expectEqual(@as(u16, 1), t.size().cols);
     try std.testing.expectEqual(@as(u16, 1), t.size().rows);
     t.write("hello\r\n");
+}
+
+test "title is empty when never set" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    try std.testing.expectEqualStrings("", t.title());
+}
+
+test "cell with more than 16 codepoints keeps the first 16" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("a");
+    for (0..20) |_| t.write("\u{64E}");
+    var buf: [16]u21 = undefined;
+    const cl = t.cell(0, 0, &buf);
+    try std.testing.expectEqual(@as(usize, 16), cl.cps.len);
+    try std.testing.expectEqual(@as(u21, 'a'), cl.cps[0]);
+}
+
+test "cursor follows output" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("ab\r\ncd");
+    try std.testing.expect(t.update());
+    try std.testing.expectEqual(Terminal.Cursor{ .col = 2, .row = 1, .visible = true }, t.cursor().?);
+    t.write("\x1b[?25l");
+    try std.testing.expect(t.update());
+    try std.testing.expect(!t.cursor().?.visible);
+}
+
+test "selectRow does not refresh" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    try std.testing.expect(t.update());
+    t.write("x");
+    var buf: [16]u21 = undefined;
+    try std.testing.expect(t.selectRow(0));
+    try std.testing.expectEqual(@as(usize, 0), t.cellInRow(0, &buf).cps.len);
+    try std.testing.expect(t.update());
+    try std.testing.expect(t.selectRow(0));
+    try std.testing.expectEqualSlices(u21, &.{'x'}, t.cellInRow(0, &buf).cps);
 }
