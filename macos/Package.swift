@@ -19,7 +19,6 @@ let package = Package(
                 .linkedFramework("CoreText"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("CoreFoundation"),
-                .linkedFramework("ImageIO"),
                 // libharf.a does not carry libghostty-vt; zig build installs it next to libharf.a.
                 .linkedLibrary("ghostty-vt-static"),
             ]
