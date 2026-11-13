@@ -8,6 +8,12 @@ extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
 /// _IOW('t', 103, struct winsize) on Darwin; std.c.T has no entry for macOS.
 const TIOCSWINSZ: c_ulong = 0x80087467;
 const O_NONBLOCK: c_int = 0x4;
+extern "c" fn signal(sig: c_int, handler: ?*const anyopaque) ?*const anyopaque;
+extern "c" fn sigprocmask(how: c_int, set: ?*const u32, old: ?*u32) c_int;
+
+/// Held from `forkpty` until the new master is close-on-exec, so a spawn on another thread cannot
+/// fork a child that inherits this master.
+var spawn_lock: c.pthread_mutex_t = .{};
 
 pub const SpawnOptions = struct {
     /// `argv[0]` is the program to run, as a path (no PATH lookup).
@@ -94,8 +100,12 @@ pub const Pty = struct {
 
         var ws: c.winsize = .{ .row = opts.rows, .col = opts.cols, .xpixel = 0, .ypixel = 0 };
         var master: c_int = -1;
+        _ = c.pthread_mutex_lock(&spawn_lock);
         const pid = forkpty(&master, null, null, &ws);
-        if (pid < 0) return error.ForkptyFailed;
+        if (pid < 0) {
+            _ = c.pthread_mutex_unlock(&spawn_lock);
+            return error.ForkptyFailed;
+        }
         if (pid == 0) {
             // Child. IUTF8 makes the line discipline erase whole UTF-8 characters (Arabic letters are two bytes).
             var t: c.termios = undefined;
@@ -103,11 +113,19 @@ pub const Pty = struct {
                 t.iflag.IUTF8 = true;
                 _ = c.tcsetattr(0, .NOW, &t);
             }
-            if (opts.cwd) |dir| _ = c.chdir(dir.ptr);
+            // Start from default signal handling: the parent (an AppKit app) may ignore or block signals.
+            var sig: c_int = 1;
+            while (sig < 32) : (sig += 1) _ = signal(sig, null);
+            const no_signals: u32 = 0;
+            _ = sigprocmask(3, &no_signals, null); // SIG_SETMASK
+            if (opts.cwd) |dir| {
+                if (c.chdir(dir.ptr) != 0) _ = c.chdir("/");
+            }
             _ = c.execve(opts.argv[0].ptr, argv.ptr, envp.ptr);
             c._exit(127);
         }
         setCloexec(master);
+        _ = c.pthread_mutex_unlock(&spawn_lock);
         setNonblock(master); // reads and writes go through poll; see read, write and writeSome
         return .{ .fd = master, .pid = pid };
     }
@@ -197,17 +215,19 @@ pub const Pty = struct {
         }
     }
 
-    /// Hangs up on the child (SIGHUP, as closing a terminal would) and reaps it. A child that
-    /// ignores SIGHUP gets SIGKILL after about a second. For teardown only.
+    /// Hangs up on the child's process group (SIGHUP, as closing a terminal would) and reaps the
+    /// child. Whatever is still running after 100 ms gets SIGKILL. For teardown only: this is the
+    /// one bounded wait in the product.
     pub fn kill(self: *Pty) void {
         if (self.status != null) return;
-        _ = c.kill(self.pid, .HUP);
+        _ = c.kill(-self.pid, .HUP); // the child is a session leader, so its pid is its group id
         var tries: u32 = 0;
-        while (tries < 100) : (tries += 1) {
+        while (tries < 10) : (tries += 1) {
             var raw: c_int = 0;
             const r = c.waitpid(self.pid, &raw, c.W.NOHANG);
             if (r == self.pid) {
                 self.status = decodeStatus(raw);
+                _ = c.kill(-self.pid, .KILL); // sweep group members that outlived the leader
                 return;
             }
             if (r < 0) {
@@ -217,7 +237,7 @@ pub const Pty = struct {
             const ts: c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
             _ = c.nanosleep(&ts, null);
         }
-        _ = c.kill(self.pid, .KILL);
+        _ = c.kill(-self.pid, .KILL);
         _ = self.wait();
     }
 
@@ -305,4 +325,114 @@ test "a child does not inherit another session's PTY" {
     const out = try readAll(&b, gpa);
     defer gpa.free(out);
     try std.testing.expectEqualStrings("clean\r\n", out);
+}
+
+fn nowMs() u64 {
+    var ts: c.timespec = undefined;
+    _ = c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+}
+
+/// Reads until the output contains `needle` (or the child ends). Test helper.
+fn readUntil(p: *Pty, needle: []const u8, buf: []u8) []const u8 {
+    var n: usize = 0;
+    while (n < buf.len and std.mem.indexOf(u8, buf[0..n], needle) == null) {
+        const got = p.read(buf[n..]) catch break;
+        if (got == 0) break;
+        n += got;
+    }
+    return buf[0..n];
+}
+
+test "kill escalates past a child that ignores SIGHUP" {
+    const gpa = std.testing.allocator;
+    var p = try Pty.spawn(gpa, .{ .argv = &.{ "/bin/sh", "-c", "trap '' HUP; echo ready; while :; do sleep 1; done" } });
+    var buf: [256]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, readUntil(&p, "ready", &buf), "ready") != null);
+    const pid = p.pid;
+    const t0 = nowMs();
+    p.deinit();
+    try std.testing.expect(nowMs() - t0 < 500);
+    var raw: c_int = 0;
+    try std.testing.expect(c.waitpid(pid, &raw, c.W.NOHANG) < 0); // already reaped: ECHILD
+}
+
+test "kill reaches the process group" {
+    const gpa = std.testing.allocator;
+    var p = try Pty.spawn(gpa, .{ .argv = &.{ "/bin/sh", "-c", "sleep 60 & echo bg:$!:; wait" } });
+    var buf: [256]u8 = undefined;
+    const out = readUntil(&p, ":\r", &buf);
+    const start = (std.mem.indexOf(u8, out, "bg:") orelse return error.NoPid) + 3;
+    const end = std.mem.indexOfScalarPos(u8, out, start, ':') orelse return error.NoPid;
+    const bg_pid = try std.fmt.parseInt(c.pid_t, out[start..end], 10);
+    p.deinit();
+    var gone = false;
+    var waited: u32 = 0;
+    while (waited < 500) : (waited += 10) {
+        if (c.kill(bg_pid, @enumFromInt(0)) != 0) {
+            gone = true;
+            break;
+        }
+        const ts: c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = c.nanosleep(&ts, null);
+    }
+    try std.testing.expect(gone);
+}
+
+const FdCount = struct {
+    result: i32 = -1,
+    fn run(self: *FdCount) void {
+        var p = Pty.spawn(std.heap.smp_allocator, .{ .argv = &.{ "/bin/sh", "-c", "ls /dev/fd | wc -l" } }) catch return;
+        defer p.deinit();
+        const out = readAll(&p, std.heap.smp_allocator) catch return;
+        defer std.heap.smp_allocator.free(out);
+        self.result = std.fmt.parseInt(i32, std.mem.trim(u8, out, " \r\n"), 10) catch -2;
+    }
+};
+
+test "concurrent spawns leak no descriptors into each other's children" {
+    var base: FdCount = .{};
+    base.run();
+    try std.testing.expect(base.result > 0);
+    var jobs: [8]FdCount = @splat(.{});
+    var threads: [8]std.Thread = undefined;
+    for (&threads, &jobs) |*t, *j| t.* = try std.Thread.spawn(.{}, FdCount.run, .{j});
+    for (threads) |t| t.join();
+    for (jobs) |j| try std.testing.expectEqual(base.result, j.result);
+}
+
+test "a missing cwd falls back to /" {
+    const gpa = std.testing.allocator;
+    var p = try Pty.spawn(gpa, .{ .argv = &.{ "/bin/sh", "-c", "pwd" }, .cwd = "/nonexistent-harf" });
+    defer p.deinit();
+    const out = try readAll(&p, gpa);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("/\r\n", out);
+}
+
+test "the child does not inherit ignored signals" {
+    const gpa = std.testing.allocator;
+    const sig_pipe = 13;
+    const sig_ign: ?*const anyopaque = @ptrFromInt(1);
+    const old = signal(sig_pipe, sig_ign);
+    defer _ = signal(sig_pipe, old);
+    var p = try Pty.spawn(gpa, .{ .argv = &.{ "/bin/sh", "-c", "kill -PIPE $$; echo alive" } });
+    defer p.deinit();
+    const out = try readAll(&p, gpa);
+    defer gpa.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "alive") == null);
+}
+
+test "the child does not inherit the signal mask" {
+    const gpa = std.testing.allocator;
+    const usr1_bit: u32 = 1 << (30 - 1);
+    var old: u32 = 0;
+    _ = sigprocmask(1, &usr1_bit, &old); // SIG_BLOCK
+    defer _ = sigprocmask(3, &old, null); // SIG_SETMASK
+    var p = try Pty.spawn(gpa, .{ .argv = &.{ "/bin/sh", "-c", "kill -USR1 $$; echo alive" } });
+    defer p.deinit();
+    const out = try readAll(&p, gpa);
+    defer gpa.free(out);
+    // A blocked SIGUSR1 stays pending and the shell lives on; unblocked, the default action ends it.
+    try std.testing.expect(std.mem.indexOf(u8, out, "alive") == null);
 }
