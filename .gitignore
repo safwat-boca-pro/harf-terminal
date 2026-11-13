@@ -6,3 +6,4 @@ zig-out/
 HANDOFF.md
 .tools/
 test/ucd/
+.superpowers/

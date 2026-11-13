@@ -34,6 +34,16 @@ pub fn build(b: *std.Build) void {
     core.linkFramework("CoreGraphics", .{});
     core.linkFramework("CoreFoundation", .{});
 
+    // libghostty-vt (VT parser + grid), reached through its C API only. translate-c turns the
+    // header into the `ghostty_c` module; simd=false keeps it free of C++ dependencies.
+    const ghostty = b.dependency("ghostty", .{ .target = target, .optimize = optimize, .simd = false });
+    const tc = b.addTranslateC(.{ .root_source_file = b.path("src/vt_c.h"), .target = target, .optimize = optimize });
+    tc.defineCMacro("GHOSTTY_STATIC", null);
+    tc.addIncludePath(ghostty.path("include"));
+    core.addImport("ghostty_c", tc.createModule());
+    core.linkLibrary(ghostty.artifact("ghostty-vt-static"));
+    b.installArtifact(ghostty.artifact("ghostty-vt-static"));
+
     // zig-out/lib/libharf.a. The C header is hand-written: include/harf.h.
     const lib = b.addLibrary(.{
         .name = "harf",

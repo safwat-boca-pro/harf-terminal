@@ -3,7 +3,12 @@
     .version = "0.0.1",
     .fingerprint = 0x2f1b7efea99b989f, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.1",
-    .dependencies = .{},
+    .dependencies = .{
+        .ghostty = .{
+            .url = "https://release.files.ghostty.org/libghostty-vt/1.0.1/libghostty-vt-1.0.1.tar.gz",
+            .hash = "ghostty-1.4.1-dev-5UdBC7mPUgFIzAVXNJOixiryPYogwYwnmN0zZWud4iSr",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

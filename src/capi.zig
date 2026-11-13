@@ -43,4 +43,5 @@ test "harf_ping returns magic" {
 test {
     _ = @import("shape/layout.zig");
     _ = @import("bidi/bidi.zig");
+    _ = @import("vt.zig");
 }
