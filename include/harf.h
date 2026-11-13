@@ -62,6 +62,37 @@ void harf_spike_draw_row(HarfSpike *s, void *ctx, const HarfRowRequest *req, Har
 /* Extents of the last drawn row. Returns the count; writes at most cap. */
 size_t harf_spike_extents(HarfSpike *s, HarfExtent *out, size_t cap);
 
+/* ---- Terminal sessions (Phase 3): a child on a PTY, parsed into a logical-order grid ---- */
+
+typedef struct HarfTerm HarfTerm;
+
+/* Callbacks run on the session's I/O thread: keep them short, and do not call back into the
+ * session except harf_term_wake_handled. wake fires once, then not again until
+ * harf_term_wake_handled is called. */
+typedef struct {
+    void *ctx;
+    void (*wake)(void *ctx);
+    void (*title)(void *ctx);
+    void (*bell)(void *ctx);
+    void (*exited)(void *ctx, int status);
+} HarfTermCallbacks;
+
+/* argv: NULL-terminated program and arguments (argv[0] is the path), or NULL for the login shell.
+ * Returns NULL for a zero size or if the child cannot start. */
+HarfTerm *harf_term_new(uint16_t cols, uint16_t rows, size_t scrollback_bytes,
+                        const char *const *argv, const HarfTermCallbacks *cb);
+/* Stops the session (hangs up on the child if it still runs). No callback runs after it returns. */
+void harf_term_free(HarfTerm *t);
+/* Sends bytes to the child as if typed. 0 = ok. */
+int harf_term_input(HarfTerm *t, const uint8_t *bytes, size_t len);
+/* cell_w_px, cell_h_px: pixel size of one cell. 0 = ok. */
+int harf_term_resize(HarfTerm *t, uint16_t cols, uint16_t rows, uint32_t cell_w_px, uint32_t cell_h_px);
+/* UTF-8 text of visible row `row`, trailing blanks trimmed, no NUL. Returns bytes written (cut off at cap). */
+size_t harf_term_row_text(HarfTerm *t, uint16_t row, char *out, size_t cap);
+void harf_term_wake_handled(HarfTerm *t);
+/* The child's exit code once it has ended and its output is parsed; -1 while it runs. */
+int harf_term_exit_status(HarfTerm *t);
+
 #ifdef __cplusplus
 }
 #endif
