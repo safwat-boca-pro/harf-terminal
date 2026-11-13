@@ -48,6 +48,8 @@ pub const Session = struct {
         errdefer gpa.destroy(self);
         self.* = .{ .gpa = gpa, .pty = undefined, .term = undefined, .callbacks = opts.callbacks };
         if (c.pipe(&self.stop_pipe) != 0) return error.PipeFailed;
+        pty.setCloexec(self.stop_pipe[0]);
+        pty.setCloexec(self.stop_pipe[1]);
         errdefer {
             _ = c.close(self.stop_pipe[0]);
             _ = c.close(self.stop_pipe[1]);
@@ -311,4 +313,20 @@ test "terminal replies reach the child" {
     const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
     defer s.deinit();
     try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "1b 5b 31 3b 31 52", .exact = false }, Row.ok));
+}
+
+test "a child does not inherit another session's descriptors" {
+    const a = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sleep", "60" } });
+    defer a.deinit();
+    var script_buf: [256]u8 = undefined;
+    const script = try std.fmt.bufPrintSentinel(
+        &script_buf,
+        "for fd in {d} {d} {d}; do if (: <&$fd) 2>/dev/null; then echo leaked$fd; fi; done; echo done",
+        .{ a.pty.fd, a.stop_pipe[0], a.stop_pipe[1] },
+        0,
+    );
+    const b = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer b.deinit();
+    try std.testing.expect(waitFor(10_000, Row{ .s = b, .want = "done" }, Row.ok));
+    try std.testing.expect(!(Row{ .s = b, .want = "leaked", .exact = false }).ok());
 }

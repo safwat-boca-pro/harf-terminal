@@ -18,6 +18,14 @@ pub const SpawnOptions = struct {
     cwd: ?[:0]const u8 = null,
 };
 
+/// Marks `fd` close-on-exec, so children started later do not inherit it. Without this a second
+/// session's shell would hold the first session's PTY master open and never see it hang up.
+pub fn setCloexec(fd: c_int) void {
+    const f_setfd = 2; // F_SETFD
+    const fd_cloexec = 1; // FD_CLOEXEC
+    _ = c.fcntl(fd, f_setfd, @as(c_int, fd_cloexec));
+}
+
 /// "-zsh" for "/bin/zsh": the name a login shell is started under. The result is a slice of `buf`.
 pub fn loginArgv0(buf: []u8, shell: []const u8) []const u8 {
     const base = if (std.mem.lastIndexOfScalar(u8, shell, '/')) |i| shell[i + 1 ..] else shell;
@@ -87,6 +95,7 @@ pub const Pty = struct {
             _ = c.execve(opts.argv[0].ptr, argv.ptr, envp.ptr);
             c._exit(127);
         }
+        setCloexec(master);
         return .{ .fd = master, .pid = pid };
     }
 
@@ -247,4 +256,18 @@ test "child runs in UTF-8 mode so Backspace erases whole characters" {
 test "login argv0" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("-zsh", loginArgv0(&buf, "/bin/zsh"));
+}
+
+test "a child does not inherit another session's PTY" {
+    const gpa = std.testing.allocator;
+    var a = try Pty.spawn(gpa, .{ .argv = &.{ "/bin/sleep", "60" } });
+    defer a.deinit();
+    // `: <&N` succeeds only if descriptor N is open in the child.
+    var script_buf: [128]u8 = undefined;
+    const script = try std.fmt.bufPrintSentinel(&script_buf, "if (: <&{d}) 2>/dev/null; then echo leaked; else echo clean; fi", .{a.fd}, 0);
+    var b = try Pty.spawn(gpa, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer b.deinit();
+    const out = try readAll(&b, gpa);
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("clean\r\n", out);
 }
