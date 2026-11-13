@@ -18,6 +18,22 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // An explicit target (needed for os_version_min) disables Zig's automatic macOS SDK
+    // detection, so ask xcrun for the SDK ourselves.
+    if (target.result.os.tag == .macos) {
+        if (std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target.result)) |sdk| {
+            core.addSystemFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
+            // The frameworks' .tbd files depend on /usr/lib/libobjc etc.; resolve them in the SDK.
+            core.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
+        }
+    }
+
+    // A static lib cannot carry these; macos/Package.swift links them into the app.
+    // They are declared here so the Zig tests link too.
+    core.linkFramework("CoreText", .{});
+    core.linkFramework("CoreGraphics", .{});
+    core.linkFramework("CoreFoundation", .{});
+
     // zig-out/lib/libharf.a. The C header is hand-written: include/harf.h.
     const lib = b.addLibrary(.{
         .name = "harf",

@@ -3,6 +3,8 @@ import PackageDescription
 
 // libharf.a comes from `zig build` at the repo root. macos/build-app.sh passes
 // -Xlinker -L<repo>/zig-out/lib, so no unsafeFlags are needed here.
+// A static lib cannot carry its framework dependencies, so the frameworks the Zig core
+// uses (CoreText, CoreGraphics, CoreFoundation) are linked here too.
 let package = Package(
     name: "Harf",
     platforms: [.macOS(.v14)],
@@ -14,8 +16,10 @@ let package = Package(
             path: "Sources/Harf",
             linkerSettings: [
                 .linkedFramework("AppKit"),
-                .linkedFramework("Metal"),
-                .linkedFramework("MetalKit"),
+                .linkedFramework("CoreText"),
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("CoreFoundation"),
+                .linkedFramework("ImageIO"),
             ]
         ),
     ]

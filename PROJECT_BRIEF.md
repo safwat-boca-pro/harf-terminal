@@ -25,7 +25,7 @@ Why an emulator: only an emulator owns the renderer, so only an emulator can fix
 | Product | Terminal emulator, macOS Apple Silicon only (v1) |
 | Core language | **Zig** (pin an exact compiler version, see §10) |
 | macOS shell | **Thin Swift/AppKit shell** (the way Ghostty is structured); Zig core exposes a small C ABI |
-| Rendering | Metal, glyph atlas, damage tracking, no web view |
+| Rendering | **CPU-drawn (CoreGraphics + CoreText) into a layer-backed AppKit view, damage-tracked, no web view, no Metal.** *Changed 2026-11-13 by the owner (was: Metal + glyph atlas) to reach a ~30 MB footprint. Measured at equal window size, a CPU-drawn view is 5-13 MB lighter than Metal (docs/perf.md). Note: Terminal.app itself is ~50 MB at its default window; an earlier 17 MB reading was wrong.* |
 | Shaping and font fallback | **CoreText** (system fallback for Arabic; no bundled font in v1) |
 | Bidi | Own UAX #9 implementation in Zig, validated against Unicode conformance files |
 | Grid model | Grid stays in **logical order**; reordering happens at display time |
@@ -42,17 +42,17 @@ PTY (child shell)
   -> VT parser (escape sequence state machine)
     -> Screen / grid (logical order, damage-tracked)
       -> Per-row layout:  bidi (UAX #9) -> shaping (CoreText) -> cluster-to-cell map
-        -> Glyph atlas (rasterize via CoreText, cache)
-          -> Frame snapshot (cell instances + atlas updates) over C ABI
-            -> Swift/AppKit shell: Metal draw, window, tabs, menus, IME, notifications
+        -> Draw: Zig draws damaged rows into a CGContext handed across the C ABI (CoreText glyph runs, cell backgrounds, cursor, selection)
+          -> Swift/AppKit shell: view + dirty-rect invalidation, window, tabs, menus, IME, notifications
+             (2026-11-13: replaces glyph atlas + frame snapshot + Metal draw)
 ```
 
 ### 3.1 Zig / Swift split
 
-- **Zig core** owns: PTY, parser, screen/scrollback, layout (bidi + shaping), glyph rasterization and atlas, selection/cursor logic, config.
-- **Swift shell** owns: windows, tabs/splits UI, menus, input events and IME (`NSTextInputClient`), Metal pipeline and presentation, notifications, session restore.
-- **C ABI** is small and stable: create/destroy terminal, write input, resize, get frame snapshot, get atlas updates, get selection text, callbacks for title/bell/notification/clipboard.
-- CoreText has a C API, so Zig calls it directly. Metal is Obj-C/Swift only, so Swift draws.
+- **Zig core** owns: PTY, parser, screen/scrollback, layout (bidi + shaping), drawing (CoreText/CoreGraphics into a CGContext), selection/cursor logic, config.
+- **Swift shell** owns: windows, tabs/splits UI, menus, input events and IME (`NSTextInputClient`), the view and its dirty-rect invalidation, notifications, session restore.
+- **C ABI** is small and stable: create/destroy terminal, write input, resize, draw rows into a CGContext, get selection text, callbacks for title/bell/notification/clipboard.
+- CoreText and CoreGraphics have C APIs, so Zig calls them directly and draws into the CGContext Swift passes in. (2026-11-13: replaces "Metal is Obj-C/Swift only, so Swift draws".)
 - Zig builds a static library plus a generated C header; the Swift package/Xcode project links it.
 
 ### 3.2 Threads
@@ -180,6 +180,8 @@ Test matrix: shell, vim/neovim, tmux, htop, less, fzf, **Claude Code**, **Codex 
 
 **Caveat on RSS:** AppKit + Metal themselves may exceed 30 MB. In Phase 0, measure an empty AppKit + Metal window first, then confirm or revise the target relative to that baseline and record it in `docs/perf.md`.
 
+**Update 2026-11-13 (owner decision):** the target is **30 MB `phys_footprint`** (not RSS), and the renderer is CPU-drawn to reach it. Measured at 80x24-class window size: empty CPU-drawn view 25 MB, empty Metal view 30 MB. Window size is part of the definition; see `docs/perf.md`. Throughput against GPU terminals may drop; that target is to be revisited with measured numbers.
+
 **Method:** set up benchmarks **before** optimizing. Use vtebench for throughput, Instruments (Time Profiler, Allocations, Metal System Trace) for CPU/memory/GPU, and an internal keypress-to-present timestamp for latency. Track results in `docs/perf.md` with machine and OS version.
 
 ---
@@ -192,7 +194,7 @@ Test matrix: shell, vim/neovim, tmux, htop, less, fzf, **Claude Code**, **Codex 
 - Done when: app opens a blank Metal window and calls one function in the Zig core.
 
 **Phase 1: Arabic render spike**
-- Metal window, glyph atlas, CoreText shaping + fallback, hardcoded mixed lines, compare cell models (§4.3) across 3 to 4 fonts.
+- Window, CoreText shaping + fallback, hardcoded mixed lines, compare cell models (§4.3) across 3 to 4 fonts. (Spike first drew with Metal + atlas; the renderer is now CPU-drawn, see §2.) Owner chose model C, to be fixed for spacing, cursor and selection: docs/cell-model.md.
 - Done when: the owner confirms the sample strings in §4.7 look right and the cell model decision is documented.
 
 **Phase 2: Bidi (UAX #9)**
@@ -226,7 +228,7 @@ Do not rely on these without checking:
 3. **Cell model** winner (§4.3) and whether Arabic glyphs look acceptable when snapped.
 4. **Base direction policy** for inline agent UIs (§4.4).
 5. **Typing behavior** at prompts (§4.5).
-6. **Who rasterizes glyphs**: proposed in Zig via CoreText into atlas bitmaps that Swift uploads. Confirm it is clean across the C ABI.
+6. **Who draws glyphs**: ~~Zig rasterizes into atlas bitmaps that Swift uploads~~ (2026-11-13) Zig draws glyph runs with CoreText straight into a CGContext passed across the C ABI; no atlas.
 7. **Name, final license, minimum macOS version.**
 8. **Fonts**: v1 relies on system fallback. Revisit bundling a monospace font with good Arabic coverage only if fallback quality is poor.
 9. **Hosting/distribution**: notarization, signing, auto-update (later).

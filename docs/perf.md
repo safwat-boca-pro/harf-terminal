@@ -19,9 +19,48 @@ Budgets: see `PROJECT_BRIEF.md` section 7. Measure before optimizing; record eve
 Cumulative CPU time over the 60 s idle window: 0:00.40 -> 0:00.42 (0.02 s), consistent with no timers or display link.
 The 5 s startup was not timed precisely; first frame is visible by the first sample, so startup is well under any budget so far (not yet measured).
 
+## The 30 MB target: definition and corrected measurements (2026-11-13)
+
+**Definition.** `phys_footprint` from `footprint <pid>`, Release build, one window, empty session, measured 12-20 s after
+launch, Apple M1, macOS 27.0.1. **Window size is part of the definition**, because the window's backing IOSurface is charged to
+the app and scales with pixel count. Reference sizes: **80x24 class = 700x420 pt content**, and Terminal.app's default
+window on this machine = 1162x597 pt content.
+
+**Correction.** An earlier version of this section said Terminal.app is 17 MB and that window pixels live in WindowServer and are
+not charged to the app. That was wrong: the 17 MB run had no real window (I never confirmed one existed). With a confirmed
+1162x597 window, Terminal.app is **63 MB transient, 50 MB settled**, with a 10-19 MB `IOSurface` line charged to the process.
+
+Controlled prototypes (throwaway, `NSView.draw` with `CTLineDraw` vs an empty `MTKView`, same window size):
+
+| Window (content) | CPU-drawn view | Metal view (3 drawables) |
+|---|---|---|
+| 700x420 pt (80x24 class) | **25 MB** (IOSurface 5 MB) | 30 MB (IOSurface 9.5 MB) |
+| 1162x597 pt | **30-31 MB** (IOSurface 11 MB) | 42-43 MB (IOSurface 22 MB, three surfaces) |
+
+Other apps, same machine (not controlled for content): Terminal.app 50 MB at 1162x597; Ghostty 1.4.0 65 MB
+(`Malloc Small` 46 MB, window size unknown). Metal `maximumDrawableCount` 2 vs 3 changed nothing (still three surfaces).
+
+What this says:
+
+- CPU drawing is 5-13 MB lighter than Metal at equal window size, because a layer-backed CPU view keeps one backing
+  surface while a Metal layer holds several drawables. That, not "pixels live in WindowServer", is why the renderer change helps.
+- Window size dominates. An empty CPU-drawn view is already 25 MB at 80x24 and 30 MB at Terminal's default size, before any
+  terminal state exists. **30 MB is plausible at 80x24, not at 1162x597.** The Zig core, grid and scrollback must fit in the
+  remaining ~5 MB at 80x24.
+- Harf spike with the Metal path, atlas 2048: 34 MB; atlas 1024: 28 MB (window ~1083x248 pt). The atlas existed twice
+  (4 MB CPU + 4 MB GPU). The CPU renderer has no atlas.
+- **Real CPU-drawn spike app** (Zig core + CoreText, window 1083x362 pt, 2166x724 px): 30 MB at 12 s, 36 MB on a later sample;
+  `IOSurface` 11 MB, `Malloc Small` 11 MB, no GPU categories. Idle CPU 0.53 s -> 0.78 s cumulative over the sampling interval (no timers).
+  It is not a terminal yet (no grid or PTY), and the window is larger than the 80x24 class, so this is not yet a pass or fail against 30 MB.
+- "Feels faster" is latency, not memory. Keypress-to-pixel is not measured yet.
+
 ## Budget status
 
-- **Idle RSS (brief: under 30 MB): not attainable as stated.** The empty AppKit + Metal window alone is 64-67 MB RSS, because RSS counts shared system-framework pages.
-- **Use `phys_footprint` as the budget metric** (what Activity Monitor calls Memory). Baseline is 26 MB (peak 30 MB), so the original 30 MB figure leaves only ~4 MB for scrollback, atlas and the shell session.
-- **Proposed revision (needs owner confirmation):** idle phys_footprint of an empty shell session under about 40 MB, tracked as baseline + delta; keep RSS as a secondary number only. This 40 MB figure is my proposal, not a measured fact.
-- Idle CPU budget (~0%) is met by the baseline: 0.01% mean.
+- **Owner decision (2026-11-13): target 30 MB `phys_footprint`, CPU-drawn renderer** (replaces Metal; brief section 2).
+- Idle RSS is not a usable budget: an empty AppKit window is ~60-90 MB RSS because RSS counts shared framework pages. Track `phys_footprint`.
+- Status against the target, at the 80x24-class window: empty CPU-drawn view 25 MB. Headroom ~5 MB for the Zig core, grid,
+  scrollback and shaping caches. Not yet measured with the real core.
+- At larger windows the empty view alone reaches 30 MB (1162x597), so the target only holds for small windows unless
+  the backing store is reduced further. Revisit with measured numbers once the real grid exists.
+- Idle CPU budget (~0%) was met by the Phase 0 baseline: 0.01% mean. Re-measure for the CPU renderer (it redraws on dirty rects only).
+- Throughput against GPU terminals (brief section 7) may drop with CPU drawing; measure with vtebench in Phase 3 and revisit.
