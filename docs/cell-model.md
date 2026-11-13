@@ -111,5 +111,10 @@ Copy is the selected clusters in logical order, like a text editor. Examples pri
   Whether this is acceptable, or the input line should be right-aligned, is a design call for the owner.
 - Tashkeel, lam-alef and Arabic-Indic digits render correctly in the fitted panel; box row bars stay in place.
 
+**Al Nile copy differences in `report.txt` (14 pt: `با` instead of `حبا`, `s ف` instead of `s لف`):** explained by reading the demo, not a core bug.
+The demo drag ends at the *centre* of the endpoint cluster and snaps it to the nearest cluster edge. A centre is equidistant from its own two
+edges, so the winner is decided by float rounding and edge order; in both cases the dropped letter is exactly the endpoint cluster. A real
+pointer position has no such tie. No change made.
+
 **Not done:** the real selection/cursor engine (Phase 4/7), mouse hit-testing, pasteboard, ink centring, a decision on typing alignment,
 and any measurement of redraw cost per dirty RTL row.

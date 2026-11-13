@@ -102,7 +102,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.font = fontChoices[fontIdx]
         view.sizePt = sizes[sizeIdx]
         let page = view.scene.geometry(font: view.font, sizePt: view.sizePt, scale: scale).size
-        window.setContentSize(NSSize(width: page.width / scale, height: page.height / scale))
+        var content = NSSize(width: page.width / scale, height: page.height / scale)
+        // Measurement hook (docs/perf.md): HARF_CONTENT_SIZE=WxH pins the window, e.g. 700x420 for the 80x24 class.
+        if let s = ProcessInfo.processInfo.environment["HARF_CONTENT_SIZE"] {
+            let p = s.split(separator: "x").compactMap { Double($0) }
+            if p.count == 2 { content = NSSize(width: p[0], height: p[1]) }
+        }
+        window.setContentSize(content)
         window.title = String(format: "Harf spike (ping 0x%08X) %@ %dpt%@   [<- -> font   up/down size   g grid]",
                               harf_ping(), view.font.label, Int(view.sizePt), view.grid ? " grid" : "")
         view.needsDisplay = true

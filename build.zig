@@ -43,6 +43,11 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib);
 
     const tests = b.addTest(.{ .root_module = core });
+    const run_tests = b.addRunArtifact(tests);
+    // The bidi conformance suites read pinned Unicode data from test/ucd; this downloads it
+    // on first use and re-checks the SHA-256 on every run (a no-op once present).
+    const fetch_ucd = b.addSystemCommand(&.{ "sh", "test/fetch-ucd.sh" });
+    run_tests.step.dependOn(&fetch_ucd.step);
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&b.addRunArtifact(tests).step);
+    test_step.dependOn(&run_tests.step);
 }

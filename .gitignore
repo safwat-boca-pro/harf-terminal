@@ -5,3 +5,4 @@ zig-out/
 .DS_Store
 HANDOFF.md
 .tools/
+test/ucd/

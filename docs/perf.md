@@ -52,6 +52,13 @@ What this says:
 - **Real CPU-drawn spike app** (Zig core + CoreText, window 1083x362 pt, 2166x724 px): 30 MB at 12 s, 36 MB on a later sample;
   `IOSurface` 11 MB, `Malloc Small` 11 MB, no GPU categories. Idle CPU 0.53 s -> 0.78 s cumulative over the sampling interval (no timers).
   It is not a terminal yet (no grid or PTY), and the window is larger than the 80x24 class, so this is not yet a pass or fail against 30 MB.
+- **Same spike app, window pinned to 700x420 pt (80x24 class)** via the `HARF_CONTENT_SIZE=700x420` hook in `main.swift`, Release,
+  Apple M1, macOS 27.0.1, run directly (not through `open`): **28 MB `phys_footprint` at 15 s and still 28 MB at 45 s** (RSS 65 MB then 44 MB).
+  `Malloc Small` 11 MB, `IOSurface` 9.2 MB, `Malloc Metadata` 0.9 MB. Cumulative CPU 0:00.72 -> 0:00.74 over 30 s idle (no timers).
+  Under the 30 MB target by 2 MB, but this is still not a terminal (no grid, PTY, scrollback), and its 11 MB of malloc is the spike's
+  font and layout state, not a measured terminal core. **Unexplained:** `IOSurface` here is 9.2 MB (about two 1400x840 surfaces) versus
+  5 MB in the throwaway `NSView.draw` prototype at the same window size; the real view may hold an extra backing surface. Worth
+  finding before the grid exists, because it is the largest single line the shell controls.
 - "Feels faster" is latency, not memory. Keypress-to-pixel is not measured yet.
 
 ## Budget status
