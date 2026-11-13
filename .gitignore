@@ -1,0 +1,7 @@
+zig-out/
+.zig-cache/
+.build/
+*.app/
+.DS_Store
+HANDOFF.md
+.tools/

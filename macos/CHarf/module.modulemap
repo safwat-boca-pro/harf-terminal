@@ -1,0 +1,5 @@
+module CHarf [system] {
+    header "../../include/harf.h"
+    link "harf"
+    export *
+}

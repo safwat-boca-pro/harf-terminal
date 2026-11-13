@@ -1,0 +1,19 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-latest   # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Zig (must match .zig-version)
+        run: |
+          brew install zig
+          test "$(zig version)" = "$(cat .zig-version)"
+      - name: Zig tests
+        run: zig build test
+      - name: Build app
+        run: macos/build-app.sh
