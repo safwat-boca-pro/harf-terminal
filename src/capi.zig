@@ -5,6 +5,7 @@ const spike = @import("spike.zig");
 const layout = @import("shape/layout.zig");
 const term = @import("term.zig");
 const vt = @import("vt.zig");
+const draw = @import("draw.zig");
 
 /// Phase 0 smoke test. Returns 0x48415246 ("HARF").
 export fn harf_ping() u32 {
@@ -153,6 +154,39 @@ export fn harf_term_paste(t: *HarfTerm, utf8: [*]const u8, len: usize) c_int {
     return 0;
 }
 
+/// Copies the window title the child set into `out` (no NUL). Returns bytes written, cut off at `cap`.
+export fn harf_term_title(t: *HarfTerm, out: [*]u8, cap: usize) usize {
+    var buf: [512]u8 = undefined;
+    const title = t.session.title(&buf);
+    const n = @min(title.len, cap);
+    @memcpy(out[0..n], title[0..n]);
+    return n;
+}
+
+pub const HarfCellMetrics = extern struct { cell_w: f32, cell_h: f32, ascent: f32 };
+
+/// A font at `size_px` device pixels plus its glyph cache. NULL if Menlo is unavailable.
+export fn harf_painter_new(size_px: f32) ?*draw.Painter {
+    return draw.Painter.init(std.heap.smp_allocator, size_px) catch null;
+}
+
+export fn harf_painter_free(p: *draw.Painter) void {
+    p.deinit();
+}
+
+export fn harf_painter_metrics(p: *draw.Painter, out: *HarfCellMetrics) void {
+    const m = p.metrics();
+    out.* = .{ .cell_w = m.cell_w, .cell_h = m.cell_h, .ascent = m.ascent };
+}
+
+/// Draws rows `first_row`..`last_row` (inclusive, clamped) and the cursor into a y-down CGContext in
+/// device pixels; the grid's top-left is the context's origin. Takes the session lock itself.
+export fn harf_term_draw(t: *HarfTerm, p: *draw.Painter, ctx: *ct.CGContext, first_row: u16, last_row: u16) void {
+    const g = t.session.lock();
+    defer t.session.unlock();
+    p.drawRows(g, ctx, first_row, last_row);
+}
+
 /// Re-arms the `wake` callback; call before reading the grid for a redraw.
 export fn harf_term_wake_handled(t: *HarfTerm) void {
     t.session.wakeHandled();
@@ -216,4 +250,5 @@ test {
     _ = @import("pty.zig");
     _ = @import("term.zig");
     _ = @import("keys.zig");
+    _ = @import("draw.zig");
 }

@@ -89,6 +89,22 @@ int harf_term_input(HarfTerm *t, const uint8_t *bytes, size_t len);
 int harf_term_resize(HarfTerm *t, uint16_t cols, uint16_t rows, uint32_t cell_w_px, uint32_t cell_h_px);
 /* UTF-8 text of visible row `row`, trailing blanks trimmed, no NUL. Returns bytes written (cut off at cap). */
 size_t harf_term_row_text(HarfTerm *t, uint16_t row, char *out, size_t cap);
+/* Copies the title the child set (no NUL). Returns bytes written, cut off at cap. */
+size_t harf_term_title(HarfTerm *t, char *out, size_t cap);
+
+/* A font at size_px device pixels with its glyph cache. */
+typedef struct HarfPainter HarfPainter;
+typedef struct {
+    float cell_w, cell_h; /* whole-pixel cell size */
+    float ascent;         /* baseline offset from the top of a cell */
+} HarfCellMetrics;
+HarfPainter *harf_painter_new(float size_px);
+void harf_painter_free(HarfPainter *p);
+void harf_painter_metrics(HarfPainter *p, HarfCellMetrics *out);
+/* Draws rows first_row..last_row (inclusive, clamped to the grid) and the cursor into a y-down
+ * CGContextRef in device pixels; the grid's top-left is the context's origin. Locks the session. */
+void harf_term_draw(HarfTerm *t, HarfPainter *p, void *cg_context, uint16_t first_row, uint16_t last_row);
+
 /* Modifier bits for harf_term_key. */
 #define HARF_MOD_SHIFT 1
 #define HARF_MOD_CTRL 2

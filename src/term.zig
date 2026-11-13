@@ -144,6 +144,16 @@ pub const Session = struct {
         try self.input(out.items);
     }
 
+    /// Copies the window title into `out` under the lock (a slice of `out`, cut off if too long).
+    pub fn title(self: *Session, out: []u8) []const u8 {
+        const t = self.lock();
+        defer self.unlock();
+        const src = t.title();
+        const n = @min(src.len, out.len);
+        @memcpy(out[0..n], src[0..n]);
+        return out[0..n];
+    }
+
     /// Bytes queued for the child and not yet sent.
     pub fn pendingInput(self: *Session) usize {
         _ = c.pthread_mutex_lock(&self.out_lock);
@@ -503,4 +513,19 @@ test "paste reaches the child with newlines as CR" {
     try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "ready", .exact = false }, Row.ok));
     try s.paste("a\nb");
     try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "61 0d 62", .exact = false }, Row.ok));
+}
+
+test "title copy" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf '\\033]0;hi\\007'; sleep 2" } });
+    defer s.deinit();
+    var buf: [16]u8 = undefined;
+    var got = false;
+    var waited: u32 = 0;
+    while (waited < 10_000 and !got) : (waited += 5) {
+        got = std.mem.eql(u8, s.title(&buf), "hi");
+        if (!got) sleepMs(5);
+    }
+    try std.testing.expect(got);
+    var one: [1]u8 = undefined;
+    try std.testing.expectEqualStrings("h", s.title(&one));
 }

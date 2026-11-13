@@ -92,3 +92,6 @@ pub extern fn CGContextSetShouldAntialias(ctx: *CGContext, should: bool) void;
 pub extern fn CGContextSetShouldSmoothFonts(ctx: *CGContext, should: bool) void;
 pub extern fn CGContextSetGrayFillColor(ctx: *CGContext, gray: CGFloat, alpha: CGFloat) void;
 pub extern fn CGContextScaleCTM(ctx: *CGContext, sx: CGFloat, sy: CGFloat) void;
+pub extern fn CGColorSpaceCreateDeviceRGB() ?*const anyopaque;
+pub extern fn CGColorSpaceRelease(space: *const anyopaque) void;
+pub extern fn CGContextClipToRect(ctx: *CGContext, rect: CGRect) void;
