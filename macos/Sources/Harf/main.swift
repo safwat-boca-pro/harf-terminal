@@ -23,6 +23,10 @@ func selfTest() -> Never {
     if !pump(5, until: { c.rowText(0).contains("hello مرحبا") }) { fail("row 0 is '\(c.rowText(0))'") }
     guard let rep = c.view.bitmapImageRepForCachingDisplay(in: c.view.bounds) else { fail("no bitmap") }
     c.view.cacheDisplay(in: c.view.bounds, to: rep)
+    // HARF_SELFTEST_PNG=<path> keeps a picture of the first view for a human to look at.
+    if let path = ProcessInfo.processInfo.environment["HARF_SELFTEST_PNG"], let png = rep.representation(using: .png, properties: [:]) {
+        try? png.write(to: URL(fileURLWithPath: path))
+    }
     let px = Double(rep.pixelsWide) / Double(c.view.bounds.width)
     func ink(_ y0: Double, _ y1: Double) -> Bool {
         let bg = terminalBackground.usingColorSpace(.sRGB)!
@@ -41,6 +45,49 @@ func selfTest() -> Never {
     c.view.setFrameSize(NSSize(width: 600, height: 400))
     if c.gridSize.cols < 40 || c.gridSize.rows < 10 { fail("grid at 600x400 pt is \(c.gridSize)") }
     c.close()
+
+    // 2. Typing (a letter, an Arabic letter, Return) goes through the view's own key path.
+    let echo = ["/bin/sh", "-c", "read x; echo got:$x"]
+    func rows(_ c: TerminalController) -> String { (0..<6).map { c.rowText($0) }.joined(separator: "|") }
+    guard let typing = TerminalController(argv: echo, frame: NSSize(width: 700, height: 420)) else { fail("cannot start typing session") }
+    func key(_ code: UInt16, _ chars: String) {
+        typing.view.handleKey(code: code, mods: 0, characters: chars, isRepeat: false) { typing.sendText(chars) }
+    }
+    key(0, "a")
+    key(46, "م")
+    key(36, "\r")
+    if !pump(5, until: { rows(typing).contains("got:aم") }) { fail("typing: rows are '\(rows(typing))'") }
+    typing.close()
+
+    // 3. Paste, bracketed or not, arrives as typed text.
+    guard let pasting = TerminalController(argv: echo, frame: NSSize(width: 700, height: 420)) else { fail("cannot start paste session") }
+    pasting.paste("x y")
+    pasting.view.handleKey(code: 36, mods: 0, characters: "\r", isRepeat: false) {}
+    if !pump(5, until: { rows(pasting).contains("got:x y") }) { fail("paste: rows are '\(rows(pasting))'") }
+    pasting.close()
+
+    // 4. Title and bell reach the window; a clean exit closes it.
+    guard let sig = TerminalController(argv: ["/bin/sh", "-c", "printf '\\033]0;T1\\007\\007'"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start title session") }
+    let win1 = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
+    win1.contentView = sig.view
+    var bells = 0
+    let bind1 = WindowBinding(window: win1, controller: sig)
+    sig.onBell = { bells += 1 }
+    if !pump(5, until: { bind1.closed }) { fail("a clean exit did not close the window") }
+    if win1.title != "T1" { fail("title is '\(win1.title)'") }
+    if bells != 1 { fail("bell count is \(bells)") }
+
+    // 5. A failing shell keeps its window and says so.
+    guard let bad = TerminalController(argv: ["/bin/sh", "-c", "echo boom; exit 3"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start failing session") }
+    let win2 = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
+    win2.contentView = bad.view
+    let bind2 = WindowBinding(window: win2, controller: bad)
+    if !pump(5, until: { bad.exitStatus == 3 }) { fail("exit status is \(String(describing: bad.exitStatus))") }
+    _ = pump(0.2) { false }
+    if bind2.closed { fail("exit status 3 closed the window") }
+    if !win2.title.contains("exited (3)") { fail("title is '\(win2.title)'") }
+    if !bad.rowText(0).contains("boom") { fail("row 0 is '\(bad.rowText(0))'") }
+    bad.close()
 
     print("selftest ok")
     exit(0)

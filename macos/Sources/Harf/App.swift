@@ -1,11 +1,55 @@
 import AppKit
 
+/// Connects a controller's events to its window: title, bell, and what happens when the shell exits.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class WindowBinding: NSObject, NSWindowDelegate {
+    let window: NSWindow
+    let controller: TerminalController
+    private(set) var closed = false
+
+    init(window: NSWindow, controller: TerminalController) {
+        self.window = window
+        self.controller = controller
+        super.init()
+        window.delegate = self
+        controller.onTitle = { [weak window] in window?.title = $0 }
+        controller.onBell = { NSSound.beep() }
+        controller.onExit = { [weak self] status in
+            guard let self else { return }
+            // A clean exit closes the window. A failure keeps it, so the last output stays readable.
+            if status == 0 { self.window.close() } else { self.window.title = "Harf (exited (\(status)))" }
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        closed = true
+        controller.close()
+    }
+}
+
+@MainActor
+func installMainMenu() {
+    let main = NSMenu()
+    func add(_ title: String, _ items: [(String, Selector, String)]) {
+        let item = NSMenuItem()
+        main.addItem(item)
+        let menu = NSMenu(title: title)
+        for (t, sel, key) in items { menu.addItem(withTitle: t, action: sel, keyEquivalent: key) }
+        item.submenu = menu
+    }
+    add("Harf", [("Quit Harf", #selector(NSApplication.terminate(_:)), "q")])
+    add("Shell", [("Close Window", #selector(NSWindow.performClose(_:)), "w")])
+    add("Edit", [("Paste", #selector(TerminalView.paste(_:)), "v")])
+    NSApp.mainMenu = main
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
-    var controller: TerminalController!
+    var binding: WindowBinding!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installMainMenu()
         // Measurement hook (docs/perf.md): HARF_CONTENT_SIZE=WxH pins the window, e.g. 700x420 for the 80x24 class.
         var content = NSSize(width: 700, height: 420)
         if let s = ProcessInfo.processInfo.environment["HARF_CONTENT_SIZE"] {
@@ -14,19 +58,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         guard let c = TerminalController(argv: nil, frame: content, scale: scale) else { fatalError("cannot start the terminal") }
-        controller = c
         window = NSWindow(contentRect: NSRect(origin: .zero, size: content), styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "Harf"
         window.contentView = c.view
-        window.delegate = self
+        binding = WindowBinding(window: window, controller: c)
         window.center()
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(c.view)
         NSApp.activate()
     }
-
-    func windowWillClose(_ notification: Notification) { controller.close() }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }

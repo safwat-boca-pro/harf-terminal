@@ -123,6 +123,29 @@ final class TerminalController {
         view.needsDisplay = true
     }
 
+    // MARK: input
+
+    /// A key event. Returns true if the terminal handled it (function keys, Control combinations,
+    /// lone modifiers); false means it is a text key and the caller sends its text.
+    func sendKey(code: UInt16, mods: UInt32, text: String, action: Int32 = 0) -> Bool {
+        guard let t = term else { return true }
+        let bytes = Array(text.utf8)
+        return bytes.withUnsafeBufferPointer { harf_term_key(t, code, mods, $0.baseAddress, bytes.count, action) } != 0
+    }
+
+    /// Text typed or composed: goes to the child as UTF-8.
+    func sendText(_ text: String) {
+        guard let t = term, !text.isEmpty else { return }
+        let bytes = Array(text.utf8)
+        _ = bytes.withUnsafeBufferPointer { harf_term_input(t, $0.baseAddress, bytes.count) }
+    }
+
+    func paste(_ text: String) {
+        guard let t = term, !text.isEmpty else { return }
+        let bytes = Array(text.utf8)
+        _ = bytes.withUnsafeBufferPointer { harf_term_paste(t, $0.baseAddress, bytes.count) }
+    }
+
     // MARK: events from the session (already on the main thread)
 
     fileprivate func wakeOnMain() {
@@ -174,6 +197,35 @@ final class TerminalView: NSView {
     override var isFlipped: Bool { true }   // y-down, matches the painter
     override var acceptsFirstResponder: Bool { true }
 
+    /// Text AppKit has composed but not committed (a dead key); kept only so AppKit's state machine works.
+    private var marked = ""
+
+    private static func harfMods(_ f: NSEvent.ModifierFlags) -> UInt32 {
+        var m: UInt32 = 0
+        if f.contains(.shift) { m |= UInt32(HARF_MOD_SHIFT) }
+        if f.contains(.control) { m |= UInt32(HARF_MOD_CTRL) }
+        if f.contains(.option) { m |= UInt32(HARF_MOD_ALT) }
+        if f.contains(.command) { m |= UInt32(HARF_MOD_SUPER) }
+        return m
+    }
+
+    /// Function keys and Control combinations are encoded by the core; everything else is text.
+    /// `text` is called only for text keys (it runs `interpretKeyEvents` in the real path).
+    func handleKey(code: UInt16, mods: UInt32, characters: String, isRepeat: Bool, text: () -> Void) {
+        if mods & UInt32(HARF_MOD_SUPER) != 0 { return }   // Command shortcuts belong to the menu
+        if controller?.sendKey(code: code, mods: mods, text: characters, action: isRepeat ? 2 : 0) == true { return }
+        text()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        handleKey(code: event.keyCode, mods: Self.harfMods(event.modifierFlags), characters: event.characters ?? "",
+                  isRepeat: event.isARepeat) { interpretKeyEvents([event]) }
+    }
+
+    @objc func paste(_ sender: Any?) {
+        if let s = NSPasteboard.general.string(forType: .string) { controller?.paste(s) }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         terminalBackground.setFill()
@@ -190,4 +242,26 @@ final class TerminalView: NSView {
         super.viewDidChangeBackingProperties()
         if let s = window?.backingScaleFactor { controller?.layoutChanged(scale: s) }
     }
+}
+
+// Minimal text input: committed text goes to the child. Marked text is tracked so dead keys
+// (Option+E, then a vowel) compose; full IME is Phase 7.
+extension TerminalView: @preconcurrency NSTextInputClient {
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        marked = ""
+        let text = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
+        controller?.sendText(text)
+    }
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        marked = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
+    }
+    func unmarkText() { marked = "" }
+    func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
+    func markedRange() -> NSRange { marked.isEmpty ? NSRange(location: NSNotFound, length: 0) : NSRange(location: 0, length: marked.utf16.count) }
+    func hasMarkedText() -> Bool { !marked.isEmpty }
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? { nil }
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect { .zero }
+    func characterIndex(for point: NSPoint) -> Int { 0 }
+    override func doCommand(by selector: Selector) {}   // Return, arrows etc. are handled before this
 }
