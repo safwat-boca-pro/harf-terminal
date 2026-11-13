@@ -53,7 +53,7 @@ signed release tarball in a scratch directory, answered the open checks:
 |---|---|
 | Arabic rows | Cells in logical order, one per letter. Tashkeel is inside its base cell (`0645+064E+0651`), lam-alef is two cells, ZWNJ joins the cell before it (`06CC+200C`), emoji are a wide cell plus a spacer. |
 | Throughput (M1, parse into grid only, 64 KiB writes) | 186 to 448 MB/s depending on workload. SIMD only helps Arabic text (285 vs 206 MB/s). |
-| Memory | Bare 80x24 terminal: under 1 MB. Scrollback is capped in bytes and page-granular: 4 MiB limit cost about 3.9 MB. **1 MiB limit holds 1,065 rows at 80 columns**, regardless of content (rows cost a fixed amount per cell, so a wider window holds fewer rows). |
+| Memory | Bare 80x24 terminal: under 1 MB. Scrollback is capped in bytes and page-granular: 4 MiB limit cost about 3.9 MB. **1 MiB limit holds about 570 to 1,160 rows at 80 columns** (history is pruned a whole page at a time, so the count swings between those bounds), regardless of content in the spike; rows cost a fixed amount per cell, so a wider window holds fewer (about 215 to 450 at 200 columns). Corrected 2026-11-13 during slice 1: the first spike sample read 1,065, which was one point in that swing. |
 | Licenses | All permissive. Manifest shipped in the tarball (`deps/libghostty-vt-third-party.json`): libghostty-vt MIT; uucode MIT and Unicode-3.0; wuffs Apache-2.0 or MIT; highway Apache-2.0 or BSD-3 and simdutf Apache-2.0 or MIT (SIMD only); aro MIT and Unicode-3.0 and translate_c MIT (build time). |
 | API fit | Terminal, render state with per-row dirty tracking, cells with grapheme codepoints and styles, cursor, selection, key (kitty protocol), mouse, focus and paste encoders, reply and effect callbacks (pty write, title, bell, clipboard, notification, DA, XTVERSION), OSC 133 selection, search. No PTY. |
 
@@ -64,7 +64,7 @@ absolute app numbers. Signature (minisign) not verified: the tool is not install
 
 Owner's
 - Reuse libghostty-vt (confirmed after the spike). C API only; Swift never sees its headers.
-- Default scrollback **1 MiB** (about 1,065 rows at 80 columns), a setting later.
+- Default scrollback **1 MiB** (about 570 to 1,160 rows at 80 columns), a setting later.
 - Everything else in the brief stands (grid in logical order, CPU-drawn, 30 MB `phys_footprint`).
 
 My calls (please check)

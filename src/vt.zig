@@ -73,6 +73,9 @@ pub const Terminal = struct {
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, @as(?*const anyopaque, @ptrCast(&titleTrampoline))));
         var scrollback = opts.scrollback_bytes;
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &scrollback));
+        // Kitty graphics are compiled in but not wanted in v1: a zero limit stores no images.
+        var image_limit: u64 = 0;
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &image_limit));
         try check(c.ghostty_render_state_new(null, &self.render_state));
         errdefer c.ghostty_render_state_free(self.render_state);
         try check(c.ghostty_render_state_row_iterator_new(null, &self.row_iter));
@@ -103,6 +106,27 @@ pub const Terminal = struct {
             if (!c.ghostty_render_state_row_iterator_next(self.row_iter)) return false;
         }
         return c.ghostty_render_state_row_get(self.row_iter, c.GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, @ptrCast(&self.row_cells)) == c.GHOSTTY_SUCCESS;
+    }
+
+    /// Number of history rows above the visible screen.
+    pub fn scrollbackRows(self: *Terminal) usize {
+        var rows: usize = 0;
+        _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS, &rows);
+        return rows;
+    }
+
+    pub fn size(self: *Terminal) struct { cols: u16, rows: u16 } {
+        var cols: u16 = 0;
+        var rows: u16 = 0;
+        _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_COLS, &cols);
+        _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_ROWS, &rows);
+        return .{ .cols = cols, .rows = rows };
+    }
+
+    /// Changes the grid size (the library reflows). The pixel size of a cell is informational
+    /// (size reports sent to the child); pass 0 if unknown.
+    pub fn resize(self: *Terminal, cols: u16, rows: u16, cell_w_px: u32, cell_h_px: u32) void {
+        _ = c.ghostty_terminal_resize(self.handle, cols, rows, cell_w_px, cell_h_px);
     }
 
     /// The window title set by the child (OSC 0 or 2); empty if none. Valid until the next `write`.
@@ -314,4 +338,49 @@ test "cursor position report goes to write_pty" {
     defer t2.deinit();
     t2.write("ab\x1b[6n");
     try std.testing.expectEqualStrings("\x1b[1;3R", spy2.replyText());
+}
+
+fn writeLines(t: *Terminal, n: usize) void {
+    var buf: [32]u8 = undefined;
+    for (0..n) |i| t.write(std.fmt.bufPrint(&buf, "line {d}\r\n", .{i}) catch unreachable);
+}
+
+test "default scrollback keeps between 500 and 1200 rows at 80 columns" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    writeLines(t, 3000);
+    // History is pruned a whole page at a time, so the count swings with the page boundary;
+    // measured 569 to 1160 over 20,000 lines at 80 columns (215 to 452 at 200 columns).
+    const n = t.scrollbackRows();
+    try std.testing.expect(n >= 500 and n <= 1200);
+}
+
+test "scrollback_bytes = 0 keeps nothing" {
+    const t = try Terminal.init(std.testing.allocator, .{ .scrollback_bytes = 0 });
+    defer t.deinit();
+    writeLines(t, 100);
+    try std.testing.expectEqual(@as(usize, 0), t.scrollbackRows());
+}
+
+test "kitty image storage limit is zero" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var limit: u64 = 1;
+    try std.testing.expectEqual(c.GHOSTTY_SUCCESS, c.ghostty_terminal_get(t.handle, c.GHOSTTY_TERMINAL_DATA_KITTY_IMAGE_STORAGE_LIMIT, &limit));
+    try std.testing.expectEqual(@as(u64, 0), limit);
+}
+
+test "resize to 500x200 and to 1x1 keeps working" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.resize(500, 200, 0, 0);
+    try std.testing.expectEqual(@as(u16, 500), t.size().cols);
+    try std.testing.expectEqual(@as(u16, 200), t.size().rows);
+    t.write("x");
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("x", t.rowText(0, &buf));
+    t.resize(1, 1, 0, 0);
+    try std.testing.expectEqual(@as(u16, 1), t.size().cols);
+    try std.testing.expectEqual(@as(u16, 1), t.size().rows);
+    t.write("hello\r\n");
 }
