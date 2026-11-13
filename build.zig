@@ -36,7 +36,10 @@ pub fn build(b: *std.Build) void {
 
     // libghostty-vt (VT parser + grid), reached through its C API only. translate-c turns the
     // header into the `ghostty_c` module; simd=false keeps it free of C++ dependencies.
-    const ghostty = b.dependency("ghostty", .{ .target = target, .optimize = optimize, .simd = false });
+    // Built optimized even in a Debug build: a Debug libghostty parses about 100x slower, which
+    // makes flood tests and day-to-day runs unusable. ReleaseSafe keeps its safety checks.
+    const ghostty_optimize: std.builtin.OptimizeMode = if (optimize == .debug) .safe else optimize;
+    const ghostty = b.dependency("ghostty", .{ .target = target, .optimize = ghostty_optimize, .simd = false });
     const tc = b.addTranslateC(.{ .root_source_file = b.path("src/vt_c.h"), .target = target, .optimize = optimize });
     tc.defineCMacro("GHOSTTY_STATIC", null);
     tc.addIncludePath(ghostty.path("include"));
@@ -52,7 +55,8 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
-    const tests = b.addTest(.{ .root_module = core });
+    const test_filter = b.option([]const u8, "test-filter", "Run only tests whose name contains this text");
+    const tests = b.addTest(.{ .root_module = core, .filters = if (test_filter) |f| &.{f} else &.{} });
     const run_tests = b.addRunArtifact(tests);
     // The bidi conformance suites read pinned Unicode data from test/ucd; this downloads it
     // on first use and re-checks the SHA-256 on every run (a no-op once present).

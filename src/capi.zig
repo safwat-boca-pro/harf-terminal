@@ -45,4 +45,5 @@ test {
     _ = @import("bidi/bidi.zig");
     _ = @import("vt.zig");
     _ = @import("pty.zig");
+    _ = @import("term.zig");
 }
