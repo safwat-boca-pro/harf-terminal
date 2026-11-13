@@ -4,11 +4,23 @@
 const std = @import("std");
 pub const c = @import("ghostty_c");
 
+/// Events the terminal raises while parsing. They run inside `Terminal.write` on the caller's
+/// thread and must not call `write` on the same terminal.
+pub const Callbacks = struct {
+    ctx: ?*anyopaque = null,
+    /// Bytes the terminal wants sent to the child (answers to queries such as cursor position).
+    write_pty: ?*const fn (ctx: ?*anyopaque, data: []const u8) void = null,
+    bell: ?*const fn (ctx: ?*anyopaque) void = null,
+    /// The new title is already readable with `Terminal.title`.
+    title_changed: ?*const fn (ctx: ?*anyopaque) void = null,
+};
+
 pub const Options = struct {
     cols: u16 = 80,
     rows: u16 = 24,
     /// libghostty keeps history in whole pages, so this is a limit to within about 400 KB.
     scrollback_bytes: usize = 1 << 20,
+    callbacks: Callbacks = .{},
 };
 
 pub const Error = error{ OutOfMemory, Ghostty };
@@ -24,8 +36,24 @@ fn check(r: c.GhosttyResult) Error!void {
     return error.Ghostty;
 }
 
+fn writePtyTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, data: [*c]const u8, len: usize) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(ud.?));
+    if (self.callbacks.write_pty) |f| f(self.callbacks.ctx, data[0..len]);
+}
+
+fn bellTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(ud.?));
+    if (self.callbacks.bell) |f| f(self.callbacks.ctx);
+}
+
+fn titleTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(ud.?));
+    if (self.callbacks.title_changed) |f| f(self.callbacks.ctx);
+}
+
 pub const Terminal = struct {
     gpa: std.mem.Allocator,
+    callbacks: Callbacks,
     handle: c.GhosttyTerminal,
     render_state: c.GhosttyRenderState,
     row_iter: c.GhosttyRenderStateRowIterator,
@@ -35,8 +63,14 @@ pub const Terminal = struct {
         const self = try gpa.create(Terminal);
         errdefer gpa.destroy(self);
         self.gpa = gpa;
+        self.callbacks = opts.callbacks;
         try check(c.ghostty_terminal_new(null, &self.handle, opts.cols, opts.rows));
         errdefer c.ghostty_terminal_free(self.handle);
+        // Callback options take the function pointer (or the userdata pointer) itself as the value.
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_USERDATA, @as(?*const anyopaque, self)));
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_WRITE_PTY, @as(?*const anyopaque, @ptrCast(&writePtyTrampoline))));
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_BELL, @as(?*const anyopaque, @ptrCast(&bellTrampoline))));
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, @as(?*const anyopaque, @ptrCast(&titleTrampoline))));
         var scrollback = opts.scrollback_bytes;
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &scrollback));
         try check(c.ghostty_render_state_new(null, &self.render_state));
@@ -69,6 +103,13 @@ pub const Terminal = struct {
             if (!c.ghostty_render_state_row_iterator_next(self.row_iter)) return false;
         }
         return c.ghostty_render_state_row_get(self.row_iter, c.GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, @ptrCast(&self.row_cells)) == c.GHOSTTY_SUCCESS;
+    }
+
+    /// The window title set by the child (OSC 0 or 2); empty if none. Valid until the next `write`.
+    pub fn title(self: *Terminal) []const u8 {
+        var str: c.GhosttyString = undefined;
+        if (c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_TITLE, &str) != c.GHOSTTY_SUCCESS) return "";
+        return str.ptr[0..str.len];
     }
 
     /// Reads the cell `row_cells` currently points at; `buf` holds its codepoints (at most 16).
@@ -214,4 +255,63 @@ test "utf-8 split across two writes equals one write" {
     const ra = a.rowText(0, &ba);
     try std.testing.expect(ra.len > 0);
     try std.testing.expectEqualStrings(ra, b.rowText(0, &bb));
+}
+
+const Spy = struct {
+    replies: [64]u8 = undefined,
+    reply_len: usize = 0,
+    bells: u32 = 0,
+    titles: u32 = 0,
+
+    fn from(ctx: ?*anyopaque) *Spy {
+        return @ptrCast(@alignCast(ctx.?));
+    }
+    fn writePty(ctx: ?*anyopaque, data: []const u8) void {
+        const self = from(ctx);
+        @memcpy(self.replies[self.reply_len..][0..data.len], data);
+        self.reply_len += data.len;
+    }
+    fn bell(ctx: ?*anyopaque) void {
+        from(ctx).bells += 1;
+    }
+    fn titleChanged(ctx: ?*anyopaque) void {
+        from(ctx).titles += 1;
+    }
+    fn callbacks(self: *Spy) Callbacks {
+        return .{ .ctx = self, .write_pty = writePty, .bell = bell, .title_changed = titleChanged };
+    }
+    fn replyText(self: *const Spy) []const u8 {
+        return self.replies[0..self.reply_len];
+    }
+};
+
+test "bell callback fires" {
+    var spy: Spy = .{};
+    const t = try Terminal.init(std.testing.allocator, .{ .callbacks = spy.callbacks() });
+    defer t.deinit();
+    t.write("\x07");
+    try std.testing.expectEqual(@as(u32, 1), spy.bells);
+}
+
+test "title change callback and getter" {
+    var spy: Spy = .{};
+    const t = try Terminal.init(std.testing.allocator, .{ .callbacks = spy.callbacks() });
+    defer t.deinit();
+    t.write("\x1b]0;hello\x07");
+    try std.testing.expectEqual(@as(u32, 1), spy.titles);
+    try std.testing.expectEqualStrings("hello", t.title());
+}
+
+test "cursor position report goes to write_pty" {
+    var spy: Spy = .{};
+    const t = try Terminal.init(std.testing.allocator, .{ .callbacks = spy.callbacks() });
+    defer t.deinit();
+    t.write("\x1b[6n");
+    try std.testing.expectEqualStrings("\x1b[1;1R", spy.replyText());
+
+    var spy2: Spy = .{};
+    const t2 = try Terminal.init(std.testing.allocator, .{ .callbacks = spy2.callbacks() });
+    defer t2.deinit();
+    t2.write("ab\x1b[6n");
+    try std.testing.expectEqualStrings("\x1b[1;3R", spy2.replyText());
 }
