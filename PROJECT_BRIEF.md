@@ -110,6 +110,8 @@ Starting proposal (to be validated, not locked):
 
 zsh and readline know nothing about bidi; they move the cursor in logical columns. In a line with an LTR base, an RTL run **grows and shifts as you type** (the first typed character moves as the run extends). This is expected behavior in implicit-mode bidi terminals, but it must feel acceptable. Phase 4 should prototype options, for example treating the OSC 133 input region as its own paragraph with direction chosen by first strong character. Study existing behavior before inventing.
 
+Also decide here: what Left/Right mean inside an RTL run (visual vs logical direction) and where Option+Left/Right word jumps stop over Arabic text (see the editing keys in §5).
+
 ### 4.6 Conformance
 
 - Implement UAX #9 in Zig and run **BidiTest.txt** and **BidiCharacterTest.txt** from unicode.org in CI. Download them in a build/test step with a pinned Unicode version, or vendor them if the license allows.
@@ -142,6 +144,18 @@ Claude Code and Codex stress terminals with streaming redraws, boxes, and rich i
 - **Kitty keyboard protocol** (so Shift+Enter inserts a newline, plus modifiers in general).
 - **OSC 8** hyperlinks, **OSC 52** clipboard (with a permission setting), **OSC 9 / OSC 777** notifications.
 - Common terminal queries and replies (DA1/DA2, DSR/cursor position report, OSC 10/11 color queries for theme detection, XTVERSION). Verify against what Claude Code and Codex actually send.
+- **Editor-style line editing keys.** The terminal does not edit the line; the Swift shell maps these keys to bytes zsh/readline already understand:
+
+  | Key | Sends |
+  |---|---|
+  | Option+Left / Right | `ESC b` / `ESC f` (word back / forward) |
+  | Option+Backspace | `ESC DEL` (delete word back) |
+  | Option+Delete (fn+Option+Backspace) | `ESC d` (delete word ahead) |
+  | Cmd+Left / Right | `^A` / `^E` (line start / end) |
+  | Cmd+Backspace | `^U` (delete to line start) |
+  | Cmd+Delete (forward) | `^K` (delete to line end) |
+
+  These are the defaults when the app has not enabled the kitty keyboard protocol; when it has, send the full modifier encoding instead. Option-as-Meta is a setting, since Option also types compose/Arabic characters. All bindings user-remappable.
 - Underline styles/colors, cursor shape (DECSCUSR), wide characters and emoji widths.
 - Correct **alternate screen** and **scrollback** behavior, plus resize reflow that does not corrupt inline UIs.
 
@@ -159,6 +173,12 @@ Test matrix: shell, vim/neovim, tmux, htop, less, fzf, **Claude Code**, **Codex 
 - **Tabs and splits** for parallel agent sessions, fast session restore.
 - **Scrollback search** that is bidi-aware (search in logical text, highlight in visual positions).
 - **Large-paste guard** (confirm before pasting very large or multi-line content).
+- **Default shortcuts** (all remappable; editing keys are in §5):
+  - Cmd+Up / Down: jump to previous / next prompt (OSC 133 marks).
+  - Cmd+K clear, Cmd+F find, Cmd+C / V copy and paste.
+  - Cmd+T / W new / close tab, Cmd+D split, Cmd+1..9 switch tab.
+  - Cmd-click opens OSC 8 hyperlinks (and `path:line:col`, above); Option-click at the prompt moves the cursor there by sending arrow keys.
+  - Later, depends on shell or kitty-protocol support: Cmd+Shift+Left / Right select to line edge, Cmd+Z undo at the prompt (`^_`).
 - Sensible defaults, plain-text config file, hot reload of config and themes, light/dark themes.
 
 ### v2 (parked, needs a permission model)
@@ -215,7 +235,8 @@ Test matrix: shell, vim/neovim, tmux, htop, less, fzf, **Claude Code**, **Codex 
 
 **Phase 6: Developer UX (§6, v1 list)**
 
-**Phase 7: Selection, copy/paste, IME and Arabic keyboard input, polish, benchmarks against §7**
+**Phase 7: Selection, copy/paste, IME and Arabic keyboard input, editor-style editing keys (§5) and remapping, polish, benchmarks against §7**
+- Phase 3 only needs raw key encoding; the Option/Cmd bindings land here (or earlier if the daily-usable bar in Phase 3 needs them).
 
 ---
 
