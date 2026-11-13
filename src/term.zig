@@ -27,6 +27,9 @@ pub const Options = struct {
     callbacks: Callbacks = .{},
 };
 
+/// Most bytes `Session.input` queues before refusing more.
+pub const max_pending_input: usize = 64 << 20;
+
 pub const Session = struct {
     gpa: std.mem.Allocator,
     pty: pty.Pty,
@@ -35,8 +38,14 @@ pub const Session = struct {
     thread: ?std.Thread = null,
     /// Guards `term`. Held by the I/O thread while parsing and by drawing code while reading cells.
     term_lock: c.pthread_mutex_t = .{},
-    /// Serializes writes to the PTY (typed input from the shell, replies from the parser).
-    write_lock: c.pthread_mutex_t = .{},
+    /// Guards `out_queue`. Taken after `term_lock` when both are needed, never before.
+    out_lock: c.pthread_mutex_t = .{},
+    /// Bytes for the child (typed input, pasted text, parser replies), oldest first. Only the I/O
+    /// thread writes them to the PTY, so no caller ever waits on a child that is not reading.
+    out_queue: std.ArrayList(u8) = .empty,
+    out_head: usize = 0,
+    /// Written by `input` to wake the I/O thread; it then polls for POLLOUT.
+    kick_pipe: [2]c_int = .{ -1, -1 },
     /// `deinit` writes to [1] to wake the I/O thread, which polls [0] together with the PTY.
     stop_pipe: [2]c_int = .{ -1, -1 },
     wake_pending: std.atomic.Value(bool) = .init(false),
@@ -54,6 +63,16 @@ pub const Session = struct {
             _ = c.close(self.stop_pipe[0]);
             _ = c.close(self.stop_pipe[1]);
         }
+        if (c.pipe(&self.kick_pipe) != 0) return error.PipeFailed;
+        for (self.kick_pipe) |fd| {
+            pty.setCloexec(fd);
+            pty.setNonblock(fd);
+        }
+        errdefer {
+            _ = c.close(self.kick_pipe[0]);
+            _ = c.close(self.kick_pipe[1]);
+        }
+        errdefer self.out_queue.deinit(gpa);
         self.term = try vt.Terminal.init(gpa, .{
             .cols = opts.cols,
             .rows = opts.rows,
@@ -78,14 +97,47 @@ pub const Session = struct {
         self.term.deinit();
         _ = c.close(self.stop_pipe[0]);
         _ = c.close(self.stop_pipe[1]);
+        _ = c.close(self.kick_pipe[0]);
+        _ = c.close(self.kick_pipe[1]);
+        self.out_queue.deinit(self.gpa);
         self.gpa.destroy(self);
     }
 
-    /// Sends bytes to the child as if typed. Blocks while the child is not reading.
+    /// Queues bytes for the child as if typed; returns at once. The I/O thread sends them when the
+    /// child is ready to read. Fails with `error.InputQueueFull` past `max_pending_input` queued bytes.
     pub fn input(self: *Session, bytes: []const u8) !void {
-        _ = c.pthread_mutex_lock(&self.write_lock);
-        defer _ = c.pthread_mutex_unlock(&self.write_lock);
-        try self.pty.write(bytes);
+        if (bytes.len == 0) return;
+        {
+            _ = c.pthread_mutex_lock(&self.out_lock);
+            defer _ = c.pthread_mutex_unlock(&self.out_lock);
+            if (self.out_queue.items.len - self.out_head + bytes.len > max_pending_input) return error.InputQueueFull;
+            try self.out_queue.appendSlice(self.gpa, bytes);
+        }
+        _ = c.write(self.kick_pipe[1], "k", 1); // a full pipe means a wake-up is already pending
+    }
+
+    /// Bytes queued for the child and not yet sent.
+    pub fn pendingInput(self: *Session) usize {
+        _ = c.pthread_mutex_lock(&self.out_lock);
+        defer _ = c.pthread_mutex_unlock(&self.out_lock);
+        return self.out_queue.items.len - self.out_head;
+    }
+
+    /// Sends as much queued input as the child takes right now. I/O thread only.
+    fn flushOutput(self: *Session) void {
+        _ = c.pthread_mutex_lock(&self.out_lock);
+        defer _ = c.pthread_mutex_unlock(&self.out_lock);
+        while (self.out_head < self.out_queue.items.len) {
+            const n = self.pty.writeSome(self.out_queue.items[self.out_head..]) catch {
+                self.out_queue.clearRetainingCapacity(); // the child is gone: nobody will read these
+                self.out_head = 0;
+                return;
+            };
+            if (n == 0) return;
+            self.out_head += n;
+        }
+        self.out_queue.clearRetainingCapacity();
+        self.out_head = 0;
     }
 
     /// Resizes the grid and the PTY. `cell_w_px` and `cell_h_px` are the size of one cell.
@@ -132,24 +184,35 @@ pub const Session = struct {
 
     fn ioLoop(self: *Session) void {
         var buf: [64 * 1024]u8 = undefined;
-        var fds = [2]c.pollfd{
+        var fds = [3]c.pollfd{
             .{ .fd = self.pty.fd, .events = c.POLL.IN, .revents = 0 },
             .{ .fd = self.stop_pipe[0], .events = c.POLL.IN, .revents = 0 },
+            .{ .fd = self.kick_pipe[0], .events = c.POLL.IN, .revents = 0 },
         };
+        const readable = c.POLL.IN | c.POLL.HUP | c.POLL.ERR | c.POLL.NVAL;
         while (true) {
+            // Watch for POLLOUT only while there is something to send: idle means no wake-ups.
+            fds[0].events = if (self.pendingInput() > 0) c.POLL.IN | c.POLL.OUT else c.POLL.IN;
             const r = c.poll(&fds, fds.len, -1);
             if (r < 0) {
                 if (std.posix.errno(@as(isize, r)) == .INTR) continue;
                 break;
             }
             if (fds[1].revents != 0) return; // deinit: it hangs up on the child and reaps it
-            if (fds[0].revents == 0) continue;
-            const n = self.pty.read(&buf) catch break;
-            if (n == 0) break;
-            _ = c.pthread_mutex_lock(&self.term_lock);
-            self.term.write(buf[0..n]);
-            _ = c.pthread_mutex_unlock(&self.term_lock);
-            self.requestWake();
+            if (fds[2].revents != 0) {
+                var junk: [64]u8 = undefined;
+                _ = c.read(self.kick_pipe[0], &junk, junk.len);
+            }
+            // Read first: output must drain even while input is stuck, or both sides wait on each other.
+            if (fds[0].revents & readable != 0) {
+                const n = self.pty.read(&buf) catch break;
+                if (n == 0) break;
+                _ = c.pthread_mutex_lock(&self.term_lock);
+                self.term.write(buf[0..n]);
+                _ = c.pthread_mutex_unlock(&self.term_lock);
+                self.requestWake();
+            }
+            if (self.pendingInput() > 0) self.flushOutput();
         }
         // The child closed its side: reap it and report.
         const status = self.pty.wait();
@@ -160,7 +223,7 @@ pub const Session = struct {
     // Parser callbacks run inside Terminal.write on the I/O thread, with term_lock held.
     fn onWritePty(ctx: ?*anyopaque, data: []const u8) void {
         const self: *Session = @ptrCast(@alignCast(ctx.?));
-        self.input(data) catch {}; // a reply the child never reads is not an error worth stopping for
+        self.input(data) catch {}; // a reply that does not fit the queue is dropped
     }
 
     fn onBell(ctx: ?*anyopaque) void {
@@ -329,4 +392,56 @@ test "a child does not inherit another session's descriptors" {
     defer b.deinit();
     try std.testing.expect(waitFor(10_000, Row{ .s = b, .want = "done" }, Row.ok));
     try std.testing.expect(!(Row{ .s = b, .want = "leaked", .exact = false }).ok());
+}
+
+fn nowMs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+}
+
+test "input never blocks" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 3" } });
+    defer s.deinit();
+    const big = try std.testing.allocator.alloc(u8, 8 << 20);
+    defer std.testing.allocator.free(big);
+    @memset(big, 'x');
+    const t0 = nowMs();
+    try s.input(big);
+    try std.testing.expect(nowMs() - t0 < 200);
+}
+
+test "queued input reaches the child in order" {
+    const script = "stty raw -echo; echo ready; sleep 1; head -c 1000000 | wc -c";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "ready", .exact = false }, Row.ok));
+    const data = try std.testing.allocator.alloc(u8, 1_000_000);
+    defer std.testing.allocator.free(data);
+    @memset(data, 'y');
+    try s.input(data);
+    try std.testing.expect(waitFor(20_000, Row{ .s = s, .want = "1000000", .exact = false }, Row.ok));
+}
+
+test "resize with size reports does not block" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf '\\033[?2048h'; sleep 3" } });
+    defer s.deinit();
+    sleepMs(300); // let the mode switch be parsed
+    const big = try std.testing.allocator.alloc(u8, 4 << 20);
+    defer std.testing.allocator.free(big);
+    @memset(big, 'x');
+    try s.input(big);
+    const t0 = nowMs();
+    try s.resize(100, 30, 8, 16);
+    try std.testing.expect(nowMs() - t0 < 500);
+}
+
+test "input over the cap is refused" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 3" } });
+    defer s.deinit();
+    const big = try std.testing.allocator.alloc(u8, max_pending_input + 1);
+    defer std.testing.allocator.free(big);
+    @memset(big, 'x');
+    try std.testing.expectError(error.InputQueueFull, s.input(big));
+    try std.testing.expectEqual(@as(usize, 0), s.pendingInput());
 }

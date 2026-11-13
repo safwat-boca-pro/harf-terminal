@@ -7,6 +7,7 @@ extern "c" fn forkpty(amaster: *c_int, name: ?[*]u8, termp: ?*const c.termios, w
 extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
 /// _IOW('t', 103, struct winsize) on Darwin; std.c.T has no entry for macOS.
 const TIOCSWINSZ: c_ulong = 0x80087467;
+const O_NONBLOCK: c_int = 0x4;
 
 pub const SpawnOptions = struct {
     /// `argv[0]` is the program to run, as a path (no PATH lookup).
@@ -20,6 +21,17 @@ pub const SpawnOptions = struct {
 
 /// Marks `fd` close-on-exec, so children started later do not inherit it. Without this a second
 /// session's shell would hold the first session's PTY master open and never see it hang up.
+/// Makes reads and writes on `fd` return EAGAIN instead of waiting.
+pub fn setNonblock(fd: c_int) void {
+    const flags = c.fcntl(fd, 3, @as(c_int, 0)); // F_GETFL
+    if (flags >= 0) _ = c.fcntl(fd, 4, flags | O_NONBLOCK); // F_SETFL
+}
+
+fn waitReady(fd: c_int, events: i16) void {
+    var p = [1]c.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+    _ = c.poll(&p, 1, -1);
+}
+
 pub fn setCloexec(fd: c_int) void {
     const f_setfd = 2; // F_SETFD
     const fd_cloexec = 1; // FD_CLOEXEC
@@ -96,6 +108,7 @@ pub const Pty = struct {
             c._exit(127);
         }
         setCloexec(master);
+        setNonblock(master); // reads and writes go through poll; see read, write and writeSome
         return .{ .fd = master, .pid = pid };
     }
 
@@ -123,6 +136,7 @@ pub const Pty = struct {
             if (n >= 0) return @intCast(n);
             switch (std.posix.errno(n)) {
                 .INTR => continue,
+                .AGAIN => waitReady(self.fd, c.POLL.IN),
                 .IO => return 0, // macOS reports the closed slave as EIO
                 else => return error.ReadFailed,
             }
@@ -135,10 +149,29 @@ pub const Pty = struct {
         while (rest.len > 0) {
             const n = c.write(self.fd, rest.ptr, rest.len);
             if (n < 0) {
-                if (std.posix.errno(n) == .INTR) continue;
-                return error.WriteFailed;
+                switch (std.posix.errno(n)) {
+                    .INTR => continue,
+                    .AGAIN => {
+                        waitReady(self.fd, c.POLL.OUT);
+                        continue;
+                    },
+                    else => return error.WriteFailed,
+                }
             }
             rest = rest[@intCast(n)..];
+        }
+    }
+
+    /// One write that never waits: returns how many bytes the child's input queue took (0 if it is full).
+    pub fn writeSome(self: *Pty, bytes: []const u8) !usize {
+        while (true) {
+            const n = c.write(self.fd, bytes.ptr, bytes.len);
+            if (n >= 0) return @intCast(n);
+            switch (std.posix.errno(n)) {
+                .INTR => continue,
+                .AGAIN => return 0,
+                else => return error.WriteFailed,
+            }
         }
     }
 
@@ -190,8 +223,10 @@ pub const Pty = struct {
 
     /// Reaps the child (hanging up on it if it is still running) and closes the PTY.
     pub fn deinit(self: *Pty) void {
-        self.kill();
+        // Close the master first: a child with unread output on its terminal cannot exit until
+        // that output is drained or the master is gone (and the close also hangs up its terminal).
         _ = c.close(self.fd);
+        self.kill();
     }
 };
 
