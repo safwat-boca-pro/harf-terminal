@@ -25,6 +25,8 @@ pub const Options = struct {
 
 pub const Error = error{ OutOfMemory, Ghostty };
 
+pub const KeyAction = enum(u8) { press = 0, release = 1, repeat = 2 };
+
 pub const Wide = enum { narrow, wide, spacer_tail, spacer_head };
 
 /// One grid cell: its codepoints (base plus combining marks) and its width role.
@@ -58,6 +60,8 @@ pub const Terminal = struct {
     render_state: c.GhosttyRenderState,
     row_iter: c.GhosttyRenderStateRowIterator,
     row_cells: c.GhosttyRenderStateRowCells,
+    key_encoder: c.GhosttyKeyEncoder,
+    key_event: c.GhosttyKeyEvent,
 
     pub fn init(gpa: std.mem.Allocator, opts: Options) Error!*Terminal {
         const self = try gpa.create(Terminal);
@@ -81,10 +85,16 @@ pub const Terminal = struct {
         try check(c.ghostty_render_state_row_iterator_new(null, &self.row_iter));
         errdefer c.ghostty_render_state_row_iterator_free(self.row_iter);
         try check(c.ghostty_render_state_row_cells_new(null, &self.row_cells));
+        errdefer c.ghostty_render_state_row_cells_free(self.row_cells);
+        try check(c.ghostty_key_encoder_new(null, &self.key_encoder));
+        errdefer c.ghostty_key_encoder_free(self.key_encoder);
+        try check(c.ghostty_key_event_new(null, &self.key_event));
         return self;
     }
 
     pub fn deinit(self: *Terminal) void {
+        c.ghostty_key_event_free(self.key_event);
+        c.ghostty_key_encoder_free(self.key_encoder);
         c.ghostty_render_state_row_cells_free(self.row_cells);
         c.ghostty_render_state_row_iterator_free(self.row_iter);
         c.ghostty_render_state_free(self.render_state);
@@ -134,6 +144,53 @@ pub const Terminal = struct {
         _ = c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &y);
         _ = c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE, &vis);
         return .{ .col = x, .row = y, .visible = vis };
+    }
+
+    /// The bytes a key press sends to the child, for the terminal's current modes (application
+    /// cursor keys, kitty flags). `mods` uses the bits of `keys.Mods`; `utf8` is the text the
+    /// platform produced for the event (may be empty). Empty result: nothing to send.
+    pub fn encodeKey(self: *Terminal, key: c.GhosttyKey, mods: u32, utf8: []const u8, action: KeyAction, out: []u8) []const u8 {
+        _ = c.ghostty_key_encoder_set_from_terminal(self.key_encoder, self.handle);
+        _ = c.ghostty_key_event_set_key(self.key_event, key);
+        _ = c.ghostty_key_event_set_mods(self.key_event, @intCast(mods & 0xF));
+        _ = c.ghostty_key_event_set_action(self.key_event, switch (action) {
+            .press => c.GHOSTTY_KEY_ACTION_PRESS,
+            .release => c.GHOSTTY_KEY_ACTION_RELEASE,
+            .repeat => c.GHOSTTY_KEY_ACTION_REPEAT,
+        });
+        // Control characters (AppKit reports "\x03" for Ctrl+C) are derived from the key and
+        // modifiers; passing them as text makes the encoder emit a CSI u sequence instead.
+        const text = if (std.mem.indexOfAny(u8, utf8, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f") != null) "" else utf8;
+        _ = c.ghostty_key_event_set_utf8(self.key_event, .{ .ptr = text.ptr, .len = text.len });
+        var written: usize = 0;
+        if (c.ghostty_key_encoder_encode(self.key_encoder, self.key_event, out.ptr, out.len, &written) != c.GHOSTTY_SUCCESS) return out[0..0];
+        return out[0..written];
+    }
+
+    pub fn bracketedPaste(self: *Terminal) bool {
+        var cfg: c.GhosttyTerminalModeConfig = .{ .mode = c.ghostty_mode_new(2004, false), .value = false };
+        _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_MODE, &cfg);
+        return cfg.value;
+    }
+
+    /// Appends what pasting `text` sends to the child: newlines become CR, and in bracketed
+    /// paste mode the text is wrapped in ESC[200~ ... ESC[201~. The library removes control
+    /// characters that could end a bracketed paste early.
+    pub fn encodePaste(self: *Terminal, text: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Allocator) !void {
+        if (text.len == 0) return;
+        const copy = try gpa.dupe(u8, text); // the encoder edits its input in place
+        defer gpa.free(copy);
+        var needed: usize = 0;
+        const bracketed = self.bracketedPaste();
+        const first = c.ghostty_paste_encode(copy.ptr, copy.len, bracketed, null, 0, &needed);
+        if (first != c.GHOSTTY_OUT_OF_SPACE and first != c.GHOSTTY_SUCCESS) return error.Ghostty;
+        const start = out.items.len;
+        try out.resize(gpa, start + needed);
+        const copy2 = try gpa.dupe(u8, text);
+        defer gpa.free(copy2);
+        var written: usize = 0;
+        if (c.ghostty_paste_encode(copy2.ptr, copy2.len, bracketed, out.items[start..].ptr, needed, &written) != c.GHOSTTY_SUCCESS) return error.Ghostty;
+        out.shrinkRetainingCapacity(start + written);
     }
 
     /// Number of history rows above the visible screen.
@@ -454,4 +511,44 @@ test "selectRow does not refresh" {
     try std.testing.expect(t.update());
     try std.testing.expect(t.selectRow(0));
     try std.testing.expectEqualSlices(u21, &.{'x'}, t.cellInRow(0, &buf).cps);
+}
+
+fn encFor(t: *Terminal, code: u16, mods: u32, utf8: []const u8, buf: []u8) []const u8 {
+    return t.encodeKey(@import("keys.zig").fromMac(code).?, mods, utf8, .press, buf);
+}
+
+test "up arrow, normal and application mode" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1b[A", encFor(t, 126, 0, "", &buf));
+    t.write("\x1b[?1h");
+    try std.testing.expectEqualStrings("\x1bOA", encFor(t, 126, 0, "", &buf));
+}
+
+test "ctrl c, enter, backspace, shift tab" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("\x03", encFor(t, 8, 2, "", &buf));
+    try std.testing.expectEqualStrings("\x03", encFor(t, 8, 2, "\x03", &buf));
+    try std.testing.expectEqualStrings("\r", encFor(t, 36, 0, "\r", &buf));
+    try std.testing.expectEqualStrings("\x7f", encFor(t, 51, 0, "\x7f", &buf));
+    try std.testing.expectEqualStrings("\x1b[Z", encFor(t, 48, 1, "\t", &buf));
+}
+
+test "paste: newlines, bracketed mode, and an embedded end marker" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try t.encodePaste("a\nb", &out, std.testing.allocator);
+    try std.testing.expectEqualStrings("a\rb", out.items);
+    out.clearRetainingCapacity();
+    t.write("\x1b[?2004h");
+    try t.encodePaste("a\nb", &out, std.testing.allocator);
+    try std.testing.expectEqualStrings("\x1b[200~a\nb\x1b[201~", out.items); // bracketed text keeps its newlines
+    out.clearRetainingCapacity();
+    try t.encodePaste("x\x1b[201~y", &out, std.testing.allocator);
+    try std.testing.expect(std.mem.indexOf(u8, out.items[6 .. out.items.len - 6], "\x1b") == null);
 }

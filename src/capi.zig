@@ -4,6 +4,7 @@ const ct = @import("shape/ct.zig");
 const spike = @import("spike.zig");
 const layout = @import("shape/layout.zig");
 const term = @import("term.zig");
+const vt = @import("vt.zig");
 
 /// Phase 0 smoke test. Returns 0x48415246 ("HARF").
 export fn harf_ping() u32 {
@@ -131,6 +132,27 @@ export fn harf_term_row_text(t: *HarfTerm, row: u16, out: [*]u8, cap: usize) usi
     return g.rowText(row, out[0..cap]).len;
 }
 
+/// Sends a key event. `keycode` is the macOS virtual keycode, `mods` the HARF_MOD_* bits, `utf8` the
+/// text AppKit produced (may be empty), `action` 0 press, 1 release, 2 repeat. Returns 1 if the key was
+/// handled (and its bytes queued), 0 if it is a text key that the caller should send with
+/// harf_term_input, -1 on error.
+export fn harf_term_key(t: *HarfTerm, keycode: u16, mods: u32, utf8: ?[*]const u8, len: usize, action: c_int) c_int {
+    const act: vt.KeyAction = switch (action) {
+        1 => .release,
+        2 => .repeat,
+        else => .press,
+    };
+    const text: []const u8 = if (utf8) |p| p[0..len] else "";
+    const handled = t.session.key(keycode, mods, text, act) catch return -1;
+    return if (handled) 1 else 0;
+}
+
+/// Pastes text, framed for the terminal's paste mode. 0 on success.
+export fn harf_term_paste(t: *HarfTerm, utf8: [*]const u8, len: usize) c_int {
+    t.session.paste(utf8[0..len]) catch return -1;
+    return 0;
+}
+
 /// Re-arms the `wake` callback; call before reading the grid for a redraw.
 export fn harf_term_wake_handled(t: *HarfTerm) void {
     t.session.wakeHandled();
@@ -167,6 +189,16 @@ test "harf_term round trip through the C ABI" {
     try std.testing.expectEqualStrings("hi", buf[0..2]);
 }
 
+test "harf_term_key and harf_term_paste" {
+    const argv = [_:null]?[*:0]const u8{ "/bin/cat", null };
+    const t = harf_term_new(80, 24, 1 << 20, &argv, null) orelse return error.TermNotCreated;
+    defer harf_term_free(t);
+    try std.testing.expectEqual(@as(c_int, 1), harf_term_key(t, 126, 0, null, 0, 0)); // up arrow
+    try std.testing.expectEqual(@as(c_int, 1), harf_term_key(t, 56, 1, null, 0, 0)); // shift alone
+    try std.testing.expectEqual(@as(c_int, 0), harf_term_key(t, 200, 0, "x", 1, 0)); // unknown key: text path
+    try std.testing.expectEqual(@as(c_int, 0), harf_term_paste(t, "hi", 2));
+}
+
 test "harf_term_new rejects zero size" {
     const cb: HarfTermCallbacks = .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null };
     try std.testing.expect(harf_term_new(0, 24, 1 << 20, null, &cb) == null);
@@ -183,4 +215,5 @@ test {
     _ = @import("vt.zig");
     _ = @import("pty.zig");
     _ = @import("term.zig");
+    _ = @import("keys.zig");
 }

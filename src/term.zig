@@ -3,6 +3,7 @@
 const std = @import("std");
 const vt = @import("vt.zig");
 const pty = @import("pty.zig");
+const keys = @import("keys.zig");
 
 const c = std.c;
 
@@ -114,6 +115,33 @@ pub const Session = struct {
             try self.out_queue.appendSlice(self.gpa, bytes);
         }
         _ = c.write(self.kick_pipe[1], "k", 1); // a full pipe means a wake-up is already pending
+    }
+
+    /// Handles a key event the way a terminal must: function keys, and any key with Control held,
+    /// are encoded for the terminal's current modes and queued. Returns false for text keys, which
+    /// the caller sends as text through `input` (that keeps dead keys and Arabic layouts working).
+    pub fn key(self: *Session, keycode: u16, mods: u32, utf8: []const u8, action: vt.KeyAction) !bool {
+        if (keys.isModifierKeycode(keycode)) return true; // nothing to send
+        const k = keys.fromMac(keycode) orelse return false;
+        if (!keys.isFunctional(k) and mods & keys.Mods.ctrl == 0) return false;
+        var buf: [128]u8 = undefined;
+        const t = self.lock();
+        const bytes = t.encodeKey(k, mods, utf8, action, &buf);
+        self.unlock();
+        try self.input(bytes);
+        return true;
+    }
+
+    /// Queues pasted text, framed for the terminal's current paste mode.
+    pub fn paste(self: *Session, text: []const u8) !void {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.gpa);
+        {
+            const t = self.lock();
+            defer self.unlock();
+            try t.encodePaste(text, &out, self.gpa);
+        }
+        try self.input(out.items);
     }
 
     /// Bytes queued for the child and not yet sent.
@@ -444,4 +472,35 @@ test "input over the cap is refused" {
     @memset(big, 'x');
     try std.testing.expectError(error.InputQueueFull, s.input(big));
     try std.testing.expectEqual(@as(usize, 0), s.pendingInput());
+}
+
+test "key: text keys are left to the text path, Arabic text arrives intact" {
+    const script = "stty raw -echo; echo ready; dd bs=1 count=2 2>/dev/null | od -An -tx1 | tr -s ' '";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(!try s.key(0, 0, "ش", .press)); // physical A on an Arabic layout
+    try std.testing.expect(!try s.key(200, 0, "م", .press)); // unknown keycode
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "ready", .exact = false }, Row.ok));
+    try s.input("م");
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "d9 85", .exact = false }, Row.ok));
+}
+
+test "key: arrows and ctrl c are encoded, modifier keys send nothing" {
+    const script = "stty raw -echo; echo ready; dd bs=1 count=4 2>/dev/null | od -An -tx1 | tr -s ' '";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "ready", .exact = false }, Row.ok));
+    try std.testing.expect(try s.key(56, 1, "", .press)); // shift alone
+    try std.testing.expect(try s.key(126, 0, "", .press)); // up arrow: ESC [ A (3 bytes)
+    try std.testing.expect(try s.key(8, keys.Mods.ctrl, "\x03", .press)); // ctrl c: 1 byte
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "1b 5b 41 03", .exact = false }, Row.ok));
+}
+
+test "paste reaches the child with newlines as CR" {
+    const script = "stty raw -echo; echo ready; dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -s ' '";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "ready", .exact = false }, Row.ok));
+    try s.paste("a\nb");
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "61 0d 62", .exact = false }, Row.ok));
 }

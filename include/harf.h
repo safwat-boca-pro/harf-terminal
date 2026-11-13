@@ -89,6 +89,17 @@ int harf_term_input(HarfTerm *t, const uint8_t *bytes, size_t len);
 int harf_term_resize(HarfTerm *t, uint16_t cols, uint16_t rows, uint32_t cell_w_px, uint32_t cell_h_px);
 /* UTF-8 text of visible row `row`, trailing blanks trimmed, no NUL. Returns bytes written (cut off at cap). */
 size_t harf_term_row_text(HarfTerm *t, uint16_t row, char *out, size_t cap);
+/* Modifier bits for harf_term_key. */
+#define HARF_MOD_SHIFT 1
+#define HARF_MOD_CTRL 2
+#define HARF_MOD_ALT 4
+#define HARF_MOD_SUPER 8
+/* keycode: macOS virtual keycode. utf8: the text AppKit produced for the event (may be empty).
+ * action: 0 press, 1 release, 2 repeat. Returns 1 if handled (function keys, Control combinations,
+ * lone modifiers: bytes were queued), 0 if it is a text key to send with harf_term_input, -1 on error. */
+int harf_term_key(HarfTerm *t, uint16_t keycode, uint32_t mods, const uint8_t *utf8, size_t len, int action);
+/* Pastes text, framed for the terminal's paste mode (bracketed, newlines as CR). 0 = ok. */
+int harf_term_paste(HarfTerm *t, const uint8_t *utf8, size_t len);
 void harf_term_wake_handled(HarfTerm *t);
 /* The child's exit code once it has ended and its output is parsed; -1 while it runs. */
 int harf_term_exit_status(HarfTerm *t);
