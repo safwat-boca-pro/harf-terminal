@@ -44,4 +44,5 @@ test {
     _ = @import("shape/layout.zig");
     _ = @import("bidi/bidi.zig");
     _ = @import("vt.zig");
+    _ = @import("pty.zig");
 }
