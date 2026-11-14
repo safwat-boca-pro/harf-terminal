@@ -385,6 +385,42 @@ test "selection through the C ABI: a click on a shaped Arabic row selects the le
     try std.testing.expect(harf_term_selection_text(t, &len) == null);
 }
 
+test "selection through the C ABI: the second cell of lam-alef is its own target" {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "printf '\\xd9\\x84\\xd8\\xa7 \\xd9\\x85'; sleep 5", null }; // lam, alef, a blank, meem
+    const t = harf_term_new(20, 3, 1 << 20, &argv, null) orelse return error.TermNotCreated;
+    defer harf_term_free(t);
+    const p = harf_painter_new(28) orelse return error.NoPainter;
+    defer harf_painter_free(p);
+    var buf: [64]u8 = undefined;
+    var waited: u32 = 0;
+    while (harf_term_row_text(t, 0, &buf, buf.len) < 7 and waited < 10_000) : (waited += 5) {
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    // pixel x of columns 1 (the alef) and 2 (the blank) from the painter's own hit-test
+    var x1: f64 = 0;
+    var x2: f64 = 0;
+    {
+        const g = t.session.lock();
+        defer t.session.unlock();
+        const m = p.metrics();
+        var px: f64 = 0;
+        while (px < m.cell_w * 4) : (px += 1) {
+            const col = p.cellAt(g, px, m.cell_h * 0.5).col;
+            if (col == 1 and x1 == 0) x1 = px;
+            if (col == 2 and x2 == 0) x2 = px;
+        }
+    }
+    try std.testing.expect(x1 > 0 and x2 > 0);
+    _ = harf_term_selection_event(t, p, 0, 1, 0, x1, 5);
+    _ = harf_term_selection_event(t, p, 1, 1, 0, x2, 5);
+    _ = harf_term_selection_event(t, p, 2, 1, 0, x2, 5);
+    var len: usize = 0;
+    const text = harf_term_selection_text(t, &len) orelse return error.NoSelection;
+    defer harf_free(text);
+    try std.testing.expectEqualStrings("\u{627}", text[0..len]); // the alef, from its own cell
+}
+
 test "harf_term_new rejects zero size" {
     const cb: HarfTermCallbacks = .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null };
     try std.testing.expect(harf_term_new(0, 24, 1 << 20, null, &cb) == null);

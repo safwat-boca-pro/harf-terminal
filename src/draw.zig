@@ -1286,3 +1286,84 @@ test "bench: painter-only frame costs (HARF_BENCH=1)" {
     ctx.clear_cache = true;
     std.debug.print("BENCH arabic cold full frame:        {d:>8.1} us\n", .{benchMean(&ctx, benchBody)});
 }
+
+// ---- R2: hit-testing on lam-alef, tashkeel and blank cells ----
+
+/// Presses at the pixel center of logical column `from`'s span and drags to the center of `to`'s, through
+/// `cellAt` (what a real click does), and returns the copied text.
+fn dragCopy(p: *Painter, t: *vt.Terminal, row: u16, from: u16, to: u16) ![]u8 {
+    const m = p.metrics();
+    const rl = (try testLayout(p, t, row)).?;
+    const a = rl.span(from, m.cell_w);
+    const b = rl.span(to, m.cell_w);
+    const y = m.cell_h * (@as(f64, @floatFromInt(row)) + 0.5);
+    const ca = p.cellAt(t, (a.x0 + a.x1) / 2, y);
+    const cb = p.cellAt(t, (b.x0 + b.x1) / 2, y);
+    t.selectionPress(ca.col, ca.row, 1);
+    t.selectionDrag(cb.col, cb.row);
+    t.selectionRelease();
+    return t.selectionText(std.testing.allocator);
+}
+
+test "hit test: each cell of lam-alef is its own target" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const m = p.metrics();
+    const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 2 });
+    defer t.deinit();
+    t.write("\u{644}\u{627} \u{644}\u{627}"); // lam-alef, a blank, lam-alef: four letter cells and a space
+    const rl = (try testLayout(p, t, 0)).?;
+    const y = m.cell_h * 0.5;
+    for (0..5) |col| {
+        const sp = rl.span(@intCast(col), m.cell_w);
+        try std.testing.expect(sp.x1 > sp.x0);
+        const hit = p.cellAt(t, (sp.x0 + sp.x1) / 2, y);
+        try std.testing.expectEqual(@as(u16, @intCast(col)), hit.col);
+    }
+    // a press-drag from the second cell of the first lam-alef to the blank after it copies that letter (the
+    // blank is trimmed); a drag that stays in one cell selects nothing, so the neighbor is the other end
+    const one = try dragCopy(p, t, 0, 1, 2);
+    defer std.testing.allocator.free(one);
+    try std.testing.expectEqualStrings("\u{627}", one);
+    // and over both cells copies the ligature's two letters in logical order
+    const both = try dragCopy(p, t, 0, 0, 1);
+    defer std.testing.allocator.free(both);
+    try std.testing.expectEqualStrings("\u{644}\u{627}", both);
+}
+
+test "hit test: a tashkeel base letter is its own target and copies with its marks" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const m = p.metrics();
+    const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 2 });
+    defer t.deinit();
+    t.write("\u{645}\u{64F}\u{62D}\u{64E}\u{645}\u{64E}\u{651}\u{62F}"); // four cells: meem+damma, hah+fatha, meem+fatha+shadda, dal
+    const rl = (try testLayout(p, t, 0)).?;
+    try std.testing.expectEqual(@as(u16, 4), rl.n_cells);
+    const y = m.cell_h * 0.5;
+    for (0..4) |col| {
+        const sp = rl.span(@intCast(col), m.cell_w);
+        try std.testing.expectEqual(@as(u16, @intCast(col)), p.cellAt(t, (sp.x0 + sp.x1) / 2, y).col);
+    }
+    const third = try dragCopy(p, t, 0, 2, 3);
+    defer std.testing.allocator.free(third);
+    try std.testing.expectEqualStrings("\u{645}\u{64E}\u{651}\u{62F}", third); // the third base with both marks, then the dal
+    const all = try dragCopy(p, t, 0, 0, 3);
+    defer std.testing.allocator.free(all);
+    try std.testing.expectEqualStrings("\u{645}\u{64F}\u{62D}\u{64E}\u{645}\u{64E}\u{651}\u{62F}", all);
+}
+
+test "hit test: blank cells after the text are plain columns" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const m = p.metrics();
+    const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 2 });
+    defer t.deinit();
+    t.write("\u{644}\u{627} \u{645}\u{64E}\u{631}");
+    const rl = (try testLayout(p, t, 0)).?;
+    const n: usize = rl.n_cells;
+    for ([_]usize{ n, n + 1, n + 5, 19 }) |col| {
+        const x = (@as(f64, @floatFromInt(col)) + 0.5) * m.cell_w;
+        try std.testing.expectEqual(@as(u16, @intCast(col)), p.cellAt(t, x, m.cell_h * 0.5).col);
+    }
+}
