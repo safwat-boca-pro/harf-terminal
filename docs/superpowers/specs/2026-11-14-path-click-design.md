@@ -15,12 +15,14 @@ Compiler errors, test failures, `grep -n` and stack traces print `path:line:col`
   - a command template (`code --goto {path}:{line}:{col}`): split on spaces, then values substituted, run **without a shell** through the user's login shell as `exec "$@"` so `code` is found on the PATH.
 - No `editor` set: the file opens in the default plain-text editor (no line number).
 - Added by the owner after the first design (2026-11-14): **plain `http://` and `https://` text opens in the browser** (most programs print URLs without OSC 8), and **the editor can be chosen from the system**: Harf menu "Choose Editor…" shows the app picker and writes the `editor = ...` line to the config file (the file stays the one source of truth; hand-editing works as before). VS Code, VS Code Insiders, VSCodium and Cursor get their line-aware URL template; any other app gets `editor = app:/Applications/Name.app`, which opens the file in that app without a line number.
+- **Plain URLs are always colored** (owner's request, 2026-11-14): the painter gives the cells of a plain `http(s)://` URL the theme's bright blue (ANSI 12) and a single underline, but only where the program left the foreground default and no underline (a program that styled the text itself is respected). It is a function of the row's text, so the row hash and the dirty-row tracking need no change.
+- **Cmd-hover highlight** (owner's request, 2026-11-14): while Cmd is held, a link under the pointer (OSC 8 link, plain URL, or a file that exists) gets a link-colored tint over its cells and the pointing-hand cursor; it goes away when Cmd is released, the pointer leaves, or the text under it changes.
 - Cmd-click order: OSC 8 link, then plain URL, then path, then the normal click. Works while a program tracks the mouse, like links.
 
 ## Non-goals and anti-goals
 
 - Plain URLs: only `http` and `https` (the same allowlist as OSC 8); no `file:`, `ftp:`, `mailto:` text. No bare `www.` or `example.com` without a scheme.
-- No hover underline or pointer cursor (links have none either). No path that wraps across two rows. No `path(line,col)` or `path line 12` forms. No directories.
+- (Reversed by the owner, 2026-11-14: coloring is now in, see Goals.) No always-on coloring of file paths: whether a file exists needs the filesystem, which a redraw must not touch. No path that wraps across two rows. No `path(line,col)` or `path line 12` forms. No directories.
 - Anti-goal: opening something that runs. A path in terminal output can name an `.app` or a `.command` script; the default must never launch it (it opens as text), and a hostile filename (`;`, `$(...)`, quotes, spaces) must reach the editor as one argument, never through a shell command line.
 
 ## Constraints

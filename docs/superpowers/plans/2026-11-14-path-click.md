@@ -84,8 +84,42 @@
 - [ ] **Step 5: Docs.** `docs/phase6-manual-check.md` gets a "Cmd-click on paths and URLs" section: Cmd-click on a plain `https://example.com` printed by `echo` opens the browser (a trailing full stop is not part of it; `ftp://` does nothing); the Harf menu's "Choose Editor…" shows the app picker, picking VS Code writes `editor = vscode://file{path}:{line}:{col}` into the config and picking another app writes `editor = app:/Applications/Name.app` (opens without a line number); with `editor = vscode://file{path}:{line}:{col}` in the config, `ls src` then `echo src/main.zig:12:5` and Cmd-click opens VS Code at that line and column; a relative path opens relative to the pane's directory (also after `cd`); a nonexistent path, a directory, and a plain word do nothing; with no `editor` set the file opens in TextEdit; Cmd-click on an OSC 8 link still opens the browser. Add one decision-log row in `ARCHITECTURE.md`.
 - [ ] **Step 6: Commit** `Choose Editor... picks the app from the system and writes the editor line; checklist and decision log`.
 
+### Task 4: Plain URLs are always colored (painter)
+
+**Files:**
+- Modify: `src/vt.zig` (`urlEndFrom` shared with `urlAt`; `markUrls`), `src/draw.zig` (`gather` calls it)
+- Test: `src/vt.zig`, `src/draw.zig`
+
+**Interfaces:**
+- Produces: `vt.markUrls(cells: []Cell, color: Rgb) void`: for each plain `http://` or `https://` URL in the row (found as `urlAt` finds one: scheme start, run to a space or quote or angle bracket, trailing punctuation and unbalanced closing brackets removed), sets `style.fg = color` on its cells where the foreground is the default (null) and a single underline where there is none. Cells a program styled are left alone. A row with no `://` is not touched.
+- Consumes: `Terminal.paletteColor(12)` for the color (the theme's bright blue).
+
+- [ ] **Step 1: Write the failing tests.** `src/vt.zig`, `test "markUrls colors a plain URL and nothing else"`: a row of cells for `see https://example.com/a?b=1. ok` gets the color and a single underline on exactly the cells of `https://example.com/a?b=1`, not on `see`, the trailing full stop or `ok`; a URL cell whose foreground the program set keeps it; a row with `ftp://x.org` and one with `https://` alone are untouched; a CJK character before the URL does not shift the colored cells (a wide character is two cells). `src/draw.zig`: a screen drawn with a URL in it differs from the same screen with `markUrls` disabled in the URL's cells (the blue appears) and is identical elsewhere, and `dirtyRows` reports the row dirty when a URL is typed into it.
+- [ ] **Step 2: Run them, expect FAIL** (no `markUrls`).
+- [ ] **Step 3: Implement** `markUrls` (build the row's UTF-8 with each cell's start offset, find `://`, look back for `https` or `http`, `urlEndFrom`, map byte offsets back to cells) and call it at the end of `Painter.gather` with the palette color.
+- [ ] **Step 4: Run the filtered tests, the full `zig build test` and `macos/build-app.sh`, expect PASS.**
+- [ ] **Step 5: Commit** `Plain URLs are colored (theme bright blue) and underlined`.
+
+### Task 5: Cmd-hover highlight and pointing hand (core, painter, view)
+
+**Files:**
+- Modify: `src/vt.zig` (`linkSpanAt`), `src/draw.zig` (`Painter.highlight`), `src/capi.zig`, `include/harf.h`, `macos/Sources/Harf/TerminalView.swift`, `macos/Sources/Harf/main.swift`, `docs/phase6-manual-check.md`, `ARCHITECTURE.md`
+- Test: `src/vt.zig`, `src/draw.zig`, `macos/Sources/Harf/main.swift`
+
+**Interfaces:**
+- Produces: `vt.LinkKind = enum { hyperlink, url, path }`, `vt.LinkSpan = struct { kind: LinkKind, row: u16, lo: u16, hi: u16 }` (columns inclusive) and `vt.Terminal.linkSpanAt(self, col: u16, row: u16) ?LinkSpan`: OSC 8 first (cells with the same URI), then a plain URL, then a path (the path with its `:line:col`, without trailing punctuation). Whether a file exists is not checked here.
+- Produces: `Painter.highlight: ?struct { row: u16, lo: u16, hi: u16, color: Rgb }`, drawn as a translucent tint over those cells when their row is drawn (inside `drawRowRange`, so every draw of the row applies it exactly once); C `harf_painter_set_highlight(p, row, lo, hi, r, g, b)` and `harf_painter_clear_highlight(p)`; C `int harf_term_link_span_at(HarfTerm *t, HarfPainter *p, double x_px, double y_px, uint16_t *row, uint16_t *lo, uint16_t *hi)` returning 0 none, 1 hyperlink, 2 url, 3 path.
+- Produces (Swift): `TerminalController.hoverLink(at: NSPoint) -> (row: Int, lo: Int, hi: Int)?` (only a link Cmd-click would open: an allowed OSC 8 link, an http(s) URL, or a file that exists), `TerminalView` hover state updated by `mouseMoved`, `flagsChanged`, `mouseExited` and each wake while a highlight is shown; the rows of the old and new highlight are invalidated; `resetCursorRects` adds the pointing hand over the highlight.
+
+- [ ] **Step 1: Write the failing tests.** `src/vt.zig`: `linkSpanAt` on `see https://example.com/a. ok` (url, columns 4 to 25), on `at src/main.zig:12:5: error` (path, from `src` to the last `5`), on an OSC 8 link written with `ESC ] 8 ; ; url ESC \ text ESC ] 8 ; ; ESC \` (hyperlink, the cells of `text`), on a CJK-prefixed row (columns, not bytes), and on a space (null). `src/draw.zig`: with `highlight` set on a row, that row's pixels change inside the span and not outside it, and drawing the row twice in a row gives the same pixels (not darker). `macos/.../main.swift`: `hoverLink(at:)` on the 3c sample row gives the URL's columns, the existing file's columns, and nil for `ftp://` and a missing file; the view with `Command` held over the URL shows the highlight (pixel in the span differs from the same pixel with it cleared).
+- [ ] **Step 2: Run them, expect FAIL.**
+- [ ] **Step 3: Implement** as in the interfaces. A byte offset in a token maps to a column through the cell offsets `tokenAt` records.
+- [ ] **Step 4: Run the full `zig build test`, `macos/build-app.sh` and the self-test, expect PASS.**
+- [ ] **Step 5: Docs.** `docs/phase6-manual-check.md`: a "Cmd-click on paths and URLs" section: `editor = vscode://file{path}:{line}:{col}` and Cmd-click on `echo src/main.zig:12:5` opens VS Code there; relative paths resolve against the pane's directory (also after `cd`); a missing file, a directory and a plain word do nothing; without `editor` the file opens in TextEdit; "Choose Editor…" in the Harf menu shows the app picker, picking VS Code writes the template into the config and another app writes `app:` (no line number); a plain `https://example.com` is blue and underlined as printed and Cmd-click opens the browser, a trailing full stop is not part of it, `ftp://` is not colored; holding Cmd over a URL, an OSC 8 link or an existing file tints it and shows the pointing hand, releasing Cmd or moving away clears it. One decision-log row in `ARCHITECTURE.md`.
+- [ ] **Step 6: Commit** `Cmd-hover tints the link under the pointer and shows the pointing hand; checklist and decision log`.
+
 ---
 
 ## Not in this plan
 
-- Hover underline or cursor; paths and URLs wrapped over two rows; bare `www.` text; `path(line,col)` and `path line N` forms; directories; a per-project editor.
+- Always-on coloring of file paths (existence needs the filesystem); a configurable link color; paths and URLs wrapped over two rows; bare `www.` text; `path(line,col)` and `path line N` forms; directories; a per-project editor.
