@@ -111,8 +111,9 @@ size_t harf_term_find(HarfTerm *t, const uint8_t *needle, size_t len);
 int harf_term_find_step(HarfTerm *t, int older, size_t *number, size_t *total);
 /* Ends the find and clears its highlight. */
 void harf_term_find_end(HarfTerm *t);
-/* Clear screen and scrollback, then type Ctrl+L so a shell redraws its prompt; nothing happens on the alternate screen. */
-void harf_term_clear(HarfTerm *t);
+/* Clear the screen (and the scrollback if `scrollback` is not 0), then type Ctrl+L so a shell redraws its prompt. On the
+   alternate screen nothing happens and it returns 0 (the key is the program's); otherwise 1. */
+int harf_term_clear(HarfTerm *t, int scrollback);
 /* Whether a program may write the clipboard with OSC 52 (1 yes, 0 no; the default is yes). Reading is never allowed. */
 void harf_term_set_clipboard_write(HarfTerm *t, int allow);
 /* The selected text as UTF-8 in logical order, or NULL if nothing is selected; *len is its length. Free with harf_free. */

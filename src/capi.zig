@@ -309,9 +309,10 @@ export fn harf_term_hyperlink_at(t: *HarfTerm, p: *draw.Painter, x_px: f64, y_px
     return uri.len;
 }
 
-/// Clear screen and scrollback, then type Ctrl+L so a shell redraws its prompt; does nothing on the alternate screen.
-export fn harf_term_clear(t: *HarfTerm) void {
-    t.session.clearScreen();
+/// Clear the screen (and the scrollback if `scrollback` is not 0), then type Ctrl+L so a shell redraws its prompt. On the
+/// alternate screen nothing happens and it returns 0 (the key is the program's); otherwise 1.
+export fn harf_term_clear(t: *HarfTerm, scrollback: c_int) c_int {
+    return @intFromBool(t.session.clearScreen(scrollback != 0));
 }
 
 /// Whether a program may write the clipboard with OSC 52 (1 yes, 0 no). Reading it is never allowed.

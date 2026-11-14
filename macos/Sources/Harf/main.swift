@@ -709,6 +709,7 @@ func selfTest() -> Never {
         if c.view.performKeyEquivalent(with: keyEvent(45, "n", [.control])) { fail("shortcuts: Ctrl+N must reach the program, not open a window") }
         if !c.view.performKeyEquivalent(with: keyEvent(17, "t", [.command])) { fail("shortcuts: Cmd+T was not handled by the view") }
         if NSApp.windows.count != opened + 2 { fail("shortcuts: Cmd+T did not open a tab (\(NSApp.windows.count) windows)") }
+        if !c.view.performKeyEquivalent(with: keyEvent(37, "l", [.control])) { fail("shortcuts: Ctrl+L was not handled on the main screen") }
         for w in NSApp.windows.suffix(2) { w.close() }   // closing them ends their shells
         c.close()
         NSApp.delegate = nil

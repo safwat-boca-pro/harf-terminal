@@ -214,7 +214,8 @@ final class TerminalController {
         switch action {
         case "copy": copySelection()
         case "paste": if let s = NSPasteboard.general.string(forType: .string) { paste(s) }
-        case "clear": harf_term_clear(t)
+        case "clear": _ = harf_term_clear(t, 1)
+        case "clear_view": return harf_term_clear(t, 0) == 1   // on the alternate screen the key is the program's
         case "send": _ = arg.withUnsafeBufferPointer { harf_term_input(t, $0.baseAddress, arg.count) }
         default: return false
         }

@@ -544,17 +544,19 @@ pub const Session = struct {
         self.requestWake();
     }
 
-    /// Clear screen: the screen and the scrollback are emptied here, then Ctrl+L is typed so a shell redraws its prompt at the
-    /// top. A full-screen program (the alternate screen) owns its screen, so nothing happens then.
-    pub fn clearScreen(self: *Session) void {
+    /// Clear screen: the screen (and the scrollback, if `scrollback`) is emptied here, then Ctrl+L is typed so a shell redraws its
+    /// prompt at the top. A full-screen program (the alternate screen) owns its screen: nothing happens and this returns false,
+    /// so the caller can let the key through to it.
+    pub fn clearScreen(self: *Session, scrollback: bool) bool {
         {
             const t = self.lock();
             defer self.unlock();
-            if (t.onAlternateScreen()) return;
-            t.write("\x1b[H\x1b[2J\x1b[3J");
+            if (t.onAlternateScreen()) return false;
+            t.write(if (scrollback) "\x1b[H\x1b[2J\x1b[3J" else "\x1b[H\x1b[2J");
         }
         self.requestWake();
         self.typeText("\x0c") catch {};
+        return true;
     }
 
     /// A theme (colors, see `vt.Terminal.setTheme`); the view is woken to redraw.
@@ -899,7 +901,7 @@ test "clearScreen empties the screen and the scrollback, types Ctrl+L, and leave
         defer s.unlock();
         try std.testing.expect(t.scrollbackRows() > 0);
     }
-    s.clearScreen();
+    try std.testing.expect(s.clearScreen(true));
     try std.testing.expect(hexOf(s, "0c")); // the shell's prompt redraw key reached the child
     const t = s.lock();
     defer s.unlock();
@@ -911,7 +913,8 @@ test "clearScreen empties the screen and the scrollback, types Ctrl+L, and leave
     const alt = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf '\\033[?1049hINALT'; stty raw -echo; echo; dd bs=1 count=1 2>/dev/null | od -An -tx1" } });
     defer alt.deinit();
     try std.testing.expect(hexOf(alt, "INALT"));
-    alt.clearScreen();
+    try std.testing.expect(!alt.clearScreen(true));
+    try std.testing.expect(!alt.clearScreen(false)); // false: the caller lets Ctrl+L through to the program
     sleepMs(300);
     try std.testing.expectEqual(@as(usize, 0), alt.pendingInput());
     const at = alt.lock();

@@ -11,6 +11,7 @@ panes I saw earlier came from rendering the whole window offscreen with `cacheDi
 - [ ] Cmd+D splits side by side, Cmd+Shift+D splits below. The new shell starts in the directory of the one you split. Splits nest. Cmd+[ and Cmd+] move between panes; clicking a pane focuses it.
 - [ ] Cmd+W closes a pane (its neighbour takes the space); the last pane closes the tab or window. `exit` in a pane closes it.
 - [ ] Cmd+K empties the screen and scrollback and redraws your prompt at the top. In vim (alternate screen) it does nothing.
+- [ ] Ctrl+L empties only the visible screen (scroll up: the older output is still there) and redraws your prompt at the top. In vim, less or `claude` it is not taken by the app: the program redraws itself. `keybind = ctrl+l = unbind` hands it back to the shell.
 - [ ] Cmd+F opens the find bar in the top right of the pane; typing finds and jumps to the newest match, Enter goes to older ones, Shift+Enter to newer, Esc closes. "n of m" is shown. Every match in view is tinted amber and the current one is blue (the selection, so Cmd+C copies it). It finds text in scrollback. It starts at the newest match, at the bottom.
 - [ ] Open the find bar in a narrow split pane: nothing is cut off.
 - [ ] Title and tab name follow the focused pane. Tab drag and "Merge All Windows" from the Window menu work.
