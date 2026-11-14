@@ -25,12 +25,23 @@ final class TerminalPane: NSView {
     func showFind() {
         if findBar == nil {
             let bar = FindBar(pane: self)
-            bar.frame.origin = NSPoint(x: bounds.width - bar.frame.width - 12, y: bounds.height - bar.frame.height - 8)
-            bar.autoresizingMask = [.minXMargin, .minYMargin]
             addSubview(bar)
             findBar = bar
+            placeFindBar()
         }
         findBar?.focus()
+    }
+
+    /// The bar sits in the top right corner and is never wider than its pane (a pane can be narrow after a split).
+    private func placeFindBar() {
+        guard let bar = findBar else { return }
+        let w = min(372, max(180, bounds.width - 24))
+        bar.frame = NSRect(x: max(4, bounds.width - w - 12), y: bounds.height - bar.frame.height - 8, width: w, height: bar.frame.height)
+    }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        placeFindBar()
     }
 
     func hideFind() {
@@ -55,11 +66,12 @@ final class TerminalPane: NSView {
     }
 }
 
-/// The find bar: a text field, "n of m", previous, next and close.
+/// The find bar: a text field, "n of m", up (older), down (newer) and close. The field takes the width that is left.
 @MainActor
 final class FindBar: NSView, NSTextFieldDelegate {
     private let field = NSTextField()
     private let status = NSTextField(labelWithString: "")
+    private var buttons: [NSButton] = []
     private weak var pane: TerminalPane?
 
     init(pane: TerminalPane) {
@@ -72,22 +84,39 @@ final class FindBar: NSView, NSTextFieldDelegate {
         layer?.borderWidth = 1
         field.placeholderString = "Find"
         field.delegate = self
-        field.frame = NSRect(x: 8, y: 4, width: 214, height: 22)
         status.font = .systemFont(ofSize: 11)
         status.textColor = .secondaryLabelColor
         status.alignment = .right
-        status.frame = NSRect(x: 226, y: 6, width: 76, height: 16)
-        func button(_ title: String, _ x: CGFloat, _ action: Selector) -> NSButton {
+        func button(_ title: String, _ action: Selector) -> NSButton {
             let b = NSButton(title: title, target: self, action: action)
             b.bezelStyle = .inline
-            b.frame = NSRect(x: x, y: 3, width: 24, height: 24)
             return b
         }
         // up goes toward older output (where Enter goes), down toward newer
-        for v in [field, status, button("▲", 306, #selector(older)), button("▼", 326, #selector(newer)), button("✕", 346, #selector(close))] { addSubview(v) }
+        buttons = [button("▲", #selector(older)), button("▼", #selector(newer)), button("✕", #selector(close))]
+        for v in [field, status] + buttons { addSubview(v) }
+        relayout()
     }
 
     required init?(coder: NSCoder) { fatalError("FindBar is made in code") }
+
+    private func relayout() {
+        var x = bounds.width - 8
+        for b in buttons.reversed() {
+            x -= 24
+            b.frame = NSRect(x: x, y: 3, width: 24, height: 24)
+        }
+        x -= 4
+        let statusWidth: CGFloat = bounds.width > 260 ? 64 : 0
+        status.frame = NSRect(x: x - statusWidth, y: 7, width: statusWidth, height: 16)
+        status.isHidden = statusWidth == 0
+        field.frame = NSRect(x: 8, y: 4, width: max(40, x - statusWidth - 8 - 8), height: 22)
+    }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        relayout()
+    }
 
     func focus() {
         window?.makeFirstResponder(field)
@@ -175,7 +204,7 @@ final class WindowController: NSObject, NSWindowDelegate {
             if let self, let pane { self.window.title = pane.title }
         }
         c.onBell = { NSSound.beep() }
-        c.onNotify = { [weak self] title, body in Notifier.post(title: title, body: body, from: self?.window) }
+        c.onNotify = { [weak c] title, body in Notifier.post(title: title, body: body, focused: c?.hasKeyboard() ?? false) }
         c.onExit = { [weak self, weak pane] status in
             guard let self, let pane else { return }
             // A clean exit closes the pane (the last one closes the window). A failure keeps it, so the last output stays readable.

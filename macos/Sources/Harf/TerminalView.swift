@@ -117,9 +117,18 @@ final class TerminalController {
     var onFocus: () -> Void = {}
     /// Where OSC 52 writes go (the self-test points it at a private pasteboard).
     var clipboard: NSPasteboard = .general
-    /// May a program change the clipboard right now? Only while the user is looking at this terminal: a program in a window or
-    /// tab in the background must not replace what the user copied (paste-jacking). The self-test overrides it.
-    lazy var clipboardWriteAllowed: () -> Bool = { [weak self] in NSApp.isActive && self?.view.window?.isKeyWindow == true }
+    /// May a program change the clipboard right now? Only while the user is typing into this very terminal (`hasKeyboard`): a
+    /// program in another window, tab or split pane must not replace what the user copied (paste-jacking). The self-test
+    /// overrides it.
+    lazy var clipboardWriteAllowed: () -> Bool = { [weak self] in self?.hasKeyboard() ?? false }
+
+    /// True while the app is active, its window is key, and this terminal's pane (its find field counts) has the keyboard, not a
+    /// sibling pane or another tab. A terminal with no pane around it is its window's only terminal.
+    func hasKeyboard() -> Bool {
+        guard NSApp.isActive, let window = view.window, window.isKeyWindow else { return false }
+        guard let pane = enclosingPane(of: view) else { return true }
+        return enclosingPane(of: window.firstResponder) === pane
+    }
 
     /// `argv` nil runs the login shell. `frame` is the view's initial size in points.
     init?(argv: [String]?, frame: NSSize, scale: CGFloat = 2, cwd: String? = nil) {

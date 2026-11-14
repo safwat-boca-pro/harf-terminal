@@ -15,7 +15,7 @@ final class WindowBinding: NSObject, NSWindowDelegate {
         window.delegate = self
         controller.onTitle = { [weak window] in window?.title = $0 }
         controller.onBell = { NSSound.beep() }
-        controller.onNotify = { [weak window] title, body in Notifier.post(title: title, body: body, from: window) }
+        controller.onNotify = { [weak controller] title, body in Notifier.post(title: title, body: body, focused: controller?.hasKeyboard() ?? false) }
         controller.onExit = { [weak self] status in
             guard let self else { return }
             // A clean exit closes the window. A failure keeps it, so the last output stays readable.

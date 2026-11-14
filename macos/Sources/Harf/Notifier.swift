@@ -5,11 +5,11 @@ import UserNotifications
 /// overrides from the text and cut it to length. Shown only when the user is not already looking at the terminal.
 @MainActor
 enum Notifier {
-    static func post(title: String, body: String, from window: NSWindow?) {
+    static func post(title: String, body: String, focused: Bool) {
         switch Settings.shared.notifications {
         case 2: return                                                     // off
         case 1: break                                                      // always
-        default: if NSApp.isActive, window?.isKeyWindow == true { return } // unfocused: the user is already looking at it
+        default: if focused { return }                                      // unfocused: the user is already looking at that terminal
         }
         guard Bundle.main.bundleIdentifier != nil else { return }   // not running as an app bundle: no notification center
         let heading = title.isEmpty ? "Harf" : title

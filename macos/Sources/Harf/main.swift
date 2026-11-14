@@ -653,6 +653,8 @@ func selfTest() -> Never {
         if !(second.controller.gridSize.cols < cols && first.controller.gridSize.cols < cols) { fail("split: the panes should each be narrower than the whole window (\(first.controller.gridSize.cols), \(second.controller.gridSize.cols) of \(cols))") }
         if abs(first.frame.width - second.frame.width) > 24 { fail("split: unequal panes \(first.frame.width) and \(second.frame.width)") }
         if wc.focusedPane() !== second { fail("split: the new pane should have the keyboard") }
+        // a window that is not key (every window here) gives no pane the keyboard, so no pane may write the clipboard or silence a notification
+        if wc.allPanes.contains(where: { $0.controller.hasKeyboard() || $0.controller.clipboardWriteAllowed() }) { fail("panes: a pane of a window that is not key has the keyboard") }
         second.controller.sendText("pwd -P\n")
         if !pump(8, until: { (0..<second.controller.gridSize.rows).contains { second.controller.rowText($0).trimmingCharacters(in: .whitespaces) == "/usr" } }) {
             fail("split: the new shell did not start in /usr: '\((0..<4).map { second.controller.rowText($0) })'")
