@@ -160,11 +160,21 @@ pub const Terminal = struct {
         });
         // Control characters (AppKit reports "\x03" for Ctrl+C) are derived from the key and
         // modifiers; passing them as text makes the encoder emit a CSI u sequence instead.
-        const text = if (std.mem.indexOfAny(u8, utf8, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f") != null) "" else utf8;
+        // AppKit also reports private-use characters (U+F700 for Up, ...) for function keys;
+        // with the kitty keyboard protocol on, the encoder would send those as text.
+        const text = if (isPrivateUse(utf8)) "" else if (std.mem.indexOfAny(u8, utf8, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f") != null) "" else utf8;
         _ = c.ghostty_key_event_set_utf8(self.key_event, .{ .ptr = text.ptr, .len = text.len });
         var written: usize = 0;
         if (c.ghostty_key_encoder_encode(self.key_encoder, self.key_event, out.ptr, out.len, &written) != c.GHOSTTY_SUCCESS) return out[0..0];
         return out[0..written];
+    }
+
+    fn isPrivateUse(utf8: []const u8) bool {
+        if (utf8.len < 3) return false;
+        const len = std.unicode.utf8ByteSequenceLength(utf8[0]) catch return false;
+        if (len > utf8.len) return false;
+        const cp = std.unicode.utf8Decode(utf8[0..len]) catch return false;
+        return cp >= 0xE000 and cp <= 0xF8FF;
     }
 
     pub fn bracketedPaste(self: *Terminal) bool {
@@ -524,6 +534,28 @@ test "up arrow, normal and application mode" {
     try std.testing.expectEqualStrings("\x1b[A", encFor(t, 126, 0, "", &buf));
     t.write("\x1b[?1h");
     try std.testing.expectEqualStrings("\x1bOA", encFor(t, 126, 0, "", &buf));
+}
+
+test "AppKit reports private-use text for function keys; arrows still encode" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1b[A", encFor(t, 126, 0, "\u{F700}", &buf)); // up
+    try std.testing.expectEqualStrings("\x1b[B", encFor(t, 125, 0, "\u{F701}", &buf)); // down
+    try std.testing.expectEqualStrings("\x1b[3~", encFor(t, 117, 0, "\u{F728}", &buf)); // forward delete
+    try std.testing.expectEqualStrings("\x1bOP", encFor(t, 122, 0, "\u{F704}", &buf)); // F1
+}
+
+test "arrows and function keys with the kitty keyboard protocol on" {
+    // Claude Code and other TUIs send ESC[>1u; AppKit's private-use text must not reach the encoder.
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("\x1b[>1u");
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1b[A", encFor(t, 126, 0, "\u{F700}", &buf));
+    try std.testing.expectEqualStrings("\x1b[B", encFor(t, 125, 0, "\u{F701}", &buf));
+    try std.testing.expectEqualStrings("\x1b[3~", encFor(t, 117, 0, "\u{F728}", &buf));
+    try std.testing.expectEqualStrings("\x1b[C", encFor(t, 124, 0, "", &buf));
 }
 
 test "ctrl c, enter, backspace, shift tab" {
