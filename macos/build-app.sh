@@ -10,6 +10,9 @@ unset SDKROOT
 [ -x "$ROOT/.tools/zig/zig" ] && PATH="$ROOT/.tools/zig:$PATH"
 
 (cd "$ROOT" && zig build -Doptimize=ReleaseFast)
+# SwiftPM does not notice that libharf.a changed, so a Zig-only change would leave the old binary in place.
+# Remove the linked product to force a relink against the fresh library.
+rm -f "$ROOT/macos/.build/release/Harf"
 (cd "$ROOT/macos" && swift build -c release -Xlinker -L"$ROOT/zig-out/lib")
 
 APP="$ROOT/macos/.build/Harf.app"

@@ -46,6 +46,9 @@ pub const Extent = extern struct {
     lcol: u32,
     x0: f32,
     x1: f32,
+    /// Left edge of the grid cell this cluster occupies, in visual order (`visual cell * cell_w`). Unlike x0 and
+    /// x1, which follow the glyphs, it always lands on the cell grid: use it for backgrounds and selection.
+    cell_x: f32,
     /// Byte range of the cluster's text in the request text (UTF-8).
     text_start: u32,
     text_len: u32,
@@ -482,6 +485,7 @@ pub const Layouter = struct {
                 // Cluster extents come from CoreText's caret offsets in the fitted line.
                 const first_ext = self.extents.items.len;
                 var b = ws;
+                var in_word: u32 = 0; // logical cluster number inside the word; the word is shaped right to left
                 while (b < we) {
                     if (!is_base.items[b]) {
                         b += 1;
@@ -494,9 +498,11 @@ pub const Layouter = struct {
                         .lcol = bb[b],
                         .x0 = @floatCast(x0 + @min(oa, ob) * s),
                         .x1 = @floatCast(x0 + @max(oa, ob) * s),
+                        .cell_x = @floatCast(@as(f64, @floatFromInt(vs + (wcells - 1 - in_word))) * cw),
                         .text_start = u8_of.items[b],
                         .text_len = u8_of.items[e] - u8_of.items[b],
                     });
+                    in_word += 1;
                     b = e;
                 }
                 splitLigatures(self.extents.items[first_ext..]);
@@ -514,6 +520,7 @@ pub const Layouter = struct {
                         .lcol = bb[u],
                         .x0 = @floatCast((@as(f64, @floatFromInt(g.vcell + seen))) * cw),
                         .x1 = @floatCast((@as(f64, @floatFromInt(g.vcell + seen + 1))) * cw),
+                        .cell_x = @floatCast((@as(f64, @floatFromInt(g.vcell + seen))) * cw),
                         .text_start = u8_of.items[u],
                         .text_len = u8_of.items[e] - u8_of.items[u],
                     });

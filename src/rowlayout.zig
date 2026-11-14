@@ -16,6 +16,8 @@ pub const Span = struct { x0: f32, x1: f32 };
 pub const RowLayout = struct {
     placed: []layout.Placed,
     spans: []Span,
+    /// The grid cell each column occupies, in visual order: always on whole cells, with no gap between neighbors.
+    boxes: []Span,
     rtl_base: bool,
     n_cells: u16,
 
@@ -26,9 +28,18 @@ pub const RowLayout = struct {
         return .{ .x0 = x0, .x1 = x0 + cell_w };
     }
 
+    /// The grid cell of `col`: where its background and selection highlight go. Columns at or past the text
+    /// are plain cells (same as `span`).
+    pub fn cellBox(self: RowLayout, col: u16, cell_w: f32) Span {
+        if (col < self.n_cells) return self.boxes[col];
+        const x0 = @as(f32, @floatFromInt(col)) * cell_w;
+        return .{ .x0 = x0, .x1 = x0 + cell_w };
+    }
+
     pub fn deinit(self: *RowLayout, gpa: Allocator) void {
         gpa.free(self.placed);
         gpa.free(self.spans);
+        gpa.free(self.boxes);
     }
 };
 
@@ -89,7 +100,7 @@ pub const Shaper = struct {
     pub fn shape(self: *Shaper, text: []const u8, n_cells: u16, rtl_base: bool) !?RowLayout {
         if (text.len == 0) {
             if (n_cells != 0) return null;
-            return .{ .placed = try self.gpa.alloc(layout.Placed, 0), .spans = try self.gpa.alloc(Span, 0), .rtl_base = rtl_base, .n_cells = 0 };
+            return .{ .placed = try self.gpa.alloc(layout.Placed, 0), .spans = try self.gpa.alloc(Span, 0), .boxes = try self.gpa.alloc(Span, 0), .rtl_base = rtl_base, .n_cells = 0 };
         }
         const info = try self.layouter.layoutRow(.{
             .text = text,
@@ -102,13 +113,16 @@ pub const Shaper = struct {
         if (info.n_cells != n_cells) return null;
         const spans = try self.gpa.alloc(Span, n_cells);
         errdefer self.gpa.free(spans);
+        const boxes = try self.gpa.alloc(Span, n_cells);
+        errdefer self.gpa.free(boxes);
         @memset(spans, .{ .x0 = std.math.nan(f32), .x1 = std.math.nan(f32) });
         for (self.layouter.extents.items) |e| {
             if (e.lcol >= n_cells) return error.LayoutHole;
             spans[e.lcol] = .{ .x0 = e.x0, .x1 = e.x1 };
+            boxes[e.lcol] = .{ .x0 = e.cell_x, .x1 = e.cell_x + self.cell_w };
         }
         for (spans) |sp| if (std.math.isNan(sp.x0)) return error.LayoutHole;
-        return .{ .placed = try self.gpa.dupe(layout.Placed, self.scratch.items), .spans = spans, .rtl_base = rtl_base, .n_cells = n_cells };
+        return .{ .placed = try self.gpa.dupe(layout.Placed, self.scratch.items), .spans = spans, .boxes = boxes, .rtl_base = rtl_base, .n_cells = n_cells };
     }
 };
 
@@ -348,4 +362,25 @@ test "brackets at an RTL level are drawn mirrored, at an LTR level as typed" {
     try std.testing.expectEqual(close.gid, glyphAt(typed, 0).?.gid);
     try std.testing.expectEqual(open.gid, glyphAt(typed, 5).?.gid);
     try std.testing.expect(glyphAt(typed, 0).?.x < glyphAt(typed, 5).?.x);
+}
+
+test "cell boxes tile the cell grid exactly once, whatever the glyphs do" {
+    // Spans follow the glyphs (cursor, hit-testing); boxes are the grid cells at their visual positions
+    // (backgrounds, selection), so they must cover every cell of the row with no gap and no overlap.
+    const strs = [_][]const u8{ "مُحَمَّد لا إله إلا الله", "ls ملف.txt", "│ مرحبا    │", "الله" };
+    for (strs) |str| {
+        for ([_]bool{ true, false }) |rtl| {
+            var s = try shapeStr(str, rtl);
+            defer freeShaped(&s);
+            var seen: [64]u8 = @splat(0);
+            for (0..s.n) |i| {
+                const bx = s.rl.cellBox(@intCast(i), test_cell_w);
+                try std.testing.expectApproxEqAbs(test_cell_w, bx.x1 - bx.x0, 0.01);
+                const cell = @as(f32, @floatCast(@round(bx.x0 / test_cell_w)));
+                try std.testing.expectApproxEqAbs(cell * test_cell_w, bx.x0, 0.01); // on the grid
+                seen[@intFromFloat(cell)] += 1;
+            }
+            for (0..s.n) |c| try std.testing.expectEqual(@as(u8, 1), seen[c]);
+        }
+    }
 }

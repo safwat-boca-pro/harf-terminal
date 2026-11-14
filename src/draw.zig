@@ -511,18 +511,19 @@ pub const Painter = struct {
             if (!term.selectRow(row)) continue;
             const cells = self.gather(term, size.cols) catch continue;
             if ((self.shapedRow(cells) catch null)) |rl| {
-                // Backgrounds by column box (columns past the text are plain cells), then glyphs, then lines.
+                // Backgrounds by the grid cell each column occupies (columns past the text are plain cells): the glyph
+                // spans can be narrower than their cells, and fractional edges leave seams; cell boxes do neither.
                 for (0..cells.len) |col| {
-                    const sp = rl.span(@intCast(col), m.cell_w);
+                    const bx = rl.cellBox(@intCast(col), m.cell_w);
                     const cc = colorsAt(cells, col, d);
-                    if (cc.has_bg) fill(ctx, sp.x0, top, sp.x1 - sp.x0, ch, cc.bg);
+                    if (cc.has_bg) fill(ctx, bx.x0, top, bx.x1 - bx.x0, ch, cc.bg);
                 }
                 self.drawShaped(ctx, rl, cells, d, top + m.ascent, null);
                 for (0..cells.len) |col| {
                     const st = styleAt(cells, col);
                     if (st.underline() == .none and st.flags & vt.Style.Flag.strikethrough == 0) continue;
-                    const sp = rl.span(@intCast(col), m.cell_w);
-                    self.drawLines(ctx, st, colorsAt(cells, col, d), sp.x0, sp.x1 - sp.x0, top);
+                    const bx = rl.cellBox(@intCast(col), m.cell_w);
+                    self.drawLines(ctx, st, colorsAt(cells, col, d), bx.x0, bx.x1 - bx.x0, top);
                 }
                 if (cur) |c| if (c.visible and c.row == row and c.col < size.cols) {
                     const sp = rl.span(c.col, m.cell_w);
@@ -1513,3 +1514,34 @@ test "batched glyph draws equal the reference with a visible cursor" {
     try std.testing.expect(try parityOf("hello \u{65E5}\u{672C} world\r\nsecond \u{645}\u{631}\u{62D}\u{628}\u{627} line\x1b[2;3H", 30, 4));
 }
 
+
+// ---- R5: no seams between adjacent backgrounds on a shaped row ----
+
+test "a shaped row's uniform background has no seams" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const m = p.metrics();
+    // invisible text on a blue background: nothing is drawn but the per-column background fills
+    const s = try testScreen(p, 40, 2, 40, "\x1b[?25l\x1b[44m\x1b[8m\u{645}\u{631}\u{62D}\u{628}\u{627} \u{628}\u{627}\u{644}\u{639}\u{627}\u{644}\u{645} \u{648}\u{631}\u{62D}\u{645}\u{629} \u{627}\u{644}\u{644}\u{647} \u{648}\u{628}\u{631}\u{643}\u{627}\u{62A}\u{647}\x1b[0m");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    try std.testing.expectEqual(@as(u32, 1), p.stats.shaped_rows);
+    const blue = s.t.paletteColor(4);
+    const rl = (try testLayout(p, s.t, 0)).?;
+    var x_lo: f32 = std.math.inf(f32);
+    var x_hi: f32 = 0;
+    for (0..rl.n_cells) |i| {
+        const sp = rl.span(@intCast(i), m.cell_w);
+        x_lo = @min(x_lo, sp.x0);
+        x_hi = @max(x_hi, sp.x1);
+    }
+    const lo: usize = @intFromFloat(@ceil(x_lo));
+    const hi: usize = @intFromFloat(@floor(x_hi));
+    var bad: usize = 0;
+    for ([_]usize{ 1, 5, @as(usize, @intFromFloat(m.cell_h)) / 2, @as(usize, @intFromFloat(m.cell_h)) - 2 }) |y| {
+        for (lo..hi) |x| {
+            if (!near(s.cv.px(x, y), blue.r, blue.g, blue.b, 0)) bad += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), bad); // every pixel inside the span is exactly the background
+}

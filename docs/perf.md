@@ -150,8 +150,14 @@ cold frame about 2 percent: most glyphs of a justified Arabic word sit on fracti
 **Why fractional positions are not batched.** Drawing every shaped glyph through a batch produced 93 to 155 differing bytes
 per small screen. Drawing the same glyphs one at a time through a translation was exact, and so was the plain path (its
 glyphs sit at `col * cell_w`, whole pixels). CoreGraphics snaps the positions of a batched call to whole pixels but honors a
-translation. So the rule is exact: batch only glyphs at whole-pixel positions, draw the rest as before. Pictures: the four
-`docs/slice3` pictures and the three `docs/phase4` pictures regenerate byte-identical. `Harf --selftest` prints `selftest ok`.
+translation. So the rule is exact: batch only glyphs at whole-pixel positions, draw the rest as before.
+
+Correction (found while doing R5): `macos/build-app.sh` did not relink the app when only the Zig library changed, so the first
+"pictures byte-identical" check for P1 ran against a stale binary. `build-app.sh` now deletes the linked product so it always
+relinks. Rechecked with a true build: the `docs/slice3` colors and selection-latin pictures and the three `docs/phase4`
+pictures are byte-identical with P1 in the binary, and `Harf --selftest` prints `selftest ok`. In the app the colored plain
+80x24 screen now draws in 1.4 ms cold and 0.6 ms on the second draw (it read 2.7 and 1.8 ms on the stale binary), which
+includes AppKit's bitmap path.
 
 ### P2: synchronized output, idle check (2026-11-14)
 
