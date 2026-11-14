@@ -165,6 +165,47 @@ export fn harf_term_draw(t: *HarfTerm, p: *draw.Painter, ctx: *ct.CGContext, fir
     p.drawRows(g, ctx, first_row, last_row);
 }
 
+/// A mouse event at the pixel (`x_px`, `y_px`) of the grid (device pixels, origin at its top-left).
+/// action: 0 press, 1 release, 2 motion. button: 0 none (motion), 1 left, 2 right, 3 middle. `mods` uses
+/// the HARF_MOD_* bits. Returns 1 if the program has mouse tracking on and took the event, 0 if the
+/// caller keeps it (a selection gesture; Shift always keeps it), -1 on error.
+export fn harf_term_mouse(t: *HarfTerm, p: *draw.Painter, action: c_int, button: c_int, mods: u32, x_px: f64, y_px: f64) c_int {
+    if (action == 2 and button == 0 and mods & 1 == 0) {
+        // Plain motion costs nothing unless a program asked to hear it.
+        const g = t.session.lock();
+        defer t.session.unlock();
+        if (!g.mouseTracking()) return 0;
+    }
+    var col: u16 = 0;
+    var row: u16 = 0;
+    {
+        const g = t.session.lock();
+        defer t.session.unlock();
+        const cell = p.cellAt(g, x_px, y_px);
+        col = cell.col;
+        row = cell.row;
+    }
+    const m = p.metrics();
+    const cw: u32 = @max(1, @as(u32, @intFromFloat(m.cell_w)));
+    const ch: u32 = @max(1, @as(u32, @intFromFloat(m.cell_h)));
+    t.session.setPointer(col, row);
+    t.session.setCellPx(cw, ch);
+    if (mods & 1 != 0) return 0; // Shift selects, even while a program tracks the mouse
+    const act: vt.Terminal.MouseAction = switch (action) {
+        1 => .release,
+        2 => .motion,
+        else => .press,
+    };
+    const btn: ?vt.Terminal.MouseButton = switch (button) {
+        1 => .left,
+        2 => .right,
+        3 => .middle,
+        else => null,
+    };
+    const took = t.session.mouse(act, btn, mods, col, row, cw, ch) catch return -1;
+    return if (took) 1 else 0;
+}
+
 /// Re-arms the `wake` callback; call before reading the grid for a redraw.
 export fn harf_term_wake_handled(t: *HarfTerm) void {
     t.session.wakeHandled();
@@ -209,6 +250,26 @@ test "harf_term_key and harf_term_paste" {
     try std.testing.expectEqual(@as(c_int, 1), harf_term_key(t, 56, 1, null, 0, 0, 0)); // shift alone
     try std.testing.expectEqual(@as(c_int, 0), harf_term_key(t, 200, 0, "x", 1, 0, 0)); // unknown key: text path
     try std.testing.expectEqual(@as(c_int, 0), harf_term_paste(t, "hi", 2));
+}
+
+test "harf_term_mouse: tracking takes the event, Shift keeps it for selection" {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "printf '\\033[?1000h\\033[?1006h'; sleep 5", null };
+    const t = harf_term_new(80, 24, 1 << 20, &argv, null) orelse return error.TermNotCreated;
+    defer harf_term_free(t);
+    const p = harf_painter_new(28) orelse return error.NoPainter;
+    defer harf_painter_free(p);
+    var waited: u32 = 0;
+    while (waited < 10_000) : (waited += 5) {
+        const g = t.session.lock();
+        const on = g.mouseTracking();
+        t.session.unlock();
+        if (on) break;
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    try std.testing.expectEqual(@as(c_int, 0), harf_term_mouse(t, p, 0, 1, 1, 40, 40)); // Shift: not for the program
+    try std.testing.expectEqual(@as(usize, 0), t.session.pendingInput());
+    try std.testing.expectEqual(@as(c_int, 1), harf_term_mouse(t, p, 0, 1, 0, 40, 40)); // the program takes it
 }
 
 test "harf_term_new rejects zero size" {

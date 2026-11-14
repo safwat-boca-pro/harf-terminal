@@ -149,6 +149,15 @@ final class TerminalController {
         _ = harf_term_scroll(t, rows)
     }
 
+    /// A mouse event at `p` (view points). True if the program took it (mouse tracking); false means the
+    /// caller keeps it. Mods with Shift only record the pointer position.
+    @discardableResult
+    func mouse(_ action: Int32, button: Int32, mods: UInt32, at p: NSPoint) -> Bool {
+        guard let t = term, let painter else { return false }
+        let x = Double((p.x - inset) * scale), y = Double((p.y - inset) * scale)
+        return harf_term_mouse(t, painter, action, button, mods, x, y) == 1
+    }
+
     func paste(_ text: String) {
         guard let t = term, !text.isEmpty else { return }
         let bytes = Array(text.utf8)
@@ -247,8 +256,31 @@ final class TerminalView: NSView {
     /// carries over, so slow scrolling still moves. No timers.
     private var scrollRemainder: CGFloat = 0
 
+    private func sendMouse(_ action: Int32, _ button: Int32, _ event: NSEvent) {
+        controller?.mouse(action, button: button, mods: Self.harfMods(event.modifierFlags), at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseDown(with event: NSEvent) { sendMouse(0, 1, event) }
+    override func mouseUp(with event: NSEvent) { sendMouse(1, 1, event) }
+    override func mouseDragged(with event: NSEvent) { sendMouse(2, 1, event) }
+    override func rightMouseDown(with event: NSEvent) { sendMouse(0, 2, event) }
+    override func rightMouseUp(with event: NSEvent) { sendMouse(1, 2, event) }
+    override func rightMouseDragged(with event: NSEvent) { sendMouse(2, 2, event) }
+    override func otherMouseDown(with event: NSEvent) { sendMouse(0, 3, event) }
+    override func otherMouseUp(with event: NSEvent) { sendMouse(1, 3, event) }
+    override func otherMouseDragged(with event: NSEvent) { sendMouse(2, 3, event) }
+    override func mouseMoved(with event: NSEvent) { sendMouse(2, 0, event) }
+
+    override func updateTrackingAreas() {
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self))
+        super.updateTrackingAreas()
+    }
+
     override func scrollWheel(with event: NSEvent) {
         guard let c = controller else { return }
+        // Wheel events to a mouse-tracking program carry the pointer's cell: record it (Shift = position only).
+        c.mouse(2, button: 0, mods: UInt32(HARF_MOD_SHIFT), at: convert(event.locationInWindow, from: nil))
         if event.phase == .began || event.phase == .mayBegin { scrollRemainder = 0 }
         let rows = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / max(1, c.cellSizePt.height) : event.scrollingDeltaY * 3
         scrollRemainder += rows

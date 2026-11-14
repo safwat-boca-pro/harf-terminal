@@ -106,6 +106,8 @@ pub const Terminal = struct {
     row_cells: c.GhosttyRenderStateRowCells,
     key_encoder: c.GhosttyKeyEncoder,
     key_event: c.GhosttyKeyEvent,
+    mouse_encoder: c.GhosttyMouseEncoder,
+    mouse_event: c.GhosttyMouseEvent,
     /// Colors as of the last `update`.
     palette: [256]Rgb = @splat(.{ .r = 0, .g = 0, .b = 0 }),
     default_colors: Colors = .{ .fg = theme_fg, .bg = theme_bg, .cursor = null },
@@ -140,10 +142,16 @@ pub const Terminal = struct {
         try check(c.ghostty_key_encoder_new(null, &self.key_encoder));
         errdefer c.ghostty_key_encoder_free(self.key_encoder);
         try check(c.ghostty_key_event_new(null, &self.key_event));
+        errdefer c.ghostty_key_event_free(self.key_event);
+        try check(c.ghostty_mouse_encoder_new(null, &self.mouse_encoder));
+        errdefer c.ghostty_mouse_encoder_free(self.mouse_encoder);
+        try check(c.ghostty_mouse_event_new(null, &self.mouse_event));
         return self;
     }
 
     pub fn deinit(self: *Terminal) void {
+        c.ghostty_mouse_event_free(self.mouse_event);
+        c.ghostty_mouse_encoder_free(self.mouse_encoder);
         c.ghostty_key_event_free(self.key_event);
         c.ghostty_key_encoder_free(self.key_encoder);
         c.ghostty_render_state_row_cells_free(self.row_cells);
@@ -262,6 +270,47 @@ pub const Terminal = struct {
         if (len > utf8.len) return false;
         const cp = std.unicode.utf8Decode(utf8[0..len]) catch return false;
         return cp >= 0xE000 and cp <= 0xF8FF;
+    }
+
+    /// True while the program has any mouse tracking mode on (X10, normal, button or any-event).
+    pub fn mouseTracking(self: *Terminal) bool {
+        var on: bool = false;
+        _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &on);
+        return on;
+    }
+
+    pub const MouseAction = enum(u8) { press = 0, release = 1, motion = 2 };
+    /// The library's button numbers: wheel up and down are buttons four and five.
+    pub const MouseButton = enum(u8) { left = 1, right = 2, middle = 3, wheel_up = 4, wheel_down = 5 };
+
+    /// The bytes a mouse event sends for the terminal's current tracking mode and format (empty if that
+    /// mode does not report it). The position is the center of cell (`col`, `row`), clamped to the grid,
+    /// so the library's own cell math lands on that cell. `button` is null for motion with no button down.
+    pub fn encodeMouse(self: *Terminal, action: MouseAction, button: ?MouseButton, mods: u32, col: u16, row: u16, cell_w: u32, cell_h: u32, out: []u8) []const u8 {
+        const sz = self.size();
+        if (sz.cols == 0 or sz.rows == 0 or cell_w == 0 or cell_h == 0) return out[0..0];
+        _ = c.ghostty_mouse_encoder_set_from_terminal(self.mouse_encoder, self.handle);
+        var geometry = std.mem.zeroes(c.GhosttyMouseEncoderSize);
+        geometry.size = @sizeOf(c.GhosttyMouseEncoderSize);
+        geometry.screen_width = @as(u32, sz.cols) * cell_w;
+        geometry.screen_height = @as(u32, sz.rows) * cell_h;
+        geometry.cell_width = cell_w;
+        geometry.cell_height = cell_h;
+        _ = c.ghostty_mouse_encoder_set(self.mouse_encoder, c.GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &geometry);
+        var pressed: bool = button != null;
+        _ = c.ghostty_mouse_encoder_set(self.mouse_encoder, c.GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &pressed);
+        const cx = @min(col, sz.cols - 1);
+        const cy = @min(row, sz.rows - 1);
+        _ = c.ghostty_mouse_event_set_action(self.mouse_event, @intFromEnum(action));
+        if (button) |b| _ = c.ghostty_mouse_event_set_button(self.mouse_event, @intFromEnum(b)) else _ = c.ghostty_mouse_event_clear_button(self.mouse_event);
+        _ = c.ghostty_mouse_event_set_mods(self.mouse_event, @intCast(mods & 0xF));
+        _ = c.ghostty_mouse_event_set_position(self.mouse_event, .{
+            .x = (@as(f32, @floatFromInt(cx)) + 0.5) * @as(f32, @floatFromInt(cell_w)),
+            .y = (@as(f32, @floatFromInt(cy)) + 0.5) * @as(f32, @floatFromInt(cell_h)),
+        });
+        var written: usize = 0;
+        if (c.ghostty_mouse_encoder_encode(self.mouse_encoder, self.mouse_event, out.ptr, out.len, &written) != c.GHOSTTY_SUCCESS) return out[0..0];
+        return out[0..written];
     }
 
     /// The kitty keyboard protocol flags the program has set (0 = legacy keys).
@@ -953,4 +1002,58 @@ test "alternate screen is reported" {
     try std.testing.expect(t.onAlternateScreen());
     t.write("\x1b[?1049l");
     try std.testing.expect(!t.onAlternateScreen());
+}
+
+test "mouse tracking follows the program's request" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    try std.testing.expect(!t.mouseTracking());
+    t.write("\x1b[?1000h");
+    try std.testing.expect(t.mouseTracking());
+    t.write("\x1b[?1000l");
+    try std.testing.expect(!t.mouseTracking());
+}
+
+test "mouse reports in SGR mode, 1-based, at the cell's center" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("\x1b[?1000h\x1b[?1006h");
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1b[<0;5;3M", t.encodeMouse(.press, .left, 0, 4, 2, 10, 20, &buf));
+    try std.testing.expectEqualStrings("\x1b[<0;5;3m", t.encodeMouse(.release, .left, 0, 4, 2, 10, 20, &buf));
+    try std.testing.expectEqualStrings("\x1b[<2;1;1M", t.encodeMouse(.press, .right, 0, 0, 0, 10, 20, &buf));
+    try std.testing.expectEqualStrings("\x1b[<64;1;1M", t.encodeMouse(.press, .wheel_up, 0, 0, 0, 10, 20, &buf));
+    try std.testing.expectEqualStrings("\x1b[<65;1;1M", t.encodeMouse(.press, .wheel_down, 0, 0, 0, 10, 20, &buf));
+    try std.testing.expectEqualStrings("\x1b[<4;1;1M", t.encodeMouse(.press, .left, 1, 0, 0, 10, 20, &buf)); // shift adds 4
+}
+
+test "motion is reported only in the modes that ask for it" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var buf: [32]u8 = undefined;
+    t.write("\x1b[?1000h\x1b[?1006h");
+    try std.testing.expectEqual(@as(usize, 0), t.encodeMouse(.motion, null, 0, 3, 3, 10, 20, &buf).len);
+    t.write("\x1b[?1003h");
+    try std.testing.expectEqualStrings("\x1b[<35;4;4M", t.encodeMouse(.motion, null, 0, 3, 3, 10, 20, &buf));
+}
+
+test "mouse positions clamp to the grid" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 10, .rows = 5 });
+    defer t.deinit();
+    t.write("\x1b[?1000h\x1b[?1006h");
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1b[<0;10;5M", t.encodeMouse(.press, .left, 0, 500, 500, 10, 20, &buf));
+}
+
+test "wide grid reports columns past 223" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 300, .rows = 5 });
+    defer t.deinit();
+    var buf: [32]u8 = undefined;
+    t.write("\x1b[?1000h\x1b[?1006h");
+    try std.testing.expectEqualStrings("\x1b[<0;251;1M", t.encodeMouse(.press, .left, 0, 250, 0, 10, 20, &buf));
+    // The legacy X10 format cannot name column 250 in one byte. Whatever the library does, the
+    // result must be empty or one well-formed 6-byte report, never a corrupt or oversized one.
+    t.write("\x1b[?1006l");
+    const legacy = t.encodeMouse(.press, .left, 0, 250, 0, 10, 20, &buf);
+    try std.testing.expect(legacy.len == 0 or (legacy.len == 6 and std.mem.eql(u8, legacy[0..3], "\x1b[M")));
 }

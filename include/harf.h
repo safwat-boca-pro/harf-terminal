@@ -72,6 +72,10 @@ int harf_term_key(HarfTerm *t, uint16_t keycode, uint32_t mods, const uint8_t *u
 /* Wheel or trackpad: delta_rows rows toward newer output when positive, toward older when negative.
  * On the alternate screen the program gets that many Up/Down key presses instead. 0 = ok. */
 int harf_term_scroll(HarfTerm *t, int32_t delta_rows);
+/* A mouse event at a pixel of the grid (device pixels, origin at its top-left). action: 0 press, 1 release,
+ * 2 motion. button: 0 none, 1 left, 2 right, 3 middle. Returns 1 if the program has mouse tracking on and took
+ * the event, 0 if the caller keeps it for selection (Shift always keeps it), -1 on error. */
+int harf_term_mouse(HarfTerm *t, HarfPainter *p, int action, int button, uint32_t mods, double x_px, double y_px);
 /* Pastes text, framed for the terminal's paste mode (bracketed, newlines as CR). 0 = ok. */
 int harf_term_paste(HarfTerm *t, const uint8_t *utf8, size_t len);
 void harf_term_wake_handled(HarfTerm *t);

@@ -50,6 +50,10 @@ pub const Session = struct {
     /// `deinit` writes to [1] to wake the I/O thread, which polls [0] together with the PTY.
     stop_pipe: [2]c_int = .{ -1, -1 },
     wake_pending: std.atomic.Value(bool) = .init(false),
+    /// The pointer's last cell, packed (col << 16 | row).
+    pointer: std.atomic.Value(u32) = .init(0),
+    /// Cell size in pixels, for mouse reports (set by the first draw or `harf_term_mouse`).
+    cell_px: std.atomic.Value(u32) = .init((8 << 16) | 16),
     /// -1 while the child runs, then its exit code.
     exit_status: std.atomic.Value(i32) = .init(-1),
 
@@ -136,6 +140,30 @@ pub const Session = struct {
         try self.input(bytes);
     }
 
+    /// Where the pointer last was (a cell), for wheel events, which carry a position.
+    pub fn setPointer(self: *Session, col: u16, row: u16) void {
+        self.pointer.store((@as(u32, col) << 16) | row, .release);
+    }
+
+    pub fn setCellPx(self: *Session, w: u32, h: u32) void {
+        if (w > 0 and h > 0) self.cell_px.store((w << 16) | (h & 0xFFFF), .release);
+    }
+
+    /// A mouse event at cell (`col`, `row`). True if the program has mouse tracking on and took the event
+    /// (the bytes it asked for are queued, possibly none); false means the caller keeps it (selection).
+    pub fn mouse(self: *Session, action: vt.Terminal.MouseAction, button: ?vt.Terminal.MouseButton, mods: u32, col: u16, row: u16, cell_w: u32, cell_h: u32) !bool {
+        var buf: [64]u8 = undefined;
+        var n: usize = 0;
+        {
+            const t = self.lock();
+            defer self.unlock();
+            if (!t.mouseTracking()) return false;
+            n = t.encodeMouse(action, button, mods, col, row, cell_w, cell_h, &buf).len;
+        }
+        if (n > 0) try self.input(buf[0..n]);
+        return true;
+    }
+
     /// The wheel or trackpad: `delta_rows` rows toward newer output when positive, older when negative.
     /// On the alternate screen the program gets that many Up or Down key presses (in its cursor key
     /// mode); otherwise the viewport scrolls through the scrollback. At most 64 presses per call.
@@ -146,7 +174,14 @@ pub const Session = struct {
         {
             const t = self.lock();
             defer self.unlock();
-            if (t.onAlternateScreen()) {
+            if (t.mouseTracking()) {
+                // A wheel notch is three rows; a program gets one wheel event per notch, at the pointer.
+                const p = self.pointer.load(.acquire);
+                const cp = self.cell_px.load(.acquire);
+                const button: vt.Terminal.MouseButton = if (delta_rows < 0) .wheel_up else .wheel_down;
+                const events = @min((@abs(delta_rows) + 2) / 3, 16);
+                for (0..events) |_| n += t.encodeMouse(.press, button, 0, @intCast(p >> 16), @intCast(p & 0xFFFF), cp >> 16, cp & 0xFFFF, buf[n..]).len;
+            } else if (t.onAlternateScreen()) {
                 const arrow = keys.fromMac(if (delta_rows < 0) 126 else 125).?; // Up, Down
                 const presses = @min(@abs(delta_rows), 64);
                 for (0..presses) |_| n += t.encodeKey(arrow, 0, "", 0, .press, buf[n..]).len;
@@ -736,4 +771,32 @@ test "scroll: the alternate screen gets arrow keys, in the terminal's cursor key
     try s.scroll(-3); // three presses of Up: ESC [ A
     try s.scroll(1); // one Down
     try std.testing.expect(hexOf(s, "1b 5b 41 1b 5b 41 1b 5b 41 1b 5b 42"));
+}
+
+test "mouse: reports reach a program that asked for them, and nothing goes out otherwise" {
+    const script = "printf '\\033[?1000h\\033[?1006h'; stty raw -echo; echo ready; dd bs=1 count=18 2>/dev/null | xxd -p";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    try std.testing.expect(try s.mouse(.press, .left, 0, 4, 2, 10, 20));
+    try std.testing.expect(try s.mouse(.release, .left, 0, 4, 2, 10, 20));
+    try std.testing.expect(hexOf(s, "1b5b3c303b353b334d1b5b3c303b353b336d")); // ESC [ < 0 ; 5 ; 3 M, then m
+}
+
+test "mouse: with tracking off nothing is sent and the caller keeps the event" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 5" } });
+    defer s.deinit();
+    try std.testing.expect(!try s.mouse(.press, .left, 0, 4, 2, 10, 20));
+    try std.testing.expectEqual(@as(usize, 0), s.pendingInput());
+}
+
+test "scroll: a program that tracks the mouse gets wheel events, not a scrolled viewport" {
+    const script = "printf '\\033[?1000h\\033[?1006h'; stty raw -echo; echo ready; dd bs=1 count=30 2>/dev/null | xxd -p";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    s.setPointer(6, 1);
+    try s.scroll(-1); // one wheel-up event at the pointer: ESC [ < 64 ; 7 ; 2 M
+    try s.scroll(4); // two wheel-down events (a notch is three rows): ESC [ < 65 ; 7 ; 2 M, twice
+    try std.testing.expect(hexOf(s, "1b5b3c36343b373b324d1b5b3c36353b373b324d1b5b3c36353b373b324d"));
 }

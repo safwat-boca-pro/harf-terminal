@@ -212,6 +212,36 @@ pub const Painter = struct {
         }
     }
 
+    pub const CellPos = struct { col: u16, row: u16 };
+
+    /// The cell under the pixel (`x_px`, `y_px`) of the grid, clamped to the grid. On a shaped Arabic row the
+    /// column comes from the layout, so it is the letter drawn under the pointer; elsewhere it is `x / cell_w`.
+    /// Takes the render state, so the caller holds the session lock.
+    pub fn cellAt(self: *Painter, term: *vt.Terminal, x_px: f64, y_px: f64) CellPos {
+        const size = term.size();
+        if (size.cols == 0 or size.rows == 0) return .{ .col = 0, .row = 0 };
+        const m = self.metrics_;
+        const rowf = std.math.clamp(@floor(y_px / m.cell_h), 0, @as(f64, @floatFromInt(size.rows - 1)));
+        const row: u16 = @intFromFloat(rowf);
+        const colf = std.math.clamp(@floor(x_px / m.cell_w), 0, @as(f64, @floatFromInt(size.cols - 1)));
+        const plain: CellPos = .{ .col = @intFromFloat(colf), .row = row };
+        if (!term.update() or !term.selectRow(row)) return plain;
+        const cells = self.gather(term, size.cols) catch return plain;
+        const rl = (self.shapedRow(cells) catch null) orelse return plain;
+        if (x_px >= @as(f64, @floatFromInt(rl.n_cells)) * m.cell_w) return plain; // past the text: plain cells
+        var best: u16 = 0;
+        var best_d: f64 = std.math.inf(f64);
+        for (rl.spans, 0..) |sp, i| {
+            const d: f64 = if (x_px < sp.x0) sp.x0 - x_px else if (x_px > sp.x1) x_px - sp.x1 else 0;
+            if (d < best_d) {
+                best_d = d;
+                best = @intCast(i);
+            }
+            if (d == 0) break;
+        }
+        return .{ .col = best, .row = row };
+    }
+
     /// Reads the cells of the selected row (`term.selectRow` first). The slice is valid until the next call.
     fn gather(self: *Painter, term: *vt.Terminal, cols: u16) ![]const vt.Cell {
         try self.cell_store.resize(self.gpa, @as(usize, cols) * 16);
@@ -1051,4 +1081,38 @@ test "cursor on an inverse cell stays legible" {
         hi = @max(hi, v);
     };
     try std.testing.expect(hi - lo > 100);
+}
+
+// ---- slice 3: hit-testing ----
+
+test "cell lookup on plain and shaped rows" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const m = p.metrics();
+    const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 3 });
+    defer t.deinit();
+    t.write("hello\r\n\u{645}\u{631}\u{62D}\u{628}\u{627}");
+    const cw: f64 = m.cell_w;
+    const chh: f64 = m.cell_h;
+    // plain row: x / cell_w, y / cell_h
+    const a = p.cellAt(t, cw * 3.5, chh * 0.5);
+    try std.testing.expectEqual(@as(u16, 3), a.col);
+    try std.testing.expectEqual(@as(u16, 0), a.row);
+    // clamps: negative and far outside
+    const neg = p.cellAt(t, -50, -50);
+    try std.testing.expectEqual(@as(u16, 0), neg.col);
+    try std.testing.expectEqual(@as(u16, 0), neg.row);
+    const far = p.cellAt(t, 99999, 99999);
+    try std.testing.expectEqual(@as(u16, 19), far.col);
+    try std.testing.expectEqual(@as(u16, 2), far.row);
+    // shaped row 1: the point inside the second letter's span is column 1; the first letter is rightmost
+    var rl = (try testLayout(p, t, 1)).?;
+    const second = rl.span(1, m.cell_w);
+    const hit = p.cellAt(t, (second.x0 + second.x1) / 2, chh * 1.5);
+    try std.testing.expectEqual(@as(u16, 1), hit.col);
+    try std.testing.expectEqual(@as(u16, 1), hit.row);
+    const first = rl.span(0, m.cell_w);
+    try std.testing.expectEqual(@as(u16, 0), p.cellAt(t, (first.x0 + first.x1) / 2, chh * 1.5).col);
+    // past the text: the plain column
+    try std.testing.expectEqual(@as(u16, 12), p.cellAt(t, cw * 12.5, chh * 1.5).col);
 }

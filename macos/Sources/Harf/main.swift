@@ -185,6 +185,30 @@ func selfTest() -> Never {
     if !pump(5, until: { (0..<hist.gridSize.rows).contains { hist.rowText($0).contains("hi") } }) { fail("scrollback: typing did not bring the view back") }
     hist.close()
 
+    // 2e. A real mouse click reaches a program that asked for mouse reports, at the cell under the pointer.
+    do {
+        let script = "stty raw -echo; printf '\\033[?1000h\\033[?1006h'; printf R; head -c 18 | od -An -tx1 | tr -s ' '"
+        guard let m = TerminalController(argv: ["/bin/sh", "-c", script], frame: NSSize(width: 700, height: 420)) else { fail("cannot start mouse session") }
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
+        win.contentView = m.view
+        if !pump(5, until: { m.rowText(0).contains("R") }) { fail("mouse: child not ready: '\(m.rowText(0))'") }
+        _ = pump(0.3) { false }   // the child switched tracking on before it printed R; let the parser see it
+        let cell = m.cellSizePt
+        let pt = NSPoint(x: m.insetPt + cell.width * 4.5, y: 420 - (m.insetPt + cell.height * 2.5))   // window coordinates: y up
+        func click(_ type: NSEvent.EventType) -> NSEvent {
+            guard let ev = NSEvent.mouseEvent(with: type, location: pt, modifierFlags: [], timestamp: 0, windowNumber: win.windowNumber, context: nil,
+                                              eventNumber: 0, clickCount: 1, pressure: 1) else { fail("cannot make a mouse event") }
+            return ev
+        }
+        m.view.mouseDown(with: click(.leftMouseDown))
+        m.view.mouseUp(with: click(.leftMouseUp))
+        func joined() -> String { (0..<4).map { m.rowText($0) }.joined().filter { $0 != " " } }   // the hex dump wraps
+        if !pump(5, until: { joined().contains("1b5b3c303b353b334d1b5b3c303b353b336d") }) {
+            fail("mouse: rows are '\((0..<4).map { m.rowText($0) }.joined(separator: "|"))'")
+        }
+        m.close()
+    }
+
     // 3. Paste, bracketed or not, arrives as typed text.
     guard let pasting = TerminalController(argv: echo, frame: NSSize(width: 700, height: 420)) else { fail("cannot start paste session") }
     pasting.paste("x y")
