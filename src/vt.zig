@@ -13,6 +13,9 @@ pub const Callbacks = struct {
     bell: ?*const fn (ctx: ?*anyopaque) void = null,
     /// The new title is already readable with `Terminal.title`.
     title_changed: ?*const fn (ctx: ?*anyopaque) void = null,
+    /// The program started (`true`) or ended (`false`) a render hold (synchronized output, mode 2026). Runs
+    /// inside `write` (and `resize`) with the caller's lock held: set a flag, nothing more.
+    render_hold: ?*const fn (ctx: ?*anyopaque, held: bool) void = null,
 };
 
 pub const Rgb = struct { r: u8, g: u8, b: u8 };
@@ -92,6 +95,11 @@ fn bellTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque) callconv(.c) void {
     if (self.callbacks.bell) |f| f(self.callbacks.ctx);
 }
 
+fn renderHoldTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, held: bool) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(ud.?));
+    if (self.callbacks.render_hold) |f| f(self.callbacks.ctx, held);
+}
+
 fn titleTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(ud.?));
     if (self.callbacks.title_changed) |f| f(self.callbacks.ctx);
@@ -130,6 +138,7 @@ pub const Terminal = struct {
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_WRITE_PTY, @as(?*const anyopaque, @ptrCast(&writePtyTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_BELL, @as(?*const anyopaque, @ptrCast(&bellTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, @as(?*const anyopaque, @ptrCast(&titleTrampoline))));
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_RENDER_HOLD, @as(?*const anyopaque, @ptrCast(&renderHoldTrampoline))));
         var fg: c.GhosttyColorRgb = .{ .r = opts.default_fg.r, .g = opts.default_fg.g, .b = opts.default_fg.b };
         var bg: c.GhosttyColorRgb = .{ .r = opts.default_bg.r, .g = opts.default_bg.g, .b = opts.default_bg.b };
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &fg));

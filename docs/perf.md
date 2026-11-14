@@ -152,3 +152,12 @@ per small screen. Drawing the same glyphs one at a time through a translation wa
 glyphs sit at `col * cell_w`, whole pixels). CoreGraphics snaps the positions of a batched call to whole pixels but honors a
 translation. So the rule is exact: batch only glyphs at whole-pixel positions, draw the rest as before. Pictures: the four
 `docs/slice3` pictures and the three `docs/phase4` pictures regenerate byte-identical. `Harf --selftest` prints `selftest ok`.
+
+### P2: synchronized output, idle check (2026-11-14)
+
+After the render-hold change, `Harf` launched directly, window open, no output, 30 s sampled every 2 s: idle CPU mean 0.01
+percent, max 0.10 percent, cumulative CPU time 0:00.21 to 0:00.22 (0.01 s over 30 s). The Phase 0 level is 0.01 percent mean.
+`phys_footprint` read 40 MB at 5 s and 38 MB at 35 s with the default window; that is not the defined measurement (12 to 20 s
+after launch at 700x420 pt) and is the slice 4 question, but it is above the 30 MB target and worth knowing now.
+`bench/idle.sh` now starts the binary itself and tracks that pid (it used `pgrep -x | head -1` and `kill`, which could end a
+different running copy of the app).

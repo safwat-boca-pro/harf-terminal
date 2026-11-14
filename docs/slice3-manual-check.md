@@ -30,3 +30,6 @@ Build and open: `macos/build-app.sh && open macos/.build/Harf.app`. Pictures fro
 - [ ] Select text, then run `clear` or scroll: the highlight follows the content when it scrolls; a program that rewrites the cells in place keeps the highlight until you click.
 - [ ] Resize the window while scrolled up and while text is selected.
 - [ ] Idle for a minute with the window focused: CPU stays at 0.
+
+**Synchronized output (mode 2026)**
+- [ ] Run a program that redraws under `ESC[?2026h ... ESC[?2026l` (Claude Code, Codex, or `printf '\e[?2026h'; clear; sleep 1; echo whole frame; printf '\e[?2026l'`): the frame appears whole, with no half-drawn state. If a program ever leaves the hold on, the window stays frozen until it ends it or you resize the window (there is no deadline; see the ledger).

@@ -51,6 +51,8 @@ pub const Session = struct {
     stop_pipe: [2]c_int = .{ -1, -1 },
     wake_pending: std.atomic.Value(bool) = .init(false),
     focus: std.atomic.Value(bool) = .init(true),
+    /// True inside a render hold (synchronized output). Set by the parser callback (terminal lock held).
+    held: std.atomic.Value(bool) = .init(false),
     /// Wheel rows carried toward the next wheel event (|rows| < 3); guarded by `term_lock`.
     wheel_rows: i32 = 0,
     /// The pointer's last cell, packed (col << 16 | row).
@@ -85,7 +87,7 @@ pub const Session = struct {
             .cols = opts.cols,
             .rows = opts.rows,
             .scrollback_bytes = opts.scrollback_bytes,
-            .callbacks = .{ .ctx = self, .write_pty = onWritePty, .bell = onBell, .title_changed = onTitle },
+            .callbacks = .{ .ctx = self, .write_pty = onWritePty, .bell = onBell, .title_changed = onTitle, .render_hold = onRenderHold },
         });
         errdefer self.term.deinit();
         self.pty = if (opts.argv) |argv|
@@ -199,6 +201,12 @@ pub const Session = struct {
         const t = self.lock();
         defer self.unlock();
         return t.selectionText(gpa) catch |e| if (e == error.NoSelection) null else e;
+    }
+
+    /// True while the program is inside a synchronized-output hold. There is no deadline: the hold ends when
+    /// the program ends it, on RIS, or on resize (resizing the window is the way out of a stuck hold).
+    pub fn renderHeld(self: *const Session) bool {
+        return self.held.load(.acquire);
     }
 
     pub fn focused(self: *const Session) bool {
@@ -365,6 +373,7 @@ pub const Session = struct {
             defer self.unlock();
             t.resize(cols, rows, cell_w_px, cell_h_px);
         }
+        self.requestWake(); // a resize ends a render hold: show the result at once
         const total_w: u16 = @intCast(@min(std.math.maxInt(u16), @as(u64, cols) * cell_w_px));
         const total_h: u16 = @intCast(@min(std.math.maxInt(u16), @as(u64, rows) * cell_h_px));
         try self.pty.resize(cols, rows, total_w, total_h);
@@ -396,6 +405,8 @@ pub const Session = struct {
     }
 
     fn requestWake(self: *Session) void {
+        // A program inside a synchronized-output hold (mode 2026) is mid-frame: draw nothing until it ends.
+        if (self.held.load(.acquire)) return;
         if (self.wake_pending.swap(true, .acq_rel)) return;
         if (self.callbacks.wake) |f| f(self.callbacks.ctx);
     }
@@ -442,6 +453,11 @@ pub const Session = struct {
     fn onWritePty(ctx: ?*anyopaque, data: []const u8) void {
         const self: *Session = @ptrCast(@alignCast(ctx.?));
         self.input(data) catch {}; // a reply that does not fit the queue is dropped
+    }
+
+    fn onRenderHold(ctx: ?*anyopaque, held: bool) void {
+        const self: *Session = @ptrCast(@alignCast(ctx.?));
+        self.held.store(held, .release); // only a flag: the terminal lock is held
     }
 
     fn onBell(ctx: ?*anyopaque) void {
@@ -989,4 +1005,53 @@ test "scroll: the carried rows are dropped when tracking turns off" {
     // The child reads one byte: the marker "5a". Had an event gone out first, it would read 1b (or leftovers of an
     // earlier event, 5b), never 5a.
     try std.testing.expect(hexOf(s, "5a"));
+}
+
+const Held = struct {
+    s: *Session,
+    want: bool,
+    fn ok(self: Held) bool {
+        return self.s.renderHeld() == self.want;
+    }
+};
+
+test "synchronized output: no wake during a hold, exactly one when it ends, and the grid holds both parts" {
+    var spy: Spy = .{};
+    const script = "printf '\\033[?2026h'; printf 'part-one'; sleep 0.5; printf 'part-two'; printf '\\033[?2026l'; sleep 5";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script }, .callbacks = spy.callbacks() });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, Held{ .s = s, .want = true }, Held.ok));
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "part-one", .exact = false }, Row.ok)); // parsed, but held
+    try std.testing.expectEqual(@as(u32, 0), spy.wakes.load(.monotonic)); // the view is not told to draw half a frame
+    try std.testing.expect(waitFor(10_000, Held{ .s = s, .want = false }, Held.ok));
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "part-onepart-two" }, Row.ok));
+    try std.testing.expectEqual(@as(u32, 1), spy.wakes.load(.monotonic)); // one wake, with both parts in the grid
+}
+
+test "synchronized output: RIS and resize end a hold and wake the view" {
+    var spy: Spy = .{};
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf '\\033[?2026h'; echo ready; read x; printf '\\033c'; sleep 5" }, .callbacks = spy.callbacks() });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, Held{ .s = s, .want = true }, Held.ok));
+    try std.testing.expectEqual(@as(u32, 0), spy.wakes.load(.monotonic));
+    try s.input("\n"); // the child resets the terminal (RIS)
+    try std.testing.expect(waitFor(10_000, Held{ .s = s, .want = false }, Held.ok));
+    try std.testing.expectEqual(@as(u32, 1), spy.wakes.load(.monotonic));
+
+    var spy2: Spy = .{};
+    const s2 = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf '\\033[?2026h'; sleep 5" }, .callbacks = spy2.callbacks() });
+    defer s2.deinit();
+    try std.testing.expect(waitFor(10_000, Held{ .s = s2, .want = true }, Held.ok));
+    try s2.resize(100, 30, 8, 16);
+    try std.testing.expect(!s2.renderHeld());
+    try std.testing.expectEqual(@as(u32, 1), spy2.wakes.load(.monotonic));
+}
+
+test "synchronized output: a flood inside a hold does not deadlock" {
+    var spy: Spy = .{};
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf '\\033[?2026h'; seq 1 200000; printf '\\033[?2026l'; echo finished; sleep 5" }, .callbacks = spy.callbacks() });
+    defer s.deinit();
+    try std.testing.expect(waitFor(30_000, Row{ .s = s, .want = "finished" }, Row.ok));
+    try std.testing.expect(!s.renderHeld());
+    try std.testing.expect(spy.wakes.load(.monotonic) <= 3); // the whole flood was one held frame
 }

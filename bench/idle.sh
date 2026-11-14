@@ -6,10 +6,12 @@ APP=${1:?usage: idle.sh <path/to/App.app> [seconds]}
 SECS=${2:-60}
 NAME=$(basename "$APP" .app)
 
-open -n "$APP"
+# Start the binary directly so the pid is ours: looking one up by name could pick (and later kill) another
+# running copy of the app.
+"$APP/Contents/MacOS/$NAME" >/dev/null 2>&1 &
+PID=$!
 sleep 5   # let the first frame land
-PID=$(pgrep -x "$NAME" | head -1)
-[ -n "$PID" ] || { echo "process $NAME not found" >&2; exit 1; }
+kill -0 "$PID" 2>/dev/null || { echo "process $NAME did not start" >&2; exit 1; }
 
 echo "pid=$PID  machine=$(sysctl -n machdep.cpu.brand_string)  macOS=$(sw_vers -productVersion)"
 echo "rss_kb_start=$(ps -o rss= -p "$PID" | tr -d ' ')  cputime_start=$(ps -o time= -p "$PID" | tr -d ' ')"
