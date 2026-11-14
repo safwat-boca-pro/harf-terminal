@@ -98,8 +98,13 @@ started Codex's managed app-server daemon and its updater (they run whenever Cod
   field defaults".
 - Still unanswered: the kitty graphics probe, `OSC 7501 ; ?`, mode 2031. Claude Code does not need them.
 
+## Owner check (2026-11-14)
+
+The owner ran `claude` and `codex` by hand in the real app and reported that both work well. That is the check the "What this
+does not cover" list above called for (a real answer, flicker, tearing). No details were reported beyond that.
+
 ## Next
 
-1. Owner, by hand in the real app: run `claude` and `codex` for a real answer. Watch for flicker, tearing, a stuck cursor, wrong
-   widths, a scrolled-off frame, selecting and copying out of the alternate screen. For Codex, choose the gate options yourself.
-2. The brief's remaining Phase 5 list: OSC 8 click, OSC 52 with a permission, OSC 9/777 notifications, kitty release events.
+1. The brief's remaining Phase 5 list (section 5, not part of the done-when): OSC 8 click, OSC 52 with a permission, OSC 9/777
+   notifications, kitty release events.
+2. Phase 6 (developer UX).
