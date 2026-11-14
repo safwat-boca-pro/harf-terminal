@@ -162,6 +162,7 @@ export fn harf_painter_metrics(p: *draw.Painter, out: *HarfCellMetrics) void {
 export fn harf_term_draw(t: *HarfTerm, p: *draw.Painter, ctx: *ct.CGContext, first_row: u16, last_row: u16) void {
     const g = t.session.lock();
     defer t.session.unlock();
+    p.focused = t.session.focused();
     p.drawRows(g, ctx, first_row, last_row);
 }
 
@@ -204,6 +205,13 @@ export fn harf_term_mouse(t: *HarfTerm, p: *draw.Painter, action: c_int, button:
     };
     const took = t.session.mouse(act, btn, mods, col, row, cw, ch) catch return -1;
     return if (took) 1 else 0;
+}
+
+/// The window gained (1) or lost (0) focus. The cursor is drawn hollow while unfocused, and a program that
+/// enabled focus events is told. 0 on success.
+export fn harf_term_focus(t: *HarfTerm, focused: c_int) c_int {
+    t.session.setFocus(focused != 0) catch return -1;
+    return 0;
 }
 
 /// Re-arms the `wake` callback; call before reading the grid for a redraw.
@@ -270,6 +278,33 @@ test "harf_term_mouse: tracking takes the event, Shift keeps it for selection" {
     try std.testing.expectEqual(@as(c_int, 0), harf_term_mouse(t, p, 0, 1, 1, 40, 40)); // Shift: not for the program
     try std.testing.expectEqual(@as(usize, 0), t.session.pendingInput());
     try std.testing.expectEqual(@as(c_int, 1), harf_term_mouse(t, p, 0, 1, 0, 40, 40)); // the program takes it
+}
+
+test "harf_term_draw takes the cursor's look from the focus flag" {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "sleep 5", null };
+    const t = harf_term_new(20, 3, 1 << 20, &argv, null) orelse return error.TermNotCreated;
+    defer harf_term_free(t);
+    const p = harf_painter_new(28) orelse return error.NoPainter;
+    defer harf_painter_free(p);
+    var m: HarfCellMetrics = undefined;
+    harf_painter_metrics(p, &m);
+    const w: usize = @intFromFloat(m.cell_w * 20);
+    const h: usize = @intFromFloat(m.cell_h * 3);
+    const data = try std.testing.allocator.alloc(u8, w * h * 4);
+    defer std.testing.allocator.free(data);
+    const space = ct.CGColorSpaceCreateDeviceRGB() orelse return error.NoColorSpace;
+    defer ct.CGColorSpaceRelease(space);
+    const ctx = ct.CGBitmapContextCreate(data.ptr, w, h, 8, w * 4, space, 2 | (2 << 12)) orelse return error.NoContext;
+    defer ct.CGContextRelease(ctx);
+    ct.CGContextTranslateCTM(ctx, 0, @floatFromInt(h));
+    ct.CGContextScaleCTM(ctx, 1, -1);
+    const mid = (@as(usize, @intFromFloat(m.cell_h)) / 2) * w * 4 + (@as(usize, @intFromFloat(m.cell_w)) / 2) * 4;
+    _ = harf_term_focus(t, 1);
+    harf_term_draw(t, p, ctx, 0, 2);
+    try std.testing.expect(data[mid + 2] > 200); // the focused cursor is a solid block
+    _ = harf_term_focus(t, 0);
+    harf_term_draw(t, p, ctx, 0, 2);
+    try std.testing.expect(data[mid + 2] < 60); // unfocused: hollow, the middle is background
 }
 
 test "harf_term_new rejects zero size" {

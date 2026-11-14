@@ -143,6 +143,12 @@ final class TerminalController {
         _ = bytes.withUnsafeBufferPointer { harf_term_input(t, $0.baseAddress, bytes.count) }
     }
 
+    /// The window became key (true) or resigned (false).
+    func setFocus(_ on: Bool) {
+        guard let t = term else { return }
+        _ = harf_term_focus(t, on ? 1 : 0)
+    }
+
     /// Wheel or trackpad, in rows: positive toward newer output.
     func scroll(rows: Int32) {
         guard let t = term, rows != 0 else { return }
@@ -299,6 +305,30 @@ final class TerminalView: NSView {
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         controller?.layoutChanged()
+    }
+
+    private var focusObservers: [NSObjectProtocol] = []
+
+    /// The cursor is hollow while the window is not key, and a program that asked hears focus in and out.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        for o in focusObservers { NotificationCenter.default.removeObserver(o) }
+        focusObservers = []
+        guard let w = window else { return }
+        let nc = NotificationCenter.default
+        focusObservers = [
+            nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: w, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.controller?.setFocus(true) }
+            },
+            nc.addObserver(forName: NSWindow.didResignKeyNotification, object: w, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.controller?.setFocus(false) }
+            },
+        ]
+        controller?.setFocus(w.isKeyWindow)
+    }
+
+    deinit {
+        MainActor.assumeIsolated { for o in focusObservers { NotificationCenter.default.removeObserver(o) } }
     }
 
     override func viewDidChangeBackingProperties() {

@@ -50,6 +50,7 @@ pub const Session = struct {
     /// `deinit` writes to [1] to wake the I/O thread, which polls [0] together with the PTY.
     stop_pipe: [2]c_int = .{ -1, -1 },
     wake_pending: std.atomic.Value(bool) = .init(false),
+    focus: std.atomic.Value(bool) = .init(true),
     /// The pointer's last cell, packed (col << 16 | row).
     pointer: std.atomic.Value(u32) = .init(0),
     /// Cell size in pixels, for mouse reports (set by the first draw or `harf_term_mouse`).
@@ -143,6 +144,25 @@ pub const Session = struct {
     /// Where the pointer last was (a cell), for wheel events, which carry a position.
     pub fn setPointer(self: *Session, col: u16, row: u16) void {
         self.pointer.store((@as(u32, col) << 16) | row, .release);
+    }
+
+    /// The window gained or lost focus: the cursor look follows, and a program that asked (mode 1004)
+    /// hears `ESC [ I` or `ESC [ O`.
+    pub fn setFocus(self: *Session, gained: bool) !void {
+        if (self.focus.swap(gained, .acq_rel) == gained) return;
+        var buf: [8]u8 = undefined;
+        var n: usize = 0;
+        {
+            const t = self.lock();
+            defer self.unlock();
+            if (t.focusEvents()) n = t.encodeFocus(gained, &buf).len;
+        }
+        self.requestWake(); // redraw the cursor
+        if (n > 0) try self.input(buf[0..n]);
+    }
+
+    pub fn focused(self: *const Session) bool {
+        return self.focus.load(.acquire);
     }
 
     pub fn setCellPx(self: *Session, w: u32, h: u32) void {
@@ -799,4 +819,24 @@ test "scroll: a program that tracks the mouse gets wheel events, not a scrolled 
     try s.scroll(-1); // one wheel-up event at the pointer: ESC [ < 64 ; 7 ; 2 M
     try s.scroll(4); // two wheel-down events (a notch is three rows): ESC [ < 65 ; 7 ; 2 M, twice
     try std.testing.expect(hexOf(s, "1b5b3c36343b373b324d1b5b3c36353b373b324d1b5b3c36353b373b324d"));
+}
+
+test "focus: events go to a program only when it asked for them" {
+    const script = "printf '\\033[?1004h'; stty raw -echo; echo ready; dd bs=1 count=6 2>/dev/null | xxd -p";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    try s.setFocus(false);
+    try s.setFocus(true);
+    try std.testing.expect(hexOf(s, "1b5b4f1b5b49")); // ESC [ O, then ESC [ I
+    try std.testing.expect(s.focused());
+}
+
+test "focus: nothing is sent without the mode, but the flag still changes" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 5" } });
+    defer s.deinit();
+    try std.testing.expect(s.focused());
+    try s.setFocus(false);
+    try std.testing.expect(!s.focused());
+    try std.testing.expectEqual(@as(usize, 0), s.pendingInput());
 }

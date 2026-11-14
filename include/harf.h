@@ -76,6 +76,9 @@ int harf_term_scroll(HarfTerm *t, int32_t delta_rows);
  * 2 motion. button: 0 none, 1 left, 2 right, 3 middle. Returns 1 if the program has mouse tracking on and took
  * the event, 0 if the caller keeps it for selection (Shift always keeps it), -1 on error. */
 int harf_term_mouse(HarfTerm *t, HarfPainter *p, int action, int button, uint32_t mods, double x_px, double y_px);
+/* The window gained (1) or lost (0) focus: the cursor is hollow while unfocused, and a program that enabled
+ * focus events (mode 1004) is told. 0 = ok. */
+int harf_term_focus(HarfTerm *t, int focused);
 /* Pastes text, framed for the terminal's paste mode (bracketed, newlines as CR). 0 = ok. */
 int harf_term_paste(HarfTerm *t, const uint8_t *utf8, size_t len);
 void harf_term_wake_handled(HarfTerm *t);

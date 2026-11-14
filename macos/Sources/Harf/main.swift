@@ -209,6 +209,22 @@ func selfTest() -> Never {
         m.close()
     }
 
+    // 2f. Window focus reaches a program that asked for focus events (mode 1004).
+    do {
+        let script = "stty raw -echo; printf '\\033[?1004h'; printf R; head -c 6 | od -An -tx1 | tr -s ' '"
+        guard let f = TerminalController(argv: ["/bin/sh", "-c", script], frame: NSSize(width: 700, height: 420)) else { fail("cannot start focus session") }
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
+        win.contentView = f.view
+        if !pump(5, until: { f.rowText(0).contains("R") }) { fail("focus: child not ready: '\(f.rowText(0))'") }
+        _ = pump(0.3) { false }
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: win)
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: win)
+        if !pump(5, until: { (0..<3).contains { f.rowText($0).contains("1b 5b 49 1b 5b 4f") } }) {
+            fail("focus: rows are '\((0..<3).map { f.rowText($0) }.joined(separator: "|"))'")
+        }
+        f.close()
+    }
+
     // 3. Paste, bracketed or not, arrives as typed text.
     guard let pasting = TerminalController(argv: echo, frame: NSSize(width: 700, height: 420)) else { fail("cannot start paste session") }
     pasting.paste("x y")

@@ -272,6 +272,22 @@ pub const Terminal = struct {
         return cp >= 0xE000 and cp <= 0xF8FF;
     }
 
+    /// True while the program asked for focus in/out reports (mode 1004).
+    pub fn focusEvents(self: *Terminal) bool {
+        var cfg: c.GhosttyTerminalModeConfig = .{ .mode = c.ghostty_mode_new(1004, false), .value = false };
+        _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_MODE, &cfg);
+        return cfg.value;
+    }
+
+    /// The report for the window gaining or losing focus (`ESC [ I` / `ESC [ O`).
+    pub fn encodeFocus(self: *Terminal, gained: bool, out: []u8) []const u8 {
+        _ = self;
+        var written: usize = 0;
+        const ev: c.GhosttyFocusEvent = if (gained) c.GHOSTTY_FOCUS_GAINED else c.GHOSTTY_FOCUS_LOST;
+        if (c.ghostty_focus_encode(ev, out.ptr, out.len, &written) != c.GHOSTTY_SUCCESS) return out[0..0];
+        return out[0..written];
+    }
+
     /// True while the program has any mouse tracking mode on (X10, normal, button or any-event).
     pub fn mouseTracking(self: *Terminal) bool {
         var on: bool = false;
@@ -1056,4 +1072,15 @@ test "wide grid reports columns past 223" {
     t.write("\x1b[?1006l");
     const legacy = t.encodeMouse(.press, .left, 0, 250, 0, 10, 20, &buf);
     try std.testing.expect(legacy.len == 0 or (legacy.len == 6 and std.mem.eql(u8, legacy[0..3], "\x1b[M")));
+}
+
+test "focus events are encoded, and the mode says whether the program wants them" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    try std.testing.expect(!t.focusEvents());
+    t.write("\x1b[?1004h");
+    try std.testing.expect(t.focusEvents());
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("\x1b[I", t.encodeFocus(true, &buf));
+    try std.testing.expectEqualStrings("\x1b[O", t.encodeFocus(false, &buf));
 }
