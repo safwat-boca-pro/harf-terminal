@@ -215,3 +215,36 @@ macOS 27.0.1, Zig 0.17.1, commit c0fc58f plus the script. Target: 30 MB `phys_fo
   `build-app.sh` relinked) and are superseded by this table.
 - A 100 MB `yes | head -c` flood finishes in about 4 s through the real app (about 25 MB/s end to end including drawing).
   The 3 MB/s of the Zig flood benchmark is mostly `seq` itself (it writes one line at a time); Task 3 separates the two.
+
+## Slice 4: where the memory goes (attribution, 2026-11-14)
+
+Experiment: one temporary env-var knob per candidate setting on the window or view (not committed), each run through
+`bench/footprint.sh 15 scrollback` (the state that shows the second surface), one run per knob, same machine and build.
+
+| Knob | Footprint | IOSurface | Verdict |
+|---|---|---|---|
+| none (current) | 31 MB | 9952 KB (two surfaces) | baseline |
+| `window.colorSpace = .sRGB` | **26 MB** | **4976 KB (one surface)** | **this is the cause** |
+| `window.isOpaque = true` with an opaque background | 32 MB | 9952 KB | no effect |
+| `view.wantsLayer = false` | 32 MB | 9952 KB | no effect |
+| `view.wantsLayer = true` | 32 MB | 9952 KB | no effect |
+| `layerContentsRedrawPolicy = .onSetNeedsDisplay` | 31 MB | 9952 KB | no effect |
+| `layerContentsRedrawPolicy = .beforeViewResize` | 32 MB | 9952 KB | no effect |
+| `layer.contentsFormat = .RGBA8Uint` | 31 MB | 9952 KB | no effect |
+| `window.allowsConcurrentViewDrawing = false` | 32 MB | 9952 KB | no effect |
+| `layer.isOpaque = true` | 32 MB | 9952 KB | no effect |
+| `layer.contentsScale = 1` | 32 MB | 9952 KB | no effect |
+
+The window's default color space (the display's wide-gamut profile) makes AppKit keep two 1400x904 BGRA surfaces once the view
+has been redrawn; with an sRGB window there is one. The spike's unexplained extra surface (9.2 MB against 5 MB in the throwaway
+prototype) is this: the prototype never redrew, and the spike did. No other setting tried changes it.
+
+**`Malloc Small` (11 to 13 MB in every state).** `heap -s` at the settled prompt: 60,201 allocations, 8.7 MB in malloc zones,
+of which 4.95 MB is "non-object" blocks averaging 157 bytes and the rest is framework state (Objective-C method caches 0.45 MB,
+`NSMutableDictionary` storage 0.35 MB, `CFString` 0.28 MB, Swift metadata 0.26 MB, CoreSVG attributes, Metal resource lists).
+Zig's allocator maps pages directly, so the terminal, render state, painter caches and glyph cache are not in these zones;
+the whole process is only about 2 to 3 MB above the empty CPU-drawn prototype (25 MB at the same window size). Nothing in
+`Malloc Small` is Harf state that can be trimmed; it is AppKit.
+
+**Ranked candidates.** 1. sRGB window color space: about 5 MB once the view has redrawn. 2. Nothing else is above the 2 MB
+threshold the plan set for a fix.
