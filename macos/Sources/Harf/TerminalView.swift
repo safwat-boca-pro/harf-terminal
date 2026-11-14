@@ -42,6 +42,9 @@ final class TerminalController {
     private let fontPt: CGFloat = 14
     private let inset: CGFloat = 6
     private(set) var gridSize = (cols: 0, rows: 0)
+    /// Cell size and grid inset in points, for the self-test.
+    var cellSizePt: CGSize { CGSize(width: cellPx.w / scale, height: cellPx.h / scale) }
+    var insetPt: CGFloat { inset }
     private(set) var exitStatus: Int32?
 
     var onTitle: (String) -> Void = { _ in }

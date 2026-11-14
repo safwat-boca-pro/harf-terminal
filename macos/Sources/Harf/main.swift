@@ -61,6 +61,72 @@ func selfTest() -> Never {
     print(String(format: "selftest: %dx%d screen of shaped Arabic rows: cold draw %.1f ms, cached draw %.1f ms", shaped.gridSize.cols, shaped.gridSize.rows, cold, warm))
     shaped.close()
 
+    // 1c. Arabic samples (brief 4.7): the grid keeps the logical text and every sample row is drawn.
+    let samples = ["مرحبا world 123", "السلام عليكم ورحمة الله", "مُحَمَّد", "لا إله إلا الله", "ls ملف.txt",
+                   "\"النتيجة: ١٢٣ (ناجح)\"", "echo \"اختبار\" | wc -c", "│ مرحبا    │"]
+    guard let arabic = TerminalController(argv: ["/bin/sh", "-c", "printf '%s\\n' \"$@\"; sleep 3", "sh"] + samples, frame: NSSize(width: 700, height: 420)) else { fail("cannot start samples session") }
+    if !pump(5, until: { arabic.rowText(samples.count - 1) == samples[samples.count - 1] }) { fail("samples: row \(samples.count - 1) is '\(arabic.rowText(samples.count - 1))'") }
+    for (i, want) in samples.enumerated() where arabic.rowText(i) != want { fail("samples: row \(i) is '\(arabic.rowText(i))', want '\(want)'") }
+    guard let arep = arabic.view.bitmapImageRepForCachingDisplay(in: arabic.view.bounds) else { fail("no bitmap") }
+    arabic.view.cacheDisplay(in: arabic.view.bounds, to: arep)
+    func rowHasInk(_ rep: NSBitmapImageRep, _ c: TerminalController, _ row: Int) -> Bool {
+        let scalePx = Double(rep.pixelsWide) / Double(c.view.bounds.width)
+        let bg = terminalBackground.usingColorSpace(.sRGB)!
+        let y0 = Double(c.insetPt) + Double(row) * Double(c.cellSizePt.height)
+        for y in stride(from: Int((y0 + 2) * scalePx), to: Int((y0 + Double(c.cellSizePt.height) - 2) * scalePx), by: 2) {
+            for x in stride(from: Int(Double(c.insetPt) * scalePx), to: rep.pixelsWide - Int(Double(c.insetPt) * scalePx), by: 2) {
+                guard let col = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                if abs(col.redComponent - bg.redComponent) > 0.1 || abs(col.greenComponent - bg.greenComponent) > 0.1 { return true }
+            }
+        }
+        return false
+    }
+    for i in 0..<samples.count where !rowHasInk(arep, arabic, i) { fail("samples: row \(i) has no ink") }
+    // The pictures a human looks at (brief 4.7): HARF_SELFTEST_PNG_DIR=<dir> keeps them.
+    let pictureDir = ProcessInfo.processInfo.environment["HARF_SELFTEST_PNG_DIR"]
+    func savePNG(_ rep: NSBitmapImageRep, _ name: String) {
+        guard let dir = pictureDir, let png = rep.representation(using: .png, properties: [:]) else { return }
+        try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
+    }
+    savePNG(arep, "samples.png")
+    arabic.close()
+    // Typing: the same text one letter at a time, frame by frame (row 0 only), at an LTR prompt and on a bare row.
+    func typingStrip(prompt: String, text: String, name: String) {
+        guard let t = TerminalController(argv: ["/bin/sh", "-c", "printf '\(prompt)'; cat"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start typing strip") }
+        if !prompt.isEmpty, !pump(5, until: { t.rowText(0).contains(prompt.trimmingCharacters(in: .whitespaces)) }) { fail("typing strip: no prompt") }
+        _ = pump(0.3) { false }
+        var frames: [NSBitmapImageRep] = []
+        var typed = ""
+        for ch in text {
+            typed.append(ch)
+            t.sendText(String(ch))
+            let want = (prompt + typed).trimmingCharacters(in: .whitespaces)
+            if !pump(5, until: { t.rowText(0).trimmingCharacters(in: .whitespaces) == want }) { fail("typing strip: row 0 is '\(t.rowText(0))', want '\(want)'") }
+            guard let r = t.view.bitmapImageRepForCachingDisplay(in: t.view.bounds) else { fail("no bitmap") }
+            t.view.cacheDisplay(in: t.view.bounds, to: r)
+            frames.append(r)
+        }
+        if pictureDir != nil, let first = frames.first {
+            let hPx = Int((t.insetPt + t.cellSizePt.height + 4) * CGFloat(first.pixelsWide) / t.view.bounds.width)
+            guard let out = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: first.pixelsWide, pixelsHigh: hPx * frames.count, bitsPerSample: 8,
+                                             samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+                  let gctx = NSGraphicsContext(bitmapImageRep: out) else { fail("no strip bitmap") }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = gctx
+            for (i, r) in frames.enumerated() {
+                let img = NSImage(size: NSSize(width: r.pixelsWide, height: r.pixelsHigh))
+                img.addRepresentation(r)
+                img.draw(in: NSRect(x: 0, y: (frames.count - 1 - i) * hPx, width: r.pixelsWide, height: hPx),
+                         from: NSRect(x: 0, y: r.pixelsHigh - hPx, width: r.pixelsWide, height: hPx), operation: .copy, fraction: 1)
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            savePNG(out, name)
+        }
+        t.close()
+    }
+    typingStrip(prompt: "❯ ", text: "السلام عليكم", name: "typing-prompt.png")
+    typingStrip(prompt: "", text: "السلام عليكم", name: "typing-bare.png")
+
     // 2. Typing (a letter, an Arabic letter, Return) goes through the view's own key path.
     let echo = ["/bin/sh", "-c", "read x; echo got:$x"]
     func rows(_ c: TerminalController) -> String { (0..<6).map { c.rowText($0) }.joined(separator: "|") }

@@ -3,7 +3,9 @@
 **Decision (2026-11-13): model C, built as "C fit" (see the last section), accepted by the owner for Phase 1.**
 Plain C was rejected (uneven word spacing, cursor, selection); C fit fixes those.
 Font policy for v1: keep CoreText's fallback cascade, no hardcoded Arabic font (brief 9.8 stands).
-Typing alignment at the prompt (word re-fits per keystroke, first letter drifts) is deferred to Phase 4.
+Typing alignment at the prompt (word re-fits per keystroke, first letter drifts): **Phase 4 status (2026-11-14)**: the grid draws with
+this model and the cursor sits on its logical cell, so the drift is still there; pictures in `docs/phase4/typing-prompt.png` and
+`typing-bare.png` (one frame per letter). Open: whether the drift is acceptable, any other cursor rule, ink centering, and per-paragraph bidi across soft wraps.
 Observations below are the implementer's, not the owner's judgement.
 
 ## What exists
