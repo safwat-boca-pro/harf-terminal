@@ -3,16 +3,15 @@
 Build and open: `macos/build-app.sh && open macos/.build/Harf.app`. Everything below has tests or a self-test behind it
 (`zig build test`, `Harf --selftest`), but these are the things only a person at the keyboard can judge. Tell me what is off.
 
-**What I could not look at:** a real on-screen window with splits. Offscreen, each pane draws correctly on its own
-(`docs/shell/`), but rendering a whole split window through `cacheDisplay` showed the nested panes upside down, and a live
-capture was refused. I believe that is the capture path, not the app. If a split pane looks flipped on screen, that is the bug.
+**Splits on screen:** checked by the owner from a screenshot (2026-11-14): splits and tabs draw upright. The upside-down
+panes I saw earlier came from rendering the whole window offscreen with `cacheDisplay`, not from the app.
 
 ## Shell
 - [ ] Cmd+N opens a new window (offset from the first); Cmd+T opens a tab in the current window. Cmd+Shift+[ and ] switch tabs, Cmd+1 to 9 jump to one.
 - [ ] Cmd+D splits side by side, Cmd+Shift+D splits below. The new shell starts in the directory of the one you split. Splits nest. Cmd+[ and Cmd+] move between panes; clicking a pane focuses it.
 - [ ] Cmd+W closes a pane (its neighbour takes the space); the last pane closes the tab or window. `exit` in a pane closes it.
 - [ ] Cmd+K empties the screen and scrollback and redraws your prompt at the top. In vim (alternate screen) it does nothing.
-- [ ] Cmd+F opens the find bar in the top right of the pane; typing finds and jumps to the newest match, Enter goes to older ones, Shift+Enter to newer, Esc closes. "n of m" is shown, the match is highlighted and Cmd+C copies it. It finds text in scrollback.
+- [ ] Cmd+F opens the find bar in the top right of the pane; typing finds and jumps to the newest match, Enter goes to older ones, Shift+Enter to newer, Esc closes. "n of m" is shown. Every match in view is tinted amber and the current one is blue (the selection, so Cmd+C copies it). It finds text in scrollback. It starts at the newest match, at the bottom.
 - [ ] Open the find bar in a narrow split pane: nothing is cut off.
 - [ ] Title and tab name follow the focused pane. Tab drag and "Merge All Windows" from the Window menu work.
 
@@ -35,4 +34,4 @@ capture was refused. I believe that is the capture path, not the app. If a split
 - Reading the clipboard from a program (OSC 52 `?`) is never answered.
 - No Option-as-Meta setting; the built-in Option/Cmd editing keys can be overridden with `keybind ... send:`.
 - Splits and tabs are not restored after a restart (session restore is not built).
-- Find is case-insensitive for ASCII only (the library's rule), and highlights the current match, not every match.
+- Find is case-insensitive for ASCII only (the library's rule).

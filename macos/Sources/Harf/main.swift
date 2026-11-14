@@ -665,7 +665,7 @@ func selfTest() -> Never {
         let third = wc.allPanes[2]
         if let dir = ProcessInfo.processInfo.environment["HARF_SELFTEST_PNG_DIR"] {   // pictures for a human, drawn offscreen
             first.showFind()
-            first.findChanged("needle")
+            first.findChanged("9")   // many matches in view: the number rows 89 to 99
             _ = pump(0.5) { false }
             func shot(_ v: NSView, _ name: String) {
                 v.layoutSubtreeIfNeeded()

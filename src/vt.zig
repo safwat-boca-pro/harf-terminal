@@ -86,7 +86,11 @@ pub const KeyAction = enum(u8) { press = 0, release = 1, repeat = 2 };
 pub const Wide = enum { narrow, wide, spacer_tail, spacer_head };
 
 /// One grid cell: its codepoints (base plus combining marks) and its width role.
-pub const Cell = struct { cps: []const u21, wide: Wide, style: Style = .{}, selected: bool = false };
+/// `match`: part of a find match in view (see `Terminal.findSet`). The current match is also `selected`.
+pub const Cell = struct { cps: []const u21, wide: Wide, style: Style = .{}, selected: bool = false, match: bool = false };
+
+/// Columns `c0` to `c1` (inclusive) of viewport row `row` are part of a find match.
+const MatchRange = struct { row: u16, c0: u16, c1: u16 };
 
 fn toCColor(rgb: Rgb) c.GhosttyColorRgb {
     return .{ .r = rgb.r, .g = rgb.g, .b = rgb.b };
@@ -231,6 +235,10 @@ pub const Terminal = struct {
     allow_clipboard_write: bool = true,
     /// The find in progress, if any (Cmd+F); freed with the terminal.
     search: c.GhosttySearch = null,
+    /// Where the matches in view are, as of the last `update` (empty without a find).
+    match_ranges: std.ArrayList(MatchRange) = .empty,
+    /// The row `selectRow` last chose, so `cellInRow` can tell whether a cell is in a match.
+    row_index: u16 = 0,
     /// The library's own 256-color palette, read once: a theme sets 16 of its colors over it.
     builtin_palette: [256]c.GhosttyColorRgb = undefined,
     /// The system appearance the program is told about (CSI ? 996 n, mode 2031).
@@ -299,6 +307,7 @@ pub const Terminal = struct {
 
     pub fn deinit(self: *Terminal) void {
         self.findEnd();
+        self.match_ranges.deinit(self.gpa);
         c.ghostty_mouse_event_free(self.mouse_event);
         c.ghostty_mouse_encoder_free(self.mouse_encoder);
         c.ghostty_key_event_free(self.key_event);
@@ -330,7 +339,44 @@ pub const Terminal = struct {
             };
             for (rc.palette, 0..) |p, i| self.palette[i] = .{ .r = p.r, .g = p.g, .b = p.b };
         }
+        self.refreshMatches();
         return true;
+    }
+
+    /// Reads the find's matches that are in view (after catching the search up with the terminal, so output and scrolling are
+    /// seen). A match that runs past an edge of the view is clipped to it, and one that wraps covers each row it touches.
+    fn refreshMatches(self: *Terminal) void {
+        self.match_ranges.clearRetainingCapacity();
+        if (self.search == null) return;
+        _ = c.ghostty_search_feed(self.search);
+        var probe = std.mem.zeroes(c.GhosttySelectionBuffer);
+        _ = c.ghostty_search_get(self.search, c.GHOSTTY_SEARCH_DATA_VIEWPORT_MATCHES, &probe); // too small by design: it says how many
+        if (probe.len == 0) return;
+        const list = self.gpa.alloc(c.GhosttySelection, probe.len) catch return;
+        defer self.gpa.free(list);
+        var buf: c.GhosttySelectionBuffer = .{ .ptr = list.ptr, .cap = list.len, .len = 0 };
+        if (c.ghostty_search_get(self.search, c.GHOSTTY_SEARCH_DATA_VIEWPORT_MATCHES, &buf) != c.GHOSTTY_SUCCESS) return;
+        const sz = self.size();
+        for (list[0..buf.len]) |sel| {
+            var a = std.mem.zeroes(c.GhosttyPointCoordinate);
+            var b = std.mem.zeroes(c.GhosttyPointCoordinate);
+            const has_a = c.ghostty_terminal_point_from_grid_ref(self.handle, &sel.start, c.GHOSTTY_POINT_TAG_VIEWPORT, &a) == c.GHOSTTY_SUCCESS;
+            const has_b = c.ghostty_terminal_point_from_grid_ref(self.handle, &sel.end, c.GHOSTTY_POINT_TAG_VIEWPORT, &b) == c.GHOSTTY_SUCCESS;
+            if (!has_a and !has_b) continue; // the page holds it but it is not in view
+            const first: u32 = if (has_a) a.y else 0;
+            const last: u32 = if (has_b) b.y else sz.rows - 1;
+            var row = first;
+            while (row <= last and row < sz.rows) : (row += 1) {
+                const c0: u16 = if (row == first and has_a) a.x else 0;
+                const c1: u16 = if (row == last and has_b) b.x else sz.cols - 1;
+                self.match_ranges.append(self.gpa, .{ .row = @intCast(row), .c0 = c0, .c1 = c1 }) catch return;
+            }
+        }
+    }
+
+    fn inMatch(self: *const Terminal, col: u16) bool {
+        for (self.match_ranges.items) |m| if (m.row == self.row_index and col >= m.c0 and col <= m.c1) return true;
+        return false;
     }
 
     /// The default colors as of the last `update`.
@@ -350,14 +396,18 @@ pub const Terminal = struct {
         while (i <= row) : (i += 1) {
             if (!c.ghostty_render_state_row_iterator_next(self.row_iter)) return false;
         }
-        return c.ghostty_render_state_row_get(self.row_iter, c.GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, @ptrCast(&self.row_cells)) == c.GHOSTTY_SUCCESS;
+        if (c.ghostty_render_state_row_get(self.row_iter, c.GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, @ptrCast(&self.row_cells)) != c.GHOSTTY_SUCCESS) return false;
+        self.row_index = row;
+        return true;
     }
 
     /// The cell at `col` of the row chosen by `selectRow`; blank if `col` is out of range.
     pub fn cellInRow(self: *Terminal, col: u16, buf: *[16]u21) Cell {
         const blank: Cell = .{ .cps = buf[0..0], .wide = .narrow };
         if (c.ghostty_render_state_row_cells_select(self.row_cells, col) != c.GHOSTTY_SUCCESS) return blank;
-        return self.readCell(buf);
+        var read = self.readCell(buf);
+        read.match = self.inMatch(col);
+        return read;
     }
 
     pub const CursorShape = enum { bar, block, underline, block_hollow };
@@ -1143,6 +1193,23 @@ test "the color scheme is answered to a query and reported on change only to a p
     t.write("\x1b[?2031h");
     try std.testing.expectEqualStrings("\x1b[?997;1n", t.setScheme(true, &buf));
     try std.testing.expectEqualStrings("", t.setScheme(true, &buf)); // no change, no report
+}
+
+test "find marks every match in view, not only the current one, and nothing once it ends" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 30, .rows = 6 });
+    defer t.deinit();
+    t.write("xx needle yy needle\r\nno hit here\r\nneedleneedle");
+    var buf: [16]u21 = undefined;
+    try std.testing.expectEqual(@as(usize, 4), t.findSet("needle"));
+    _ = t.findStep(true); // the newest match: the second "needle" of the last line (cols 6..11)
+    // every match in view is marked: row 0 cols 3..8 and 13..18, row 2 cols 0..5 and 6..11; nothing else is
+    for ([_][2]u16{ .{ 0, 3 }, .{ 0, 8 }, .{ 0, 13 }, .{ 0, 18 }, .{ 2, 0 }, .{ 2, 5 }, .{ 2, 6 }, .{ 2, 11 } }) |at| try std.testing.expect(cellOf(t, at[0], at[1], &buf).match);
+    for ([_][2]u16{ .{ 0, 0 }, .{ 0, 2 }, .{ 0, 9 }, .{ 0, 12 }, .{ 0, 19 }, .{ 1, 3 }, .{ 2, 12 } }) |at| try std.testing.expect(!cellOf(t, at[0], at[1], &buf).match);
+    // the current match is also the selection (the painter shows it as one), the others are only marked
+    try std.testing.expect(cellOf(t, 2, 6, &buf).selected);
+    try std.testing.expect(!cellOf(t, 0, 3, &buf).selected and cellOf(t, 0, 3, &buf).match);
+    t.findEnd();
+    try std.testing.expect(!cellOf(t, 0, 3, &buf).match and !cellOf(t, 2, 6, &buf).match);
 }
 
 test "find: counts matches across scrollback, selects them newest first, wraps, scrolls to them, and ends cleanly" {

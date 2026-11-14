@@ -15,6 +15,14 @@ const Rgb3 = [3]f64;
 /// Selected cells get this background (Decision 9); their foreground is kept.
 const selection_bg: Rgb3 = .{ 0.22, 0.33, 0.55 };
 
+/// Find matches in view are tinted with this amber, mixed into the theme's background (the current match is the selection).
+const match_tint: Rgb3 = .{ 1.0, 0.77, 0.0 };
+
+fn matchBg(d: vt.Colors) Rgb3 {
+    const b = rgb(d.bg);
+    return .{ b[0] * 0.65 + match_tint[0] * 0.35, b[1] * 0.65 + match_tint[1] * 0.35, b[2] * 0.65 + match_tint[2] * 0.35 };
+}
+
 fn rgb(c: vt.Rgb) Rgb3 {
     return .{ @as(f64, @floatFromInt(c.r)) / 255.0, @as(f64, @floatFromInt(c.g)) / 255.0, @as(f64, @floatFromInt(c.b)) / 255.0 };
 }
@@ -23,7 +31,7 @@ fn rgb(c: vt.Rgb) Rgb3 {
 /// foreground half way to the background. `has_bg` says the background differs from the default.
 const CellColors = struct { fg: Rgb3, bg: Rgb3, has_bg: bool };
 
-fn cellColors(style: vt.Style, selected: bool, d: vt.Colors) CellColors {
+fn cellColors(style: vt.Style, selected: bool, match: bool, d: vt.Colors) CellColors {
     var f = style.fg orelse d.fg;
     var b = style.bg orelse d.bg;
     if (style.flags & vt.Style.Flag.inverse != 0) std.mem.swap(vt.Rgb, &f, &b);
@@ -33,6 +41,7 @@ fn cellColors(style: vt.Style, selected: bool, d: vt.Colors) CellColors {
         x.* = (x.* + y) / 2;
     };
     if (selected) return .{ .fg = fc, .bg = selection_bg, .has_bg = true };
+    if (match) return .{ .fg = fc, .bg = matchBg(d), .has_bg = true };
     return .{ .fg = fc, .bg = bc, .has_bg = b.r != d.bg.r or b.g != d.bg.g or b.b != d.bg.b };
 }
 
@@ -45,7 +54,7 @@ fn faceOf(style: vt.Style) u2 {
 /// A wide cell's spacer takes the wide cell's style (the library may leave it unstyled).
 fn colorsAt(cells: []const vt.Cell, col: usize, d: vt.Colors) CellColors {
     const cell = if (cells[col].wide == .spacer_tail and col > 0) cells[col - 1] else cells[col];
-    return cellColors(cell.style, cell.selected, d);
+    return cellColors(cell.style, cell.selected, cell.match, d);
 }
 
 fn styleAt(cells: []const vt.Cell, col: usize) vt.Style {
@@ -294,7 +303,7 @@ pub const Painter = struct {
     fn rowHash(cells: []const vt.Cell, row: u16, cur: ?vt.Terminal.Cursor, focused: bool) u64 {
         var h = std.hash.Wyhash.init(2);
         for (cells) |cell| {
-            h.update(&.{ @intCast(cell.cps.len), @intFromEnum(cell.wide), @intFromBool(cell.selected) });
+            h.update(&.{ @intCast(cell.cps.len), @intFromEnum(cell.wide), @intFromBool(cell.selected), @intFromBool(cell.match) });
             h.update(std.mem.sliceAsBytes(cell.cps));
             hashOptional(&h, cell.style.fg);
             hashOptional(&h, cell.style.bg);
@@ -408,7 +417,7 @@ pub const Painter = struct {
     fn drawShapedRef(self: *Painter, ctx: *ct.CGContext, rl: *const rowlayout.RowLayout, cells: []const vt.Cell, d: vt.Colors, baseline: f64, flat: ?Rgb3) void {
         for (rl.placed) |pl| {
             const color = if (flat) |f| f else blk: {
-                if (pl.lcol >= cells.len) break :blk cellColors(.{}, false, d).fg;
+                if (pl.lcol >= cells.len) break :blk cellColors(.{}, false, false, d).fg;
                 if (cells[pl.lcol].style.flags & vt.Style.Flag.invisible != 0) continue;
                 break :blk colorsAt(cells, pl.lcol, d).fg;
             };
@@ -485,7 +494,7 @@ pub const Painter = struct {
         var cur_color: Rgb3 = .{ 0, 0, 0 };
         for (rl.placed) |pl| {
             const color = if (flat) |f| f else blk: {
-                if (pl.lcol >= cells.len) break :blk cellColors(.{}, false, d).fg;
+                if (pl.lcol >= cells.len) break :blk cellColors(.{}, false, false, d).fg;
                 if (cells[pl.lcol].style.flags & vt.Style.Flag.invisible != 0) continue;
                 break :blk colorsAt(cells, pl.lcol, d).fg;
             };
@@ -1372,6 +1381,30 @@ test "selection draws on plain and shaped rows" {
     }
     const out = rl.span(4, m.cell_w);
     try std.testing.expect(!near(cv.px(@as(usize, @intFromFloat(@ceil(out.x0) + 1)), @as(usize, @intFromFloat(m.cell_h)) + 1), sel[0], sel[1], sel[2], 3));
+}
+
+test "find matches draw in the match color on plain and shaped rows, the current one as the selection" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const m = p.metrics();
+    const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 3 });
+    defer t.deinit();
+    t.write("\x1b[?25lab ab cd ab\r\n\u{645}\u{631}\u{62D}\u{628}\u{627} ab");
+    try std.testing.expectEqual(@as(usize, 4), t.findSet("ab"));
+    _ = t.findStep(true); // the newest: "ab" at the end of the shaped row
+    const cv = try Canvas.init(@intFromFloat(m.cell_w * 20), @intFromFloat(m.cell_h * 3));
+    defer cv.deinit();
+    p.drawRows(t, cv.ctx, 0, 2);
+    const amber = [3]u8{ 99, 78, 12 }; // the match color over the dark theme's background
+    const sel = [3]u8{ 56, 84, 140 };
+    // plain row 0: all three "ab" (cols 0..1, 3..4, 9..10) are marked, the gaps and "cd" are not
+    for ([_]usize{ 0, 1, 3, 4, 9, 10 }) |col| try std.testing.expect(near(cv.px(cellBox(m, col, 0)[0] + 1, 1), amber[0], amber[1], amber[2], 3));
+    for ([_]usize{ 2, 5, 6, 7, 8 }) |col| try std.testing.expect(!near(cv.px(cellBox(m, col, 0)[0] + 1, 1), amber[0], amber[1], amber[2], 3));
+    // shaped row 1: the current match (cols 6, 7) is the selection, not the match color
+    var rl = (try testLayout(p, t, 1)).?;
+    const at = rl.span(6, m.cell_w);
+    const x: usize = @intFromFloat(@ceil(at.x0) + 1);
+    try std.testing.expect(near(cv.px(x, @as(usize, @intFromFloat(m.cell_h)) + 1), sel[0], sel[1], sel[2], 3));
 }
 
 test "selection draws on a plain row" {
