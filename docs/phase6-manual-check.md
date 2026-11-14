@@ -32,6 +32,14 @@ Open a **new** window or tab so the shell starts with the shim. Your own zsh set
 - [ ] `exec zsh` does not leave the dot on the tab (the new shell has no marks until you open a new tab, which is a known limit).
 - [ ] `shell_integration = off` in the config, then a new tab: no dot, Cmd+Up does nothing. bash and fish get no marks at all.
 
+## Paste guard (a sheet before a risky paste; `paste_guard = off` turns it off)
+- [ ] Copy one line of text, Cmd+V in a zsh tab: it pastes with no sheet.
+- [ ] Copy two lines, Cmd+V in zsh and in Claude Code: no sheet (they use bracketed paste, so the program sees one paste).
+- [ ] In a tab running `/bin/bash` (the old bash 3.2 has no bracketed paste), Cmd+V of two lines, or of a command copied with its trailing line break: a sheet says "Paste 2 lines (N bytes)?" with the reason and the first lines. Cancel (or Esc) pastes nothing; Paste (or Return) runs them as if typed. The Edit menu's Paste does the same.
+- [ ] Copy more than 100 KB (`seq 1 30000 | pbcopy`), Cmd+V anywhere: a sheet says it is a very large paste.
+- [ ] While the sheet is open, copy something else, then press Paste: what you first copied is pasted, not the new text.
+- [ ] `paste_guard = off` in the config, then repeat the bash paste: no sheet.
+
 ## Configuration (`Cmd+,` opens `~/.config/harf/config`, creating it with every setting commented out)
 - [ ] `font_size = 18` then save: the font changes at once in every window, no restart. `font_family = Monaco` works; `font_family = Helvetica` prints a warning to stderr and keeps Menlo.
 - [x] Cmd+= and Cmd+- change the font size for this run. *(owner, 2026-11-14)*

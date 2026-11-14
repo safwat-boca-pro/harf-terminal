@@ -341,6 +341,13 @@ pub const Session = struct {
         return true;
     }
 
+    /// Whether `text` should be confirmed before `paste` (see `vt.Terminal.pasteRisk`).
+    pub fn pasteRisk(self: *Session, text: []const u8) vt.PasteRisk {
+        const t = self.lock();
+        defer self.unlock();
+        return t.pasteRisk(text);
+    }
+
     /// Queues pasted text, framed for the terminal's current paste mode.
     pub fn paste(self: *Session, text: []const u8) !void {
         if (text.len > 0) self.userInput();

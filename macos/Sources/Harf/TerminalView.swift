@@ -33,6 +33,31 @@ private let commandCallback: @convention(c) (UnsafeMutableRawPointer?, Int32, In
     hop(ctx) { $0.onCommand(running != 0, hasExitCode != 0 ? exitCode : nil, ms) }
 }
 
+/// What the paste sheet says.
+struct PasteSummary {
+    var title: String
+    var detail: String
+}
+
+/// The sheet's text for a paste of `text` that `harf_term_paste_check` flagged (`risk`: bit 1 would run lines, bit 2 very large): the
+/// size, the reason, and up to five lines of preview. The text is a program's or a web page's, so control characters are shown as a dot.
+func pasteSummary(of text: String, risk: Int32) -> PasteSummary {
+    var lines = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
+    if lines.count > 1, lines.last == "" { lines.removeLast() }   // a trailing line break ends the last line, it does not start one
+    let size = ByteCountFormatter.string(fromByteCount: Int64(text.utf8.count), countStyle: .file)
+    let title = lines.count > 1 ? "Paste \(lines.count) lines (\(size))?" : "Paste \(size)?"
+    var reasons: [String] = []
+    if risk & 1 != 0 { reasons.append("This program has not asked for bracketed paste, so each line runs as soon as it is pasted.") }
+    if risk & 2 != 0 { reasons.append("This is a very large paste.") }
+    func shown(_ line: String) -> String {
+        let clean = String(String.UnicodeScalarView(line.unicodeScalars.map { $0.properties.generalCategory == .control && $0 != "\t" ? "\u{00B7}" : $0 }))
+        return clean.count > 80 ? String(clean.prefix(80)) + "…" : clean
+    }
+    var preview = lines.prefix(5).map(shown)
+    if lines.count > 5 { preview.append("…") }
+    return PasteSummary(title: title, detail: (reasons + [""] + preview).joined(separator: "\n"))
+}
+
 private func utf8String(_ p: UnsafePointer<UInt8>?, _ n: Int) -> String {
     guard let p, n > 0 else { return "" }
     return String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)   // copies: the core's bytes are borrowed
@@ -372,10 +397,29 @@ final class TerminalController {
         return harf_term_mouse(t, painter, action, button, mods, x, y) == 1
     }
 
+    /// Pastes `text`, after asking when the core says it should be confirmed (a line break in a program without bracketed paste, or a
+    /// very large paste) and the guard is on. The text is captured now: the clipboard may change while the sheet is open.
     func paste(_ text: String) {
         guard let t = term, !text.isEmpty else { return }
         let bytes = Array(text.utf8)
-        _ = bytes.withUnsafeBufferPointer { harf_term_paste(t, $0.baseAddress, bytes.count) }
+        func send() {
+            guard let t = self.term else { return }   // the session may have ended while the sheet was open
+            _ = bytes.withUnsafeBufferPointer { harf_term_paste(t, $0.baseAddress, bytes.count) }
+        }
+        let risk = Settings.shared.pasteGuard ? bytes.withUnsafeBufferPointer { harf_term_paste_check(t, $0.baseAddress, bytes.count) } : 0
+        if risk == 0 { return send() }
+        confirmPaste(pasteSummary(of: text, risk: risk)) { ok in if ok { send() } }
+    }
+
+    /// Asks whether to paste: a sheet on the window. The self-test replaces it. With no window to attach a sheet to it answers no.
+    lazy var confirmPaste: (PasteSummary, @escaping (Bool) -> Void) -> Void = { [weak self] summary, done in
+        guard let window = self?.view.window else { return done(false) }
+        let alert = NSAlert()
+        alert.messageText = summary.title
+        alert.informativeText = summary.detail
+        alert.addButton(withTitle: "Paste")
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        alert.beginSheetModal(for: window) { done($0 == .alertFirstButtonReturn) }
     }
 
     // MARK: events from the session (already on the main thread)

@@ -134,6 +134,9 @@ void harf_term_clear_selection(HarfTerm *t);
 void harf_term_default_bg(HarfTerm *t, uint8_t rgb[3]);
 /* The terminal's real grid size (a program can change it, for example to 132 columns, without the view knowing). */
 void harf_term_grid(HarfTerm *t, uint16_t *cols, uint16_t *rows);
+/* Whether pasting `utf8` should be confirmed first: 0 = no, bit 1 = it would run lines (a line break, and the program has not asked
+   for bracketed paste), bit 2 = it is very large (over 100,000 bytes). */
+int harf_term_paste_check(HarfTerm *t, const uint8_t *utf8, size_t len);
 /* Pastes text, framed for the terminal's paste mode (bracketed, newlines as CR). 0 = ok. */
 int harf_term_paste(HarfTerm *t, const uint8_t *utf8, size_t len);
 void harf_term_wake_handled(HarfTerm *t);
@@ -170,6 +173,7 @@ size_t harf_config_scrollback_bytes(HarfConfig *cfg);
 int harf_config_clipboard_write(HarfConfig *cfg); /* 1 allow, 0 deny */
 int harf_config_notifications(HarfConfig *cfg);   /* 0 unfocused, 1 always, 2 off */
 int harf_config_shell_integration(HarfConfig *cfg); /* 0 auto, 1 off */
+int harf_config_paste_guard(HarfConfig *cfg);       /* 1 on, 0 off */
 /* The directory holding the zsh shim (`zsh/.zshenv`): a login zsh started afterwards emits OSC 133 marks. NULL turns it off. */
 void harf_set_shell_integration_dir(const char *dir);
 /* The theme for a dark (1) or light (0) system appearance. */

@@ -25,6 +25,12 @@ pub const Callbacks = struct {
     command: ?*const fn (ctx: ?*anyopaque, kind: CommandKind, exit_code: ?i32) void = null,
 };
 
+/// A paste over this many bytes is confirmed first (see `Terminal.pasteRisk`).
+pub const large_paste_bytes: usize = 100_000;
+
+/// Why a paste should be confirmed before it is sent.
+pub const PasteRisk = struct { runs_lines: bool, large: bool };
+
 pub const CommandKind = enum { prompt_start, input_start, output_start, command_end };
 
 pub const Rgb = struct { r: u8, g: u8, b: u8 };
@@ -803,6 +809,15 @@ pub const Terminal = struct {
         return cfg.value;
     }
 
+    /// What pasting `text` would do before the user has seen it: `runs_lines` when it holds a line break and the program has not
+    /// asked for bracketed paste (every line then runs as it arrives, as if typed), `large` when it is over `large_paste_bytes`.
+    pub fn pasteRisk(self: *Terminal, text: []const u8) PasteRisk {
+        return .{
+            .runs_lines = !self.bracketedPaste() and std.mem.indexOfAny(u8, text, "\r\n") != null,
+            .large = text.len > large_paste_bytes,
+        };
+    }
+
     /// Appends what pasting `text` sends to the child: newlines become CR, and in bracketed
     /// paste mode the text is wrapped in ESC[200~ ... ESC[201~. The library removes control
     /// characters that could end a bracketed paste early.
@@ -1451,6 +1466,23 @@ test "selectLastOutput does nothing without marks, on the alternate screen, or a
     cleared.write(two_commands ++ "\x1b[H\x1b[2J\x1b[3J");
     try std.testing.expect(!cleared.selectLastOutput());
     try std.testing.expectError(error.NoSelection, cleared.selectionText(std.testing.allocator));
+}
+
+test "pasteRisk: a line break risks running lines only without bracketed paste; very large always asks" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    const none: PasteRisk = .{ .runs_lines = false, .large = false };
+    try std.testing.expectEqual(none, t.pasteRisk("one line"));
+    for ([_][]const u8{ "a\nb", "a\rb", "ls\n" }) |text| try std.testing.expect(t.pasteRisk(text).runs_lines);
+    t.write("\x1b[?2004h"); // the program asked for bracketed paste: it sees one paste, not typing
+    for ([_][]const u8{ "a\nb", "a\rb", "ls\n" }) |text| try std.testing.expectEqual(none, t.pasteRisk(text));
+    const big = try std.testing.allocator.alloc(u8, large_paste_bytes + 1);
+    defer std.testing.allocator.free(big);
+    @memset(big, 'a');
+    try std.testing.expect(!t.pasteRisk(big[0..large_paste_bytes]).large); // exactly the limit does not ask
+    try std.testing.expect(t.pasteRisk(big).large); // bracketed or not
+    t.write("\x1b[?2004l");
+    try std.testing.expect(t.pasteRisk(big).large);
 }
 
 test "default scrollback keeps between 500 and 1200 rows at 80 columns" {

@@ -197,6 +197,13 @@ export fn harf_term_key(t: *HarfTerm, keycode: u16, mods: u32, utf8: ?[*]const u
     return if (handled) 1 else 0;
 }
 
+/// Whether pasting `utf8` should be confirmed first: 0 = no, bit 1 = it would run lines (it holds a line break and the program has
+/// not asked for bracketed paste), bit 2 = it is very large (over 100,000 bytes).
+export fn harf_term_paste_check(t: *HarfTerm, utf8: [*]const u8, len: usize) c_int {
+    const r = t.session.pasteRisk(utf8[0..len]);
+    return @as(c_int, @intFromBool(r.runs_lines)) | (@as(c_int, @intFromBool(r.large)) << 1);
+}
+
 /// Pastes text, framed for the terminal's paste mode. 0 on success.
 export fn harf_term_paste(t: *HarfTerm, utf8: [*]const u8, len: usize) c_int {
     t.session.paste(utf8[0..len]) catch return -1;
@@ -443,6 +450,20 @@ test "harf_term_mouse: tracking takes the event, Shift keeps it for selection" {
     try std.testing.expectEqual(@as(c_int, 0), harf_term_mouse(t, p, 0, 1, 1, 40, 40)); // Shift: not for the program
     try std.testing.expectEqual(@as(usize, 0), t.session.pendingInput());
     try std.testing.expectEqual(@as(c_int, 1), harf_term_mouse(t, p, 0, 1, 0, 40, 40)); // the program takes it
+}
+
+test "harf_term_paste_check returns the reason bits" {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "sleep 5", null };
+    const t = harf_term_new(20, 3, 1 << 20, &argv, null) orelse return error.TermNotCreated;
+    defer harf_term_free(t);
+    try std.testing.expectEqual(@as(c_int, 0), harf_term_paste_check(t, "hi", 2));
+    try std.testing.expectEqual(@as(c_int, 1), harf_term_paste_check(t, "a\nb", 3)); // would run lines
+    const big = try std.testing.allocator.alloc(u8, 100_001);
+    defer std.testing.allocator.free(big);
+    @memset(big, 'a');
+    try std.testing.expectEqual(@as(c_int, 2), harf_term_paste_check(t, big.ptr, big.len));
+    big[5] = '\n';
+    try std.testing.expectEqual(@as(c_int, 3), harf_term_paste_check(t, big.ptr, big.len));
 }
 
 test "harf_term_draw takes the cursor's look from the focus flag" {
@@ -839,6 +860,11 @@ export fn harf_config_clipboard_write(cfg: *config.Config) c_int {
 /// 0 unfocused, 1 always, 2 off.
 export fn harf_config_notifications(cfg: *config.Config) c_int {
     return @intFromEnum(cfg.notifications);
+}
+
+/// 1 on, 0 off.
+export fn harf_config_paste_guard(cfg: *config.Config) c_int {
+    return @intFromBool(cfg.paste_guard);
 }
 
 /// 0 auto, 1 off.

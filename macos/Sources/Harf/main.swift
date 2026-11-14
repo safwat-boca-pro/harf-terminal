@@ -588,6 +588,51 @@ func selfTest() -> Never {
     if !pump(5, until: { rows(pasting).contains("got:x y") }) { fail("paste: rows are '\(rows(pasting))'") }
     pasting.close()
 
+    // 3b. The paste guard: a one-line paste never asks; text that would run lines in a program without bracketed paste asks first and
+    // only a yes sends it; a program with bracketed paste is not asked about; the guard can be switched off; the sheet shows no
+    // control characters.
+    do {
+        guard let c = TerminalController(argv: ["/bin/sh", "-c", "cat"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the paste-guard session") }
+        var asked: [PasteSummary] = []
+        var answer = false
+        c.confirmPaste = { summary, done in asked.append(summary); done(answer) }
+        c.paste("ONELINE")
+        if !asked.isEmpty { fail("paste guard: a one-line paste must not ask") }
+        if !pump(5, until: { rows(c).contains("ONELINE") }) { fail("paste guard: the one-line paste never arrived (rows \(rows(c)))") }
+        c.paste("PQR\nSTU")
+        if asked.count != 1 { fail("paste guard: a multi-line paste without bracketed paste must ask once, asked \(asked.count) times") }
+        _ = pump(0.5) { false }
+        if rows(c).contains("PQR") { fail("paste guard: a cancelled paste reached the program") }
+        answer = true
+        c.paste("PQR\nSTU")
+        if !pump(5, until: { rows(c).contains("PQR") && rows(c).contains("STU") }) { fail("paste guard: a confirmed paste never arrived (rows \(rows(c)))") }
+        c.close()
+
+        guard let b = TerminalController(argv: ["/bin/sh", "-c", "printf '\\033[?2004hREADY'; cat"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the bracketed session") }
+        var askedB = 0
+        b.confirmPaste = { _, done in askedB += 1; done(true) }
+        if !pump(5, until: { rows(b).contains("READY") }) { fail("paste guard: the bracketed session never started") }
+        b.paste("MNO\nXYZ")
+        if askedB != 0 { fail("paste guard: bracketed paste must not ask about a multi-line paste") }
+        b.close()
+
+        let dir = NSTemporaryDirectory() + "harf-selftest-pasteguard-\(getpid())"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try? "paste_guard = off\n".write(toFile: dir + "/config", atomically: false, encoding: .utf8)
+        Settings.shared.load(directory: dir)
+        defer { Settings.shared.load(directory: dir + "/none") }
+        guard let o = TerminalController(argv: ["/bin/sh", "-c", "cat"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the guard-off session") }
+        var askedO = 0
+        o.confirmPaste = { _, done in askedO += 1; done(true) }
+        o.paste("GHI\nJKL")
+        if askedO != 0 { fail("paste guard: paste_guard = off must never ask") }
+        o.close()
+
+        let s = pasteSummary(of: "line1\nline2\u{1b}[31m", risk: 1)
+        if !s.title.contains("2 lines") || s.detail.contains("\u{1b}") || !s.detail.contains("line1") { fail("paste guard: the summary is '\(s.title)' / '\(s.detail)'") }
+    }
+
     // 4. Title and bell reach the window; a clean exit closes it.
     guard let wc1 = WindowController(argv: ["/bin/sh", "-c", "printf '\\033]0;T1\\007\\007'"], content: NSSize(width: 700, height: 420), cwd: nil) else { fail("cannot start title session") }
     var bells = 0

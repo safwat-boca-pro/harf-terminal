@@ -123,6 +123,8 @@ pub const Config = struct {
     clipboard_write: bool = true,
     notifications: Notifications = .unfocused,
     shell_integration: ShellIntegration = .auto,
+    /// Confirm a paste that would run lines in a program without bracketed paste, or that is very large.
+    paste_guard: bool = true,
     /// The theme for a dark and for a light system appearance (index 0 and 1), with the file's own colors applied on top.
     themes: [2]Theme = .{ builtin_dark, builtin_dark },
     theme_names: [2][]const u8 = .{ "dark", "dark" },
@@ -169,6 +171,8 @@ pub const Config = struct {
             if (std.mem.eql(u8, value, "allow")) self.clipboard_write = true else if (std.mem.eql(u8, value, "deny")) self.clipboard_write = false else try self.warn("", line, "clipboard_write is allow or deny, not '{s}'", .{value});
         } else if (std.mem.eql(u8, key, "notifications")) {
             self.notifications = std.meta.stringToEnum(Notifications, value) orelse return self.warn("", line, "notifications is unfocused, always or off, not '{s}'", .{value});
+        } else if (std.mem.eql(u8, key, "paste_guard")) {
+            if (std.mem.eql(u8, value, "on")) self.paste_guard = true else if (std.mem.eql(u8, value, "off")) self.paste_guard = false else try self.warn("", line, "paste_guard is on or off, not '{s}'", .{value});
         } else if (std.mem.eql(u8, key, "shell_integration")) {
             self.shell_integration = std.meta.stringToEnum(ShellIntegration, value) orelse return self.warn("", line, "shell_integration is auto or off, not '{s}'", .{value});
         } else if (std.mem.eql(u8, key, "theme")) {
@@ -500,6 +504,10 @@ pub const template =
     \\# running marker on a tab use; off leaves your shell alone. It applies to windows, tabs and panes you open afterwards.
     \\# shell_integration = auto
     \\
+    \\# Paste guard: on asks before a paste that would run lines in a program without bracketed paste (a line break, as if typed) or that
+    \\# is over 100,000 bytes; off never asks.
+    \\# paste_guard = on
+    \\
     \\# Key bindings: keybind = trigger = action. Triggers are modifiers (cmd, ctrl, option, shift) and a key, joined with +:
     \\# cmd+t, option+left, cmd+shift+d, f5, cmd+]. Your lines replace the default for the same trigger; `unbind` removes it.
     \\# Actions: new_window new_tab close split_right split_down focus_next focus_prev next_tab prev_tab goto_tab:N clear clear_view prev_prompt next_prompt select_output find
@@ -596,9 +604,11 @@ test "settings" {
         \\clipboard_write = deny
         \\notifications = always
         \\shell_integration = off
+        \\paste_guard = off
     );
     defer c.deinit();
     try testing.expectEqual(ShellIntegration.off, c.shell_integration);
+    try testing.expect(!c.paste_guard);
     try testing.expectEqual(@as(usize, 0), c.warnings.items.len);
     try testing.expectEqualStrings("Monaco", c.font_family);
     try testing.expectEqual(@as(f32, 16.5), c.font_size);
@@ -610,6 +620,7 @@ test "settings" {
     try testing.expectEqualStrings("Menlo", d.font_family);
     try testing.expect(d.clipboard_write);
     try testing.expectEqual(Notifications.unfocused, d.notifications);
+    try testing.expect(d.paste_guard);
 }
 
 test "a bad line is a warning with its line number, and the rest still applies" {
@@ -750,7 +761,7 @@ test "every example line of the template is valid once uncommented" {
     while (lines.next()) |l| {
         if (!std.mem.startsWith(u8, l, "# ")) continue;
         const rest = l[2..];
-        for ([_][]const u8{ "font_family = ", "font_size = ", "theme = ", "foreground = ", "background = ", "cursor_color = ", "scrollback_bytes = ", "clipboard_write = ", "notifications = ", "shell_integration = ", "keybind = " }) |k| {
+        for ([_][]const u8{ "font_family = ", "font_size = ", "theme = ", "foreground = ", "background = ", "cursor_color = ", "scrollback_bytes = ", "clipboard_write = ", "notifications = ", "shell_integration = ", "paste_guard = ", "keybind = " }) |k| {
             if (std.mem.startsWith(u8, rest, k)) {
                 try live.appendSlice(testing.allocator, rest);
                 try live.append(testing.allocator, '\n');
