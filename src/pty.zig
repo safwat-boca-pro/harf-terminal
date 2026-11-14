@@ -7,6 +7,7 @@ extern "c" fn forkpty(amaster: *c_int, name: ?[*]u8, termp: ?*const c.termios, w
 extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
 /// _IOW('t', 103, struct winsize) on Darwin; std.c.T has no entry for macOS.
 const TIOCSWINSZ: c_ulong = 0x80087467;
+const TIOCGPGRP: c_ulong = 0x40047477;
 const O_NONBLOCK: c_int = 0x4;
 extern "c" fn signal(sig: c_int, handler: ?*const anyopaque) ?*const anyopaque;
 extern "c" fn sigprocmask(how: c_int, set: ?*const u32, old: ?*u32) c_int;
@@ -85,6 +86,9 @@ pub const Pty = struct {
     fd: c_int,
     pid: c.pid_t,
     status: ?u8 = null,
+    /// The terminal's foreground process group when teardown began. With job control it is a job's
+    /// own group, not the shell's, so it needs its own signals. 0 = none or the shell's group.
+    fg: c.pid_t = 0,
 
     pub fn spawn(gpa: std.mem.Allocator, opts: SpawnOptions) !Pty {
         std.debug.assert(opts.argv.len > 0);
@@ -215,19 +219,32 @@ pub const Pty = struct {
         }
     }
 
-    /// Hangs up on the child's process group (SIGHUP, as closing a terminal would) and reaps the
-    /// child. Whatever is still running after 100 ms gets SIGKILL. For teardown only: this is the
-    /// one bounded wait in the product.
+    /// Records the terminal's foreground process group (it is gone once the master is closed).
+    fn noteForeground(self: *Pty) void {
+        if (self.fd < 0) return;
+        var pg: c.pid_t = 0;
+        if (ioctl(self.fd, TIOCGPGRP, &pg) == 0 and pg > 1 and pg != self.pid) self.fg = pg;
+    }
+
+    fn signalGroups(self: *Pty, sig: anytype) void {
+        _ = c.kill(-self.pid, sig); // the child is a session leader, so its pid is its group id
+        if (self.fg != 0) _ = c.kill(-self.fg, sig);
+    }
+
+    /// Hangs up on the child's process group and on the terminal's foreground job (SIGHUP, as
+    /// closing a terminal would) and reaps the child. Whatever is still running after 100 ms gets
+    /// SIGKILL. For teardown only: this is the one bounded wait in the product.
     pub fn kill(self: *Pty) void {
         if (self.status != null) return;
-        _ = c.kill(-self.pid, .HUP); // the child is a session leader, so its pid is its group id
+        self.noteForeground();
+        self.signalGroups(.HUP);
         var tries: u32 = 0;
         while (tries < 10) : (tries += 1) {
             var raw: c_int = 0;
             const r = c.waitpid(self.pid, &raw, c.W.NOHANG);
             if (r == self.pid) {
                 self.status = decodeStatus(raw);
-                _ = c.kill(-self.pid, .KILL); // sweep group members that outlived the leader
+                self.signalGroups(.KILL); // sweep group members that outlived the leader
                 return;
             }
             if (r < 0) {
@@ -237,7 +254,7 @@ pub const Pty = struct {
             const ts: c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
             _ = c.nanosleep(&ts, null);
         }
-        _ = c.kill(-self.pid, .KILL);
+        self.signalGroups(.KILL);
         _ = self.wait();
     }
 
@@ -245,7 +262,9 @@ pub const Pty = struct {
     pub fn deinit(self: *Pty) void {
         // Close the master first: a child with unread output on its terminal cannot exit until
         // that output is drained or the master is gone (and the close also hangs up its terminal).
+        self.noteForeground(); // the terminal knows its foreground job only while the master is open
         _ = c.close(self.fd);
+        self.fd = -1;
         self.kill();
     }
 };
@@ -376,6 +395,32 @@ test "kill reaches the process group" {
         const ts: c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
         _ = c.nanosleep(&ts, null);
     }
+    try std.testing.expect(gone);
+}
+
+test "kill reaches a foreground job in its own process group that ignores SIGHUP" {
+    // With job control the foreground job is not in the shell's process group, so signalling the
+    // shell's group alone leaves it running (the nohup case).
+    const gpa = std.testing.allocator;
+    const script = "set -m; sh -c 'trap \"\" HUP; echo job:$$:; exec sleep 30'";
+    var p = try Pty.spawn(gpa, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    var buf: [256]u8 = undefined;
+    const out = readUntil(&p, ":\r", &buf);
+    const start = (std.mem.indexOf(u8, out, "job:") orelse return error.NoPid) + 4;
+    const end = std.mem.indexOfScalarPos(u8, out, start, ':') orelse return error.NoPid;
+    const job_pid = try std.fmt.parseInt(c.pid_t, out[start..end], 10);
+    p.deinit();
+    var gone = false;
+    var waited: u32 = 0;
+    while (waited < 500) : (waited += 10) {
+        if (c.kill(job_pid, @enumFromInt(0)) != 0) {
+            gone = true;
+            break;
+        }
+        const ts: c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = c.nanosleep(&ts, null);
+    }
+    if (!gone) _ = c.kill(job_pid, .KILL); // do not leave a stray sleep behind a failing run
     try std.testing.expect(gone);
 }
 
