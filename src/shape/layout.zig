@@ -85,7 +85,7 @@ fn splitLigatures(ex: []Extent) void {
     }
 }
 
-fn isMark(cp: u21) bool {
+pub fn isMark(cp: u21) bool {
     return (cp >= 0x0300 and cp <= 0x036F) or
         (cp >= 0x064B and cp <= 0x065F) or cp == 0x0670 or
         (cp >= 0x06D6 and cp <= 0x06DC) or (cp >= 0x06DF and cp <= 0x06E4) or

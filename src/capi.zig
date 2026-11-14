@@ -223,4 +223,5 @@ test {
     _ = @import("keys.zig");
     _ = @import("draw.zig");
     _ = @import("rowfacts.zig");
+    _ = @import("rowlayout.zig");
 }
