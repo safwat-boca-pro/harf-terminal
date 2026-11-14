@@ -222,4 +222,5 @@ test {
     _ = @import("term.zig");
     _ = @import("keys.zig");
     _ = @import("draw.zig");
+    _ = @import("rowfacts.zig");
 }
