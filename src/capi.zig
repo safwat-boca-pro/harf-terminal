@@ -131,6 +131,12 @@ export fn harf_term_find_step(t: *HarfTerm, older: c_int, number: *usize, total:
     return 1;
 }
 
+/// Scrolls to the prompt `delta` prompts away (negative: older) using the shell's OSC 133 marks. Returns 1 if the view moved, 0 if
+/// not (no marks that way, or the alternate screen: the key then belongs to the program).
+export fn harf_term_scroll_prompt(t: *HarfTerm, delta: c_int) c_int {
+    return @intFromBool(t.session.scrollPrompt(delta));
+}
+
 /// Ends the find and clears its selection.
 export fn harf_term_find_end(t: *HarfTerm) void {
     t.session.findEnd();

@@ -71,6 +71,9 @@ pub const Action = enum {
     clear,
     /// Only the visible screen (the scrollback stays); on the alternate screen the key goes to the program.
     clear_view,
+    /// Scroll to the previous / next shell prompt (OSC 133); the key goes to the program when there is none or on the alternate screen.
+    prev_prompt,
+    next_prompt,
     find,
     find_next,
     find_prev,
@@ -487,7 +490,7 @@ pub const template =
     \\
     \\# Key bindings: keybind = trigger = action. Triggers are modifiers (cmd, ctrl, option, shift) and a key, joined with +:
     \\# cmd+t, option+left, cmd+shift+d, f5, cmd+]. Your lines replace the default for the same trigger; `unbind` removes it.
-    \\# Actions: new_window new_tab close split_right split_down focus_next focus_prev next_tab prev_tab goto_tab:N clear clear_view find
+    \\# Actions: new_window new_tab close split_right split_down focus_next focus_prev next_tab prev_tab goto_tab:N clear clear_view prev_prompt next_prompt find
     \\# find_next find_prev copy paste font_larger font_smaller font_reset reload_config open_config quit
     \\# and send:TEXT (up to 63 bytes, with \e \n \r \t \\ \xNN) to type something into the program.
     \\# keybind = cmd+t = new_tab
@@ -517,6 +520,8 @@ pub const default_keybinds =
     \\keybind = cmd+9 = goto_tab:9
     \\keybind = cmd+k = clear
     \\keybind = ctrl+l = clear_view
+    \\keybind = cmd+up = prev_prompt
+    \\keybind = cmd+down = next_prompt
     \\keybind = cmd+f = find
     \\keybind = cmd+g = find_next
     \\keybind = cmd+shift+g = find_prev
@@ -560,6 +565,8 @@ test "the defaults parse without a warning and bind the shell's shortcuts" {
     try testing.expectEqualStrings("9", nine.arg);
     try testing.expectEqual(Action.reload_config, find(c, super | shift, ",").?.action);
     try testing.expectEqual(Action.clear_view, find(c, @intCast(keys.Mods.ctrl), "l").?.action);
+    try testing.expectEqual(Action.prev_prompt, find(c, super, "up").?.action);
+    try testing.expectEqual(Action.next_prompt, find(c, super, "down").?.action);
     // nothing is bound to the editing keys the core already maps (Option+arrows, Cmd+arrows)
     try testing.expect(find(c, alt, "left") == null);
     try testing.expect(find(c, super, "left") == null);

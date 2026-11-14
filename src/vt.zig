@@ -809,6 +809,16 @@ pub const Terminal = struct {
         _ = c.ghostty_terminal_scroll_viewport(self.handle, behavior);
     }
 
+    /// Scrolls the viewport so the prompt `delta` prompts away (negative = older) is at its top, using the OSC 133 marks. True only
+    /// if the viewport moved: not on the alternate screen, and not when there is no mark in that direction.
+    pub fn scrollPrompt(self: *Terminal, delta: i32) bool {
+        if (delta == 0 or self.onAlternateScreen()) return false;
+        const before = self.viewport().offset;
+        const behavior: c.GhosttyTerminalScrollViewport = .{ .tag = c.GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA_PROMPT, .value = .{ .delta_prompt = delta } };
+        _ = c.ghostty_terminal_scroll_viewport(self.handle, behavior);
+        return self.viewport().offset != before;
+    }
+
     pub fn scrollToBottom(self: *Terminal) void {
         const behavior: c.GhosttyTerminalScrollViewport = .{ .tag = c.GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM, .value = .{ .delta = 0 } };
         _ = c.ghostty_terminal_scroll_viewport(self.handle, behavior);
@@ -1300,6 +1310,63 @@ test "XTWINOPS size queries are answered once the cell size is known" {
 fn writeLines(t: *Terminal, n: usize) void {
     var buf: [32]u8 = undefined;
     for (0..n) |i| t.write(std.fmt.bufPrint(&buf, "line {d}\r\n", .{i}) catch unreachable);
+}
+
+/// `n` finished commands (a marked prompt `$ cmd<i>`, then `lines` of output, then the exit mark) and a last prompt, as a
+/// shell with OSC 133 integration draws them.
+fn writeBlocks(t: *Terminal, n: usize, lines: usize) void {
+    var buf: [48]u8 = undefined;
+    for (0..n) |i| {
+        t.write(std.fmt.bufPrint(&buf, "\x1b]133;A\x07$ cmd{d}\r\n\x1b]133;C\x07", .{i}) catch unreachable);
+        for (0..lines) |j| t.write(std.fmt.bufPrint(&buf, "out{d}-{d}\r\n", .{ i, j }) catch unreachable);
+        t.write("\x1b]133;D;0\x07");
+    }
+    t.write("\x1b]133;A\x07$ ");
+}
+
+fn topRow(t: *Terminal, buf: []u8) []const u8 {
+    return t.rowText(0, buf);
+}
+
+test "scrollPrompt moves the viewport one prompt at a time" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    writeBlocks(t, 3, 40);
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(t.atBottom());
+    try std.testing.expect(t.scrollPrompt(-1));
+    try std.testing.expectEqualStrings("$ cmd2", topRow(t, &buf));
+    try std.testing.expect(t.scrollPrompt(-1));
+    try std.testing.expectEqualStrings("$ cmd1", topRow(t, &buf));
+    try std.testing.expect(t.scrollPrompt(-1));
+    try std.testing.expectEqualStrings("$ cmd0", topRow(t, &buf));
+    try std.testing.expect(!t.scrollPrompt(-1)); // already at the first prompt
+    try std.testing.expectEqualStrings("$ cmd0", topRow(t, &buf));
+    try std.testing.expect(t.scrollPrompt(1));
+    try std.testing.expectEqualStrings("$ cmd1", topRow(t, &buf));
+}
+
+test "scrollPrompt does nothing without marks, on the alternate screen, or after the scrollback was cleared" {
+    const plain = try Terminal.init(std.testing.allocator, .{});
+    defer plain.deinit();
+    writeLines(plain, 100);
+    const before = plain.viewport().offset;
+    try std.testing.expect(!plain.scrollPrompt(-1));
+    try std.testing.expectEqual(before, plain.viewport().offset);
+
+    const alt = try Terminal.init(std.testing.allocator, .{});
+    defer alt.deinit();
+    writeBlocks(alt, 3, 40);
+    alt.write("\x1b[?1049h");
+    try std.testing.expect(!alt.scrollPrompt(-1));
+
+    const cleared = try Terminal.init(std.testing.allocator, .{});
+    defer cleared.deinit();
+    writeBlocks(cleared, 3, 40);
+    cleared.write("\x1b[H\x1b[2J\x1b[3J"); // Cmd+K: the marks went with the scrollback
+    const at = cleared.viewport().offset;
+    try std.testing.expect(!cleared.scrollPrompt(-1));
+    try std.testing.expectEqual(at, cleared.viewport().offset);
 }
 
 test "default scrollback keeps between 500 and 1200 rows at 80 columns" {

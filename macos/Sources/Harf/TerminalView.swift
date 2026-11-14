@@ -216,6 +216,8 @@ final class TerminalController {
         case "paste": if let s = NSPasteboard.general.string(forType: .string) { paste(s) }
         case "clear": _ = harf_term_clear(t, 1)
         case "clear_view": return harf_term_clear(t, 0) == 1   // on the alternate screen the key is the program's
+        case "prev_prompt": return harf_term_scroll_prompt(t, -1) == 1   // false: no mark that way, so the key is the program's
+        case "next_prompt": return harf_term_scroll_prompt(t, 1) == 1
         case "send": _ = arg.withUnsafeBufferPointer { harf_term_input(t, $0.baseAddress, arg.count) }
         default: return false
         }

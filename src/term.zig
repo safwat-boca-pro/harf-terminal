@@ -563,6 +563,15 @@ pub const Session = struct {
         return r;
     }
 
+    /// Jumps `delta` prompts (negative = older) using the shell's OSC 133 marks; false if nothing moved (see `vt.Terminal.scrollPrompt`).
+    pub fn scrollPrompt(self: *Session, delta: i32) bool {
+        const t = self.lock();
+        const moved = t.scrollPrompt(delta);
+        self.unlock();
+        if (moved) self.requestWake();
+        return moved;
+    }
+
     pub fn findEnd(self: *Session) void {
         const t = self.lock();
         t.findEnd();
