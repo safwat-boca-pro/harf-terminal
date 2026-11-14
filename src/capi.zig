@@ -542,6 +542,7 @@ test {
     _ = @import("rowfacts.zig");
     _ = @import("rowlayout.zig");
     _ = @import("programs_test.zig");
+    _ = @import("agents_spike_test.zig");
 }
 
 // ---- P4 gate measurement (HARF_BENCH=1): does drawing slow the parsing of a flood? ----
