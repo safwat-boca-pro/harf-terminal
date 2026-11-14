@@ -30,7 +30,7 @@
 6. **Any key, paste or text input snaps the viewport to the bottom.** New output while scrolled up does not move the viewport; the cursor is hidden while scrolled.
 7. **Mouse tracking vs selection:** while a program has mouse tracking on, clicks and drags go to it; holding Shift selects text instead (xterm convention). With tracking off, a drag selects.
 8. **Hit-testing:** a pixel is resolved to a cell by the painter: through `RowLayout` spans on shaped rows, `x / cell_w` on plain rows, clamped to the grid. Programs are told the cell's center, so the library's own cell math agrees with the resolved cell.
-9. **Selection and copy.** The library's selection gestures give cell, word (double click) and line (triple click) selection. Cmd+C copies the library's formatted text of the selection (logical order) to the pasteboard; Cmd+C with no selection does nothing. Fixed selection color (0.22, 0.33, 0.55). No copy-on-select, no rectangle selection, no Cmd+A, no autoscroll. Output that changes the selected text clears the selection (the library decides; the test pins it).
+9. **Selection and copy.** *(Superseded in part by the ledger: output that changes the selected cells does NOT clear the selection, because the library keeps it; typing, a key that sends bytes or a paste does clear it. See `ARCHITECTURE.md` and the Task 6 and post-review ledger lines.)* The library's selection gestures give cell, word (double click) and line (triple click) selection. Cmd+C copies the library's formatted text of the selection (logical order) to the pasteboard; Cmd+C with no selection does nothing. Fixed selection color (0.22, 0.33, 0.55). No copy-on-select, no rectangle selection, no Cmd+A, no autoscroll. Output that changes the selected text clears the selection (the library decides; the test pins it).
 10. **Cursor.** Honors the program's cursor shape (block, bar, underline) and cursor color; steady, not blinking (slice 3 keeps the no-timer rule). Unfocused window: hollow block. Focus-in and focus-out are sent to the program only when it enabled focus events.
 
 ## Review Focus
@@ -196,7 +196,7 @@ Inputs the spec implies but a straightforward test would miss; each is pinned by
   - `word and line selection`: double click selects the word under the cell, triple click the line.
   - `selection draws on plain and shaped rows`: the selected cells have the selection background pixel; on `مرحبا` the highlighted pixels lie inside the spans of the selected columns.
   - `hit test on a shaped row`: press at the center of the second letter's span of `مرحبا` selects column 1; press past the text selects the plain column.
-  - `output that changes the selection clears it`: after selecting, writing new text over the selected cells leaves `hasSelection()` false (pins what the library does; if the library keeps it, rule in the ledger and adjust Decision 9).
+  - *(Superseded: see the ledger. The tests are `output over the selected cells keeps the selection, and copies what is there now`, `scrolling output carries the selection with its content` and `typing, keys and paste clear the selection`.)* `output that changes the selection clears it`: after selecting, writing new text over the selected cells leaves `hasSelection()` false (pins what the library does; if the library keeps it, rule in the ledger and adjust Decision 9).
   - `selection survives scroll and is cleared by clear`: scrolling the viewport keeps the selection; `clearSelection` removes it.
 - [ ] **Step 2: Run** the filters. Expected: FAIL.
 - [ ] **Step 3: Implement.**

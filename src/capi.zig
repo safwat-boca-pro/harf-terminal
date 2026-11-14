@@ -171,8 +171,10 @@ export fn harf_term_draw(t: *HarfTerm, p: *draw.Painter, ctx: *ct.CGContext, fir
 /// the HARF_MOD_* bits. Returns 1 if the program has mouse tracking on and took the event, 0 if the
 /// caller keeps it (a selection gesture; Shift always keeps it), -1 on error.
 export fn harf_term_mouse(t: *HarfTerm, p: *draw.Painter, action: c_int, button: c_int, mods: u32, x_px: f64, y_px: f64) c_int {
-    if (action == 2 and button == 0 and mods & 1 == 0) {
-        // Plain motion costs nothing unless a program asked to hear it.
+    if (action == 2 and button == 0) {
+        // Plain motion costs nothing unless a program asked to hear it, and its position only matters to a
+        // program that tracks the mouse (a wheel event carries it). That includes the Shift-flagged,
+        // position-only call the view makes for every wheel event.
         const g = t.session.lock();
         defer t.session.unlock();
         if (!g.mouseTracking()) return 0;
@@ -446,6 +448,36 @@ test "harf_term_default_bg follows a program's OSC 11" {
     }
     harf_term_default_bg(t, &rgb);
     try std.testing.expectEqual([3]u8{ 0x10, 0x20, 0x30 }, rgb);
+}
+
+test "harf_term_mouse: a wheel's position-only call records the pointer only while a program tracks the mouse" {
+    const p = harf_painter_new(28) orelse return error.NoPainter;
+    defer harf_painter_free(p);
+    var m: HarfCellMetrics = undefined;
+    harf_painter_metrics(p, &m);
+    const x: f64 = m.cell_w * 5.5; // column 5
+    const y: f64 = m.cell_h * 2.5; // row 2
+    // not tracking: nothing is recorded (and no hit-test is run)
+    const off_argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "sleep 5", null };
+    const off = harf_term_new(40, 10, 1 << 20, &off_argv, null) orelse return error.TermNotCreated;
+    defer harf_term_free(off);
+    _ = harf_term_mouse(off, p, 2, 0, 1, x, y); // motion, no button, Shift: position only
+    try std.testing.expectEqual(@as(u32, 0), off.session.pointer.load(.acquire));
+    // tracking: the pointer's cell is recorded so a wheel event carries it
+    const on_argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "printf '\\033[?1000h'; sleep 5", null };
+    const on = harf_term_new(40, 10, 1 << 20, &on_argv, null) orelse return error.TermNotCreated;
+    defer harf_term_free(on);
+    var waited: u32 = 0;
+    while (waited < 10_000) : (waited += 5) {
+        const g = on.session.lock();
+        const tracking = g.mouseTracking();
+        on.session.unlock();
+        if (tracking) break;
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    _ = harf_term_mouse(on, p, 2, 0, 1, x, y);
+    try std.testing.expectEqual((@as(u32, 5) << 16) | 2, on.session.pointer.load(.acquire));
 }
 
 test "harf_term_new rejects zero size" {
