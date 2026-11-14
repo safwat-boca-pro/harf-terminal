@@ -29,7 +29,6 @@ private let titleCallback: @convention(c) (UnsafeMutableRawPointer?) -> Void = {
 private let bellCallback: @convention(c) (UnsafeMutableRawPointer?) -> Void = { ctx in hop(ctx) { $0.onBell() } }
 private let exitedCallback: @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void = { ctx, status in hop(ctx) { $0.exitedOnMain(status) } }
 
-/// Owns one session, its painter and its view. All methods run on the main thread.
 // Measurement hooks. HARF_MEASURE=1 records when each frame finished (read by the self-test's latency section);
 // HARF_TRACE=startup prints the time from process start to the end of the first frame. Both cost one environment
 // lookup at launch and nothing per frame when off.
@@ -70,6 +69,7 @@ func noteFrameEnd() {
     }
 }
 
+/// Owns one session, its painter and its view. All methods run on the main thread.
 @MainActor
 final class TerminalController {
     let view: TerminalView

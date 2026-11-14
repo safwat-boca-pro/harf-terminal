@@ -4,8 +4,10 @@ import CHarf
 /// `Harf --selftest`: drives a controller without a window and checks drawing and resizing. Exits 0 on success.
 @MainActor
 func selfTest() -> Never {
+    var tempScripts: [String] = []   // scripts the checks write; removed before the self-test ends, including on failure
     func fail(_ what: String) -> Never {
         print("selftest FAILED: \(what)")
+        for p in tempScripts { try? FileManager.default.removeItem(atPath: p) }
         exit(1)
     }
     func pump(_ seconds: Double, until done: () -> Bool) -> Bool {
@@ -128,7 +130,6 @@ func selfTest() -> Never {
     typingStrip(prompt: "", text: "السلام عليكم", name: "typing-bare.png")
 
     // 1d. Slice 3 pictures (HARF_SELFTEST_PNG_DIR) and the cost of colored screens.
-    var tempScripts: [String] = []   // removed before the self-test ends
     func scriptController(_ text: String) -> TerminalController {
         let path = NSTemporaryDirectory() + "harf-selftest-\(getpid())-\(UUID().uuidString).sh"
         tempScripts.append(path)

@@ -272,20 +272,23 @@ interpreted as sRGB (what the theme and the ANSI palette are defined in) instead
 **Question.** Is the 3 MB/s the Zig flood benchmark showed (a 22 MB `seq`) a Harf problem?
 
 **Answer: no. It is the PTY, and the child's write pattern.** The same commands through a bare reader (Python `pty`: `os.read(fd, 65536)`
-in a loop, no parsing at all) versus through Harf's `Session` (no drawing), ReleaseFast, Apple M1, macOS 27.0.1, one run each:
+in a loop, no parsing at all) versus through Harf's `Session` (no drawing), ReleaseFast, Apple M1, macOS 27.0.1, one run each. Every rate
+in this table is bytes of output divided by seconds, MB = 10^6 bytes (the `seq` load is 22.9 MB, the others 100 MB), so a row's rate can be
+checked from its time:
 
 | Load | Bare reader | Harf `Session` | Bytes per `read` (bare) |
 |---|---|---|---|
-| `seq 1 3000000` (22.9 MB, a line per write) | 7.54 s, 4.3 MB/s | 7.59 s, 3.0 MB/s | 13 |
-| `yes \| head -c 100MB` (full lines) | 3.10 s, 31 MB/s | 3.07 s, 33 MB/s | 99 |
-| `head -c 100MB /dev/zero \| tr` (no newlines) | 6.59 s, 14.5 MB/s | 8.15 s, 12.3 MB/s | 1023 |
-| `yes \| head -c 100MB \| cat` (large block writes) | 0.71 s, 136 MB/s | 0.99 s, 101 MB/s | 1023 |
+| `seq 1 3000000` (22.9 MB, a line per write) | 7.54 s, 3.0 MB/s | 7.59 s, 3.0 MB/s | 13 |
+| `yes \| head -c 100MB` (full lines) | 3.10 s, 32 MB/s | 3.07 s, 33 MB/s | 99 |
+| `head -c 100MB /dev/zero \| tr` (no newlines) | 6.59 s, 15 MB/s | 8.15 s, 12 MB/s | 1023 |
+| `yes \| head -c 100MB \| cat` (large block writes) | 0.71 s, 141 MB/s | 0.99 s, 101 MB/s | 1023 |
 
 - A terminal that parses nothing is exactly as slow on the first two rows, so those loads are limited by the child's writes
   through the PTY (a tty is line-buffered: `seq` makes 2.5 million writes). On large block writes the PTY delivers about 1 KB
-  per `read` on macOS whatever the writer does, and a bare reader tops out near 136 MB/s.
-- Where Harf adds anything it is 1.24x to 1.39x a bare reader (parsing, one lock and one wake per read), on loads that already
-  run at 100 MB/s or more.
+  per `read` on macOS whatever the writer does, and a bare reader tops out near 140 MB/s.
+- Harf's time against the bare reader, row by row: 1.01x, 0.99x (both inside run-to-run noise), 1.24x and 1.39x. Only the last two
+  show a cost (parsing, one lock and one wake per read), and the last is the 100 MB/s class of load where it is largest; one run each,
+  so the ratios carry the spread of the same-session pairs in the "tried and dropped" note below (up to about 8 percent).
 - A real 100 MB `yes | head -c` flood through the full app (window drawing) took about 4 s.
 
 **Tried and dropped: draining the PTY before locking.** Reading everything available (up to 64 KB) before taking the lock once
@@ -308,10 +311,10 @@ window drawing, 20 samples each; time per sample (each sample is at least 1 MiB 
 | scrolling_top_small_region | 38.5 ms | 38 | 47 |
 | scrolling_fullscreen | 49.5 ms | 47 | 62 |
 
-These are absolute numbers; no other terminal was run on this machine, so there is no comparison yet (the brief asks for
-"competitive"; comparing needs the other terminals installed and is done only if the owner asks). For scale, one sample of at
-least 1 MiB in about 18 to 50 ms is 20 to 55 MiB/s end to end including drawing, against 186 to 448 MB/s for parsing alone in
-the Phase 3 spike.
+These are absolute numbers; no other terminal was run on this machine, so there is no comparison and **"competitive" is neither
+shown nor refuted** (comparing needs the other terminals installed and is done only if the owner asks). For scale, one sample of at
+least 1 MiB in about 18 to 50 ms is 20 to 55 MiB/s (21 to 58 MB/s) end to end including drawing, against 186 to 448 MB/s for
+parsing alone in the Phase 3 spike.
 
 ## Slice 4: latency, startup and idle against the budgets (2026-11-14)
 
@@ -366,6 +369,11 @@ below what any AppKit window reaches here**, so it cannot be met by changes to H
 
 `bench/idle.sh macos/.build/Harf.app 60`: window open at the prompt, 60 s sampled every 2 s: mean **0.01 percent**, max
 0.20 percent, cumulative CPU time 0:00.15 to 0:00.16 (0.01 s in 60 s). `phys_footprint` 22 MB.
+
+That 22 MB is 3 MB below the 25 MB settled figure in the footprint table above. They are different runs at different times (idle.sh
+reads the footprint at the end of its sampling, after about a minute; footprint.sh at 12 to 20 s), and I did not find what accounts for
+the gap. The section below shows this machine's footprint moving by about 10 MB with graphics state alone, so a 3 MB difference between
+two runs is inside that, and neither number should be quoted without its state.
 
 ### Footprint depends on the machine's graphics state (found in review, 2026-11-14)
 

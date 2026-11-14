@@ -63,6 +63,56 @@ fn waitHas(s: *Session, needle: []const u8, timeout_ms: u32) bool {
     return screenHas(s, needle);
 }
 
+/// Waits until no visible row contains `needle`.
+fn waitGone(s: *Session, needle: []const u8, timeout_ms: u32) bool {
+    var waited: u32 = 0;
+    while (waited < timeout_ms) : (waited += 20) {
+        if (!screenHas(s, needle)) return true;
+        sleepMs(20);
+    }
+    return !screenHas(s, needle);
+}
+
+/// True if any visible cell has a foreground color of its own.
+fn anyColoredCell(s: *Session) bool {
+    const t = s.lock();
+    defer s.unlock();
+    _ = t.update();
+    var cps: [16]u21 = undefined;
+    const sz = t.size();
+    var r: u16 = 0;
+    while (r < sz.rows) : (r += 1) {
+        if (!t.selectRow(r)) continue;
+        var c: u16 = 0;
+        while (c < sz.cols) : (c += 1) if (t.cellInRow(c, &cps).style.fg != null) return true;
+    }
+    return false;
+}
+
+fn waitColored(s: *Session, timeout_ms: u32) bool {
+    var waited: u32 = 0;
+    while (waited < timeout_ms) : (waited += 20) {
+        if (anyColoredCell(s)) return true;
+        sleepMs(20);
+    }
+    return anyColoredCell(s);
+}
+
+/// Waits until the program has asked for the alternate screen and mouse reporting (`want` true), or has released both.
+fn waitAltAndMouse(s: *Session, want: bool, timeout_ms: u32) bool {
+    var waited: u32 = 0;
+    while (true) {
+        {
+            const t = s.lock();
+            defer s.unlock();
+            if (t.onAlternateScreen() == want and t.mouseTracking() == want) return true;
+        }
+        if (waited >= timeout_ms) return false;
+        sleepMs(20);
+        waited += 20;
+    }
+}
+
 /// Waits until visible row `row` contains `needle`.
 fn waitRowHas(s: *Session, row: u16, needle: []const u8, timeout_ms: u32) bool {
     var waited: u32 = 0;
@@ -117,42 +167,15 @@ test "program: vim shows syntax colors and takes the wheel" {
     const s = try run(&buf, "F={s}/harf-vimc-{d}.sh; (printf 'echo \"hi\"\\nif true; then\\nfi\\n'; seq 1 120 | sed 's/^/line /') > $F; vim -u NONE -N -n -c 'set mouse=a' $F; rm -f $F", .{ tmpDir(), std.c.getpid() });
     defer s.deinit();
     try std.testing.expect(waitHas(s, "if true", 10_000));
+    try std.testing.expect(!anyColoredCell(s)); // the control: without syntax highlighting nothing is colored
     try s.input(":syntax on\r:set ft=sh\r");
-    sleepMs(800);
-    var colored = false;
-    {
-        const t = s.lock();
-        defer s.unlock();
-        _ = t.update();
-        var cps: [16]u21 = undefined;
-        const sz = t.size();
-        var r: u16 = 0;
-        while (r < sz.rows and !colored) : (r += 1) {
-            if (!t.selectRow(r)) continue;
-            var c: u16 = 0;
-            while (c < sz.cols) : (c += 1) {
-                if (t.cellInRow(c, &cps).style.fg != null) {
-                    colored = true;
-                    break;
-                }
-            }
-        }
-    }
-    try std.testing.expect(colored); // a keyword is drawn with a color of its own
+    try std.testing.expect(waitColored(s, 10_000)); // a keyword is drawn with a color of its own
     // mouse: vim asked for tracking, so a wheel notch reaches it and the window scrolls
-    var waited: u32 = 0;
-    while (waited < 5_000) : (waited += 20) {
-        const t = s.lock();
-        const on = t.mouseTracking();
-        s.unlock();
-        if (on) break;
-        sleepMs(20);
-    }
+    try std.testing.expect(waitAltAndMouse(s, true, 10_000));
     try s.input("gg"); // top of the file
-    sleepMs(200);
     try s.scroll(9); // three wheel-down events at the pointer
     var scrolled = false;
-    waited = 0;
+    var waited: u32 = 0;
     while (waited < 5_000 and !scrolled) : (waited += 50) {
         sleepMs(50);
         scrolled = !screenHas(s, "echo \"hi\""); // the first line has scrolled off
@@ -186,7 +209,7 @@ test "program: the alternate screen is restored after vim, less, and a killed vi
     try std.testing.expect(waitHas(s, "AFTERVIM", 10_000));
     try std.testing.expect(screenHas(s, "MARK1") and screenHas(s, "MARK2") and screenHas(s, "MARK3")); // the primary screen is back
     // less starts after the script's pause; its page is up when the file's first line is on screen and AFTERVIM is gone
-    sleepMs(1800);
+    try std.testing.expect(waitGone(s, "AFTERVIM", 10_000)); // less has taken the alternate screen
     try s.input("q");
     try std.testing.expect(waitHas(s, "AFTERLESS", 10_000));
     try std.testing.expect(screenHas(s, "MARK1"));
@@ -205,7 +228,7 @@ test "program: the alternate screen is restored after vim, less, and a killed vi
         if (n > 0) pid = std.fmt.parseInt(std.c.pid_t, std.mem.trim(u8, line[0..@intCast(n)], " \r\n"), 10) catch 0;
     }
     try std.testing.expect(pid > 1);
-    sleepMs(800); // let vim paint its screen and turn on its mouse reporting
+    try std.testing.expect(waitAltAndMouse(s, true, 10_000)); // vim has painted its screen and turned on its mouse reporting
     {
         // before the kill vim owns the alternate screen and asked for the mouse
         const t = s.lock();
@@ -249,7 +272,7 @@ test "program: fzf filters and selects" {
     defer s.deinit();
     try std.testing.expect(waitHas(s, "gamma", 10_000)); // the list is up
     try s.input("gam");
-    sleepMs(300);
+    try std.testing.expect(waitGone(s, "alpha", 10_000)); // the filter has been applied: only gamma is left
     try s.input("\r");
     try std.testing.expect(waitHas(s, "PICKED:gamma", 10_000));
     try std.testing.expectEqual(@as(?u8, 0), waitExit(s, 5_000));
@@ -262,8 +285,7 @@ test "program: tmux splits and detaches" {
     defer s.deinit();
     try std.testing.expect(waitHas(s, "[0]", 10_000)); // tmux's status line
     try s.input("\x02%"); // prefix, then a vertical split
-    sleepMs(600);
-    try std.testing.expect(screenHas(s, "\u{2502}")); // the line-drawing border between the two panes (ESC ( 0 mapped)
+    try std.testing.expect(waitHas(s, "\u{2502}", 10_000)); // the line-drawing border between the two panes (ESC ( 0 mapped)
     try s.input("\x02d"); // detach
     try std.testing.expect(waitHas(s, "TMUXDONE", 10_000));
 }

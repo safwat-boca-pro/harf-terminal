@@ -9,14 +9,17 @@ APP="$(cd "$(dirname "$0")/.." && pwd)/macos/.build/Harf.app/Contents/MacOS/Harf
 OUT="${TMPDIR:-/tmp}/harf-startup.$$"
 trap 'rm -f "$OUT"' EXIT
 i=0
+FAILED=0
 while [ "$i" -lt "$RUNS" ]; do
   : > "$OUT"
   HARF_TRACE=startup HARF_CONTENT_SIZE=700x420 "$APP" > "$OUT" 2>&1 &
   PID=$!
   t=0
   while ! grep -q startup_ms "$OUT" && [ "$t" -lt 100 ]; do sleep 0.1; t=$((t + 1)); done
-  grep -o 'startup_ms=[0-9.]*' "$OUT" | head -1
+  grep -o 'startup_ms=[0-9.]*' "$OUT" | head -1 || true
+  grep -q startup_ms "$OUT" || FAILED=$((FAILED + 1))
   kill "$PID" 2>/dev/null || true
   wait "$PID" 2>/dev/null || true
   i=$((i + 1))
 done
+[ "$FAILED" -eq 0 ] || { echo "$FAILED of $RUNS launches printed no startup_ms" >&2; exit 1; }

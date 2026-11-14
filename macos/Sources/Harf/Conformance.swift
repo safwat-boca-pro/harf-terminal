@@ -56,7 +56,10 @@ func conformance(dir: String) -> Never {
 
     /// Opens the menu path in a fresh vttest. A submenu is expanded item by item; a test is stepped through screen by screen.
     func visit(_ path: [String], parentTitle: String = "") {
-        if Date().timeIntervalSince(started) > 14 * 60 { return }   // never run away
+        if Date().timeIntervalSince(started) > 14 * 60 {   // never run away; the paths left over are listed, not dropped
+            entries.append(Entry(file: "", label: "menu" + path.joined(separator: "."), cols: 0, rows: 0, note: "not walked (14-minute cap): run vttest by hand and choose this path", title: ""))
+            return
+        }
         if path.count > 3 {   // vttest's higher menus reopen the lower ones, so the walk is bounded; the skipped paths are listed
             entries.append(Entry(file: "", label: "menu" + path.joined(separator: "."), cols: 0, rows: 0, note: "not walked (depth limit 3): run vttest by hand and choose this path", title: ""))
             return

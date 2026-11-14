@@ -38,7 +38,7 @@ kill -0 "$PID" 2>/dev/null || { echo "Harf exited early" >&2; exit 1; }
 
 echo "mode=$MODE settle=${SETTLE}s pid=$PID machine=$(sysctl -n machdep.cpu.brand_string) macOS=$(sw_vers -productVersion) commit=$(git -C "$(dirname "$0")/.." rev-parse --short HEAD 2>/dev/null || echo ?)"
 REPORT=$(footprint "$PID" 2>/dev/null)
-printf '%s\n' "$REPORT" | sed -n '2p;5,24p'
+printf '%s\n' "$REPORT" | awk '/Footprint:/ {print} /Dirty +Clean/ {on=1} on && n++ < 20'   # the total, then the table's top 18 categories
 MB=$(printf '%s\n' "$REPORT" | sed -n 's/.*Footprint: \([0-9][0-9]*\) MB.*/\1/p' | head -1)
 [ -n "$MB" ] || { echo "could not read the footprint from: $(printf '%s\n' "$REPORT" | head -3)" >&2; exit 1; }
 LIMIT=${MAX_MB:-30}
