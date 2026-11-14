@@ -167,3 +167,27 @@ percent, max 0.10 percent, cumulative CPU time 0:00.21 to 0:00.22 (0.01 s over 3
 after launch at 700x420 pt) and is the slice 4 question, but it is above the 30 MB target and worth knowing now.
 `bench/idle.sh` now starts the binary itself and tracks that pid (it used `pgrep -x | head -1` and `kill`, which could end a
 different running copy of the app).
+
+### P4 gate: does drawing slow the parsing of a flood? (2026-11-14)
+
+Harness: `test "bench: flood parse throughput ..."` in `src/capi.zig`, skipped unless `HARF_BENCH=1`
+(`HARF_BENCH=1 .tools/zig/zig build test -Dtest-filter='bench: flood parse' -Doptimize=ReleaseFast`, about 1 minute). A child runs
+`seq 1 3000000` (about 22 MB of output); the time until it has exited and all output is parsed is measured, alone and with a
+second thread drawing the whole 80x24 screen through `harf_term_draw` every 8 ms (about 100 frames per second, more than the
+app draws: it draws at most once per display refresh). ReleaseFast, Apple M1, macOS 27.0.1, commit after P1.
+
+| Run | No drawing | Drawing at about 100 fps | Slowdown |
+|---|---|---|---|
+| 1 | 7.82 s | 8.86 s (873 frames) | 1.13x |
+| 2 | 8.50 s | 9.04 s (900 frames) | 1.06x |
+| 3 | 8.06 s | 8.43 s (841 frames) | 1.05x |
+
+**Result: not meaningful (5 to 13 percent), so P4 (two-phase render-state lock) is closed as not needed.**
+
+Two other findings:
+- A first attempt drew back to back with no gap between frames and the flood did not finish in over five minutes (the drawing
+  thread kept re-taking `term_lock` before the parser thread could). That is not a load the app produces, because redraws are
+  coalesced to one per wake, but it shows the mutex is unfair. If a future feature draws in a tight loop, revisit P4.
+- The flood itself runs at only about 3 MB/s end to end in this harness (a 22 MB `seq` in 8 s). That is far below the
+  186 to 448 MB/s the Phase 3 spike measured for parsing alone, so the limit is elsewhere (the child writing through the pty,
+  the 64 KiB read size, or the per-wake path). It is a slice 4 (`vtebench`) question, not a P4 one.

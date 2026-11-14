@@ -501,3 +501,73 @@ test {
     _ = @import("rowfacts.zig");
     _ = @import("rowlayout.zig");
 }
+
+// ---- P4 gate measurement (HARF_BENCH=1): does drawing slow the parsing of a flood? ----
+
+const DrawLoop = struct {
+    t: *HarfTerm,
+    p: *draw.Painter,
+    stop: std.atomic.Value(bool) = .init(false),
+    frames: std.atomic.Value(u32) = .init(0),
+
+    fn run(self: *DrawLoop) void {
+        var m: HarfCellMetrics = undefined;
+        harf_painter_metrics(self.p, &m);
+        const w: usize = @intFromFloat(m.cell_w * 80);
+        const h: usize = @intFromFloat(m.cell_h * 24);
+        const data = std.heap.smp_allocator.alloc(u8, w * h * 4) catch return;
+        defer std.heap.smp_allocator.free(data);
+        const space = ct.CGColorSpaceCreateDeviceRGB() orelse return;
+        defer ct.CGColorSpaceRelease(space);
+        const ctx = ct.CGBitmapContextCreate(data.ptr, w, h, 8, w * 4, space, 2 | (2 << 12)) orelse return;
+        defer ct.CGContextRelease(ctx);
+        while (!self.stop.load(.acquire)) {
+            harf_term_draw(self.t, self.p, ctx, 0, 23);
+            _ = self.frames.fetchAdd(1, .monotonic);
+            // A frame every 8 ms (a 120 Hz display). Back to back, the drawing thread can keep the lock away from
+            // the parser altogether, which is not a load the app produces: it draws at most once per wake.
+            const ts: std.c.timespec = .{ .sec = 0, .nsec = 8 * std.time.ns_per_ms };
+            _ = std.c.nanosleep(&ts, null);
+        }
+    }
+};
+
+fn benchNow() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+/// Seconds for a child to print about 22 MB (`seq 1 3000000`) and have it all parsed, with or without a thread drawing
+/// the whole screen continuously. Returns the elapsed seconds and the number of frames drawn meanwhile.
+fn floodSeconds(drawing: bool) !struct { secs: f64, frames: u32 } {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "seq 1 3000000", null };
+    const t = harf_term_new(80, 24, 1 << 20, &argv, null) orelse return error.TermNotCreated;
+    defer harf_term_free(t);
+    const p = harf_painter_new(28) orelse return error.NoPainter;
+    defer harf_painter_free(p);
+    var loop: DrawLoop = .{ .t = t, .p = p };
+    const th: ?std.Thread = if (drawing) try std.Thread.spawn(.{}, DrawLoop.run, .{&loop}) else null;
+    const t0 = benchNow();
+    while (harf_term_exit_status(t) != 0) {
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+        if (benchNow() - t0 > 60 * std.time.ns_per_s) break; // never hang the benchmark
+    }
+    const secs = @as(f64, @floatFromInt(benchNow() - t0)) / std.time.ns_per_s;
+    loop.stop.store(true, .release);
+    if (th) |x| x.join();
+    return .{ .secs = secs, .frames = loop.frames.load(.monotonic) };
+}
+
+test "bench: flood parse throughput with and without continuous drawing (HARF_BENCH=1)" {
+    if (std.c.getenv("HARF_BENCH") == null) return error.SkipZigTest;
+    std.debug.print("\n", .{});
+    for (0..3) |_| {
+        const quiet = try floodSeconds(false);
+        const busy = try floodSeconds(true);
+        std.debug.print("BENCH flood 22 MB: no drawing {d:.2} s ({d:.0} MB/s) | drawing {d:.2} s ({d:.0} MB/s, {d} frames, {d:.0} frames/s) | slowdown {d:.2}x\n", .{
+            quiet.secs, 22.0 / quiet.secs, busy.secs, 22.0 / busy.secs, busy.frames, @as(f64, @floatFromInt(busy.frames)) / busy.secs, busy.secs / quiet.secs,
+        });
+    }
+}
