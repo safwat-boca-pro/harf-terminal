@@ -15,7 +15,51 @@ pub const Callbacks = struct {
     title_changed: ?*const fn (ctx: ?*anyopaque) void = null,
 };
 
+pub const Rgb = struct { r: u8, g: u8, b: u8 };
+
+/// Harf's default colors (the slice 2 theme): foreground 0.92, background (0.06, 0.06, 0.07).
+pub const theme_fg: Rgb = .{ .r = 235, .g = 235, .b = 235 };
+pub const theme_bg: Rgb = .{ .r = 15, .g = 15, .b = 18 };
+
+/// Text attributes and colors of one cell. Colors are resolved (palette indices looked up); null
+/// means "the terminal default".
+pub const Style = struct {
+    fg: ?Rgb = null,
+    bg: ?Rgb = null,
+    underline_color: ?Rgb = null,
+    /// The library's flag bits: the `Flag` values, with the underline style in bits 8 to 10.
+    flags: u16 = 0,
+
+    pub const Flag = struct {
+        pub const bold: u16 = c.GHOSTTY_STYLE_FLAG_BOLD;
+        pub const italic: u16 = c.GHOSTTY_STYLE_FLAG_ITALIC;
+        pub const faint: u16 = c.GHOSTTY_STYLE_FLAG_FAINT;
+        pub const blink: u16 = c.GHOSTTY_STYLE_FLAG_BLINK;
+        pub const inverse: u16 = c.GHOSTTY_STYLE_FLAG_INVERSE;
+        pub const invisible: u16 = c.GHOSTTY_STYLE_FLAG_INVISIBLE;
+        pub const strikethrough: u16 = c.GHOSTTY_STYLE_FLAG_STRIKETHROUGH;
+        pub const overline: u16 = c.GHOSTTY_STYLE_FLAG_OVERLINE;
+    };
+    pub const Underline = enum { none, single, double, curly, dotted, dashed };
+
+    pub fn underline(self: Style) Underline {
+        return switch ((self.flags >> c.GHOSTTY_STYLE_UNDERLINE_SHIFT) & 7) {
+            1 => .single,
+            2 => .double,
+            3 => .curly,
+            4 => .dotted,
+            5 => .dashed,
+            else => .none,
+        };
+    }
+};
+
+/// The terminal's default colors as of the last `update`.
+pub const Colors = struct { fg: Rgb, bg: Rgb, cursor: ?Rgb };
+
 pub const Options = struct {
+    default_fg: Rgb = theme_fg,
+    default_bg: Rgb = theme_bg,
     cols: u16 = 80,
     rows: u16 = 24,
     /// libghostty keeps history in whole pages, so this is a limit to within about 400 KB.
@@ -30,7 +74,7 @@ pub const KeyAction = enum(u8) { press = 0, release = 1, repeat = 2 };
 pub const Wide = enum { narrow, wide, spacer_tail, spacer_head };
 
 /// One grid cell: its codepoints (base plus combining marks) and its width role.
-pub const Cell = struct { cps: []const u21, wide: Wide };
+pub const Cell = struct { cps: []const u21, wide: Wide, style: Style = .{} };
 
 fn check(r: c.GhosttyResult) Error!void {
     if (r == c.GHOSTTY_SUCCESS) return;
@@ -62,6 +106,9 @@ pub const Terminal = struct {
     row_cells: c.GhosttyRenderStateRowCells,
     key_encoder: c.GhosttyKeyEncoder,
     key_event: c.GhosttyKeyEvent,
+    /// Colors as of the last `update`.
+    palette: [256]Rgb = @splat(.{ .r = 0, .g = 0, .b = 0 }),
+    default_colors: Colors = .{ .fg = theme_fg, .bg = theme_bg, .cursor = null },
 
     pub fn init(gpa: std.mem.Allocator, opts: Options) Error!*Terminal {
         const self = try gpa.create(Terminal);
@@ -75,6 +122,10 @@ pub const Terminal = struct {
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_WRITE_PTY, @as(?*const anyopaque, @ptrCast(&writePtyTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_BELL, @as(?*const anyopaque, @ptrCast(&bellTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, @as(?*const anyopaque, @ptrCast(&titleTrampoline))));
+        var fg: c.GhosttyColorRgb = .{ .r = opts.default_fg.r, .g = opts.default_fg.g, .b = opts.default_fg.b };
+        var bg: c.GhosttyColorRgb = .{ .r = opts.default_bg.r, .g = opts.default_bg.g, .b = opts.default_bg.b };
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &fg));
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &bg));
         var scrollback = opts.scrollback_bytes;
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &scrollback));
         // Kitty graphics are compiled in but not wanted in v1: a zero limit stores no images.
@@ -110,7 +161,28 @@ pub const Terminal = struct {
     /// Refreshes the render state from the terminal. Call once per frame, before `selectRow`,
     /// `cellInRow` and `cursor`. False on failure.
     pub fn update(self: *Terminal) bool {
-        return c.ghostty_render_state_update(self.render_state, self.handle) == c.GHOSTTY_SUCCESS;
+        if (c.ghostty_render_state_update(self.render_state, self.handle) != c.GHOSTTY_SUCCESS) return false;
+        var rc = std.mem.zeroes(c.GhosttyRenderStateColors);
+        rc.size = @sizeOf(c.GhosttyRenderStateColors);
+        if (c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_COLORS, &rc) == c.GHOSTTY_SUCCESS) {
+            self.default_colors = .{
+                .fg = .{ .r = rc.foreground.r, .g = rc.foreground.g, .b = rc.foreground.b },
+                .bg = .{ .r = rc.background.r, .g = rc.background.g, .b = rc.background.b },
+                .cursor = if (rc.cursor_has_value) .{ .r = rc.cursor.r, .g = rc.cursor.g, .b = rc.cursor.b } else null,
+            };
+            for (rc.palette, 0..) |p, i| self.palette[i] = .{ .r = p.r, .g = p.g, .b = p.b };
+        }
+        return true;
+    }
+
+    /// The default colors as of the last `update`.
+    pub fn colors(self: *const Terminal) Colors {
+        return self.default_colors;
+    }
+
+    /// Palette entry `i` as of the last `update`.
+    pub fn paletteColor(self: *const Terminal, i: u8) Rgb {
+        return self.palette[i];
     }
 
     /// Points `row_cells` at the cells of visible row `row` of the last `update`. False if the row does not exist.
@@ -257,6 +329,30 @@ pub const Terminal = struct {
         return str.ptr[0..str.len];
     }
 
+    /// The style of the cell `row_cells` currently points at.
+    fn readStyle(self: *Terminal) Style {
+        var style: Style = .{};
+        var col: c.GhosttyColorRgb = undefined;
+        if (c.ghostty_render_state_row_cells_get(self.row_cells, c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR, &col) == c.GHOSTTY_SUCCESS)
+            style.fg = .{ .r = col.r, .g = col.g, .b = col.b };
+        if (c.ghostty_render_state_row_cells_get(self.row_cells, c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, &col) == c.GHOSTTY_SUCCESS)
+            style.bg = .{ .r = col.r, .g = col.g, .b = col.b };
+        var has: bool = false;
+        _ = c.ghostty_render_state_row_cells_get(self.row_cells, c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING, &has);
+        if (has) {
+            var st = std.mem.zeroes(c.GhosttyStyle);
+            if (c.ghostty_render_state_row_cells_get(self.row_cells, c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &st) == c.GHOSTTY_SUCCESS) {
+                style.flags = st.flags;
+                style.underline_color = switch (st.underline_color.tag) {
+                    c.GHOSTTY_STYLE_COLOR_PALETTE => self.palette[st.underline_color.value.palette],
+                    c.GHOSTTY_STYLE_COLOR_RGB => .{ .r = st.underline_color.value.rgb.r, .g = st.underline_color.value.rgb.g, .b = st.underline_color.value.rgb.b },
+                    else => null,
+                };
+            }
+        }
+        return style;
+    }
+
     /// Reads the cell `row_cells` currently points at; `buf` holds its codepoints (at most 16).
     fn readCell(self: *Terminal, buf: *[16]u21) Cell {
         var wide: c.GhosttyCellWide = c.GHOSTTY_CELL_WIDE_NARROW;
@@ -278,7 +374,7 @@ pub const Terminal = struct {
             c.GHOSTTY_CELL_WIDE_SPACER_TAIL => .spacer_tail,
             c.GHOSTTY_CELL_WIDE_SPACER_HEAD => .spacer_head,
             else => .narrow,
-        } };
+        }, .style = self.readStyle() };
     }
 
     /// The cell at (`col`, `row`) of the visible screen; blank (no codepoints) if out of range.
@@ -664,4 +760,91 @@ test "paste: newlines, bracketed mode, and an embedded end marker" {
     out.clearRetainingCapacity();
     try t.encodePaste("x\x1b[201~y", &out, std.testing.allocator);
     try std.testing.expect(std.mem.indexOf(u8, out.items[6 .. out.items.len - 6], "\x1b") == null);
+}
+
+fn cellOf(t: *Terminal, row: u16, col: u16, buf: *[16]u21) Cell {
+    _ = t.update();
+    _ = t.selectRow(row);
+    return t.cellInRow(col, buf);
+}
+
+test "sgr colors resolve" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("\x1b[31mA\x1b[38;5;196mB\x1b[38;2;1;2;3mC\x1b[48;2;9;8;7mD\x1b[0mE");
+    var buf: [16]u21 = undefined;
+    const a = cellOf(t, 0, 0, &buf);
+    try std.testing.expect(a.style.fg != null and a.style.fg.?.r > 150 and a.style.fg.?.g < 120); // palette red
+    try std.testing.expectEqual(t.paletteColor(1), a.style.fg.?);
+    const b = cellOf(t, 0, 1, &buf);
+    try std.testing.expectEqual(Rgb{ .r = 255, .g = 0, .b = 0 }, b.style.fg.?); // 256-color cube
+    const cc = cellOf(t, 0, 2, &buf);
+    try std.testing.expectEqual(Rgb{ .r = 1, .g = 2, .b = 3 }, cc.style.fg.?); // truecolor
+    const d = cellOf(t, 0, 3, &buf);
+    try std.testing.expectEqual(Rgb{ .r = 9, .g = 8, .b = 7 }, d.style.bg.?);
+    const e = cellOf(t, 0, 4, &buf);
+    try std.testing.expect(e.style.fg == null and e.style.bg == null and e.style.flags == 0);
+}
+
+test "style flags and underline styles" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("\x1b[1;3;2;7;8;9mX\x1b[0m\x1b[4mS\x1b[21mD\x1b[4:3mC\x1b[4:4mT\x1b[4:5mH\x1b[24m\x1b[53mO\x1b[0mN");
+    var buf: [16]u21 = undefined;
+    const F = Style.Flag;
+    const x = cellOf(t, 0, 0, &buf).style;
+    try std.testing.expectEqual(F.bold | F.italic | F.faint | F.inverse | F.invisible | F.strikethrough, x.flags & 0xFF);
+    try std.testing.expectEqual(Style.Underline.none, x.underline());
+    try std.testing.expectEqual(Style.Underline.single, cellOf(t, 0, 1, &buf).style.underline());
+    try std.testing.expectEqual(Style.Underline.double, cellOf(t, 0, 2, &buf).style.underline());
+    try std.testing.expectEqual(Style.Underline.curly, cellOf(t, 0, 3, &buf).style.underline());
+    try std.testing.expectEqual(Style.Underline.dotted, cellOf(t, 0, 4, &buf).style.underline());
+    try std.testing.expectEqual(Style.Underline.dashed, cellOf(t, 0, 5, &buf).style.underline());
+    const o = cellOf(t, 0, 6, &buf).style;
+    try std.testing.expect(o.flags & F.overline != 0 and o.underline() == .none);
+    try std.testing.expectEqual(@as(u16, 0), cellOf(t, 0, 7, &buf).style.flags);
+}
+
+test "underline color resolves" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("\x1b[4m\x1b[58;2;10;20;30mU\x1b[58;5;1mP");
+    var buf: [16]u21 = undefined;
+    try std.testing.expectEqual(Rgb{ .r = 10, .g = 20, .b = 30 }, cellOf(t, 0, 0, &buf).style.underline_color.?);
+    try std.testing.expectEqual(t.paletteColor(1), cellOf(t, 0, 1, &buf).style.underline_color.?);
+}
+
+test "default colors are Harf's and programs can change them" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    _ = t.update();
+    try std.testing.expectEqual(theme_fg, t.colors().fg);
+    try std.testing.expectEqual(theme_bg, t.colors().bg);
+    t.write("\x1b]11;rgb:10/20/30\x07");
+    _ = t.update();
+    try std.testing.expectEqual(Rgb{ .r = 0x10, .g = 0x20, .b = 0x30 }, t.colors().bg);
+    const custom = try Terminal.init(std.testing.allocator, .{ .default_fg = .{ .r = 1, .g = 2, .b = 3 }, .default_bg = .{ .r = 4, .g = 5, .b = 6 } });
+    defer custom.deinit();
+    _ = custom.update();
+    try std.testing.expectEqual(Rgb{ .r = 1, .g = 2, .b = 3 }, custom.colors().fg);
+    try std.testing.expectEqual(Rgb{ .r = 4, .g = 5, .b = 6 }, custom.colors().bg);
+}
+
+test "palette change shows" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("\x1b]4;1;rgb:ff/00/00\x07\x1b[31mx");
+    var buf: [16]u21 = undefined;
+    try std.testing.expectEqual(Rgb{ .r = 255, .g = 0, .b = 0 }, cellOf(t, 0, 0, &buf).style.fg.?);
+}
+
+test "erased cell keeps its background" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("\x1b[44m\x1b[2K");
+    var buf: [16]u21 = undefined;
+    const c0 = cellOf(t, 0, 0, &buf);
+    try std.testing.expectEqual(@as(usize, 0), c0.cps.len);
+    try std.testing.expectEqual(t.paletteColor(4), c0.style.bg.?);
+    try std.testing.expectEqual(t.paletteColor(4), cellOf(t, 0, 79, &buf).style.bg.?);
 }
