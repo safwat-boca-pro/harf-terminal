@@ -491,6 +491,7 @@ pub const Session = struct {
         // The child closed its side: reap it and report.
         const status = self.pty.wait();
         self.exit_status.store(status, .release);
+        self.endCommand(null); // a shell that dies mid-command (`exit 1`) never sends `D`
         if (self.callbacks.exited) |f| f(self.callbacks.ctx, status);
     }
 
@@ -530,14 +531,18 @@ pub const Session = struct {
                 if (self.callbacks.command) |f| f(self.callbacks.ctx, true, null, 0);
             },
             // a prompt starting also ends a command whose shell never sent `D`
-            .command_end, .prompt_start => {
-                if (!self.cmd_running) return;
-                self.cmd_running = false;
-                const ran = @max(0, monotonicMs() - self.cmd_started_ms);
-                if (self.callbacks.command) |f| f(self.callbacks.ctx, false, if (kind == .command_end) exit_code else null, @intCast(@min(ran, std.math.maxInt(u32))));
-            },
+            .command_end => self.endCommand(exit_code),
+            .prompt_start => self.endCommand(null),
             .input_start => {},
         }
+    }
+
+    /// Reports the running command as ended (once); a no-op when none runs.
+    fn endCommand(self: *Session, exit_code: ?i32) void {
+        if (!self.cmd_running) return;
+        self.cmd_running = false;
+        const ran = @max(0, monotonicMs() - self.cmd_started_ms);
+        if (self.callbacks.command) |f| f(self.callbacks.ctx, false, exit_code, @intCast(@min(ran, std.math.maxInt(u32))));
     }
 
     fn onNotify(ctx: ?*anyopaque, heading: []const u8, body: []const u8) void {
@@ -563,13 +568,16 @@ pub const Session = struct {
         return r;
     }
 
-    /// Jumps `delta` prompts (negative = older) using the shell's OSC 133 marks; false if nothing moved (see `vt.Terminal.scrollPrompt`).
+    /// Jumps `delta` prompts (negative = older) using the shell's OSC 133 marks (see `vt.Terminal.scrollPrompt`). False only on
+    /// the alternate screen, where the key is the program's. On the primary screen the key is always taken, even with no prompt
+    /// that way: sent on, it would reach the shell as an escape sequence (zsh types `;9A` on the command line).
     pub fn scrollPrompt(self: *Session, delta: i32) bool {
         const t = self.lock();
-        const moved = t.scrollPrompt(delta);
+        const alt = t.onAlternateScreen();
+        const moved = !alt and t.scrollPrompt(delta);
         self.unlock();
         if (moved) self.requestWake();
-        return moved;
+        return !alt;
     }
 
     /// Selects the last finished command's output (OSC 133); false if there is none to select (see `vt.Terminal.selectLastOutput`).
@@ -821,6 +829,38 @@ test "zsh with the integration reports commands and keeps the user's ZDOTDIR" {
     defer s2.deinit();
     try s2.typeText("print -r -- \"Z=$ZDOTDIR\"\n");
     try std.testing.expect(waitFor(15_000, Row{ .s = s2, .want = "Z=", .exact = true }, Row.ok));
+
+    // `exec` replaces the shell with a process that never closes the command, so it must not open one, however it is typed
+    for ([_][]const u8{ " exec sh -c 'echo EXECED; sleep 5'\n", "builtin exec sh -c 'echo EXECED; sleep 5'\n" }) |line| {
+        var spy3: Spy = .{};
+        const s3 = try Session.start(a, .{ .callbacks = spy3.callbacks() });
+        defer s3.deinit();
+        try s3.typeText(line);
+        try std.testing.expect(waitFor(15_000, Row{ .s = s3, .want = "EXECED", .exact = true }, Row.ok));
+        try std.testing.expectEqual(@as(u32, 0), spy3.cmd_count.load(.acquire));
+    }
+}
+
+test "scrollPrompt takes the key on the primary screen even with nowhere to go, and never on the alternate screen" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "seq 1 5; sleep 5" } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "5"));
+    try std.testing.expect(s.scrollPrompt(-1)); // no prompt marks: nothing moves, but the key must not reach the shell (zsh would type ";9A")
+    try std.testing.expect(s.scrollPrompt(1));
+    const alt = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf '\\033[?1049hINALT'; sleep 5" } });
+    defer alt.deinit();
+    try std.testing.expect(hexOf(alt, "INALT"));
+    try std.testing.expect(!alt.scrollPrompt(-1)); // a full-screen program owns its keys
+}
+
+test "a command still running when the child exits is closed" {
+    var spy: Spy = .{};
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf '\\033]133;C\\007'; sleep 0.2; exit 3" }, .callbacks = spy.callbacks() });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, CmdCount{ .spy = &spy, .want = 2 }, CmdCount.ok));
+    try std.testing.expect(spy.cmd_events[0].running);
+    try std.testing.expect(!spy.cmd_events[1].running); // otherwise the tab would show a running command for a dead shell
+    try std.testing.expectEqual(@as(?i32, null), spy.cmd_events[1].exit_code);
 }
 
 test "wake is coalesced until handled" {

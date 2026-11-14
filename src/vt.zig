@@ -674,27 +674,32 @@ pub const Terminal = struct {
         return c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_SELECTION, &sel) == c.GHOSTTY_SUCCESS;
     }
 
-    /// Whether the screen row `y` (0 = the oldest row kept) is part of a shell prompt, by its OSC 133 mark.
-    fn isPromptRow(self: *Terminal, y: u32) bool {
-        const ref = self.gridRef(c.GHOSTTY_POINT_TAG_SCREEN, 0, y) orelse return false;
+    /// The OSC 133 mark of screen row `y` (0 = the oldest row kept): none, a primary prompt row, or a continuation row of one.
+    fn promptRowKind(self: *Terminal, y: u32) c.GhosttyRowSemanticPrompt {
+        const ref = self.gridRef(c.GHOSTTY_POINT_TAG_SCREEN, 0, y) orelse return c.GHOSTTY_ROW_SEMANTIC_NONE;
         var row: c.GhosttyRow = undefined;
-        if (c.ghostty_grid_ref_row(&ref, &row) != c.GHOSTTY_SUCCESS) return false;
+        if (c.ghostty_grid_ref_row(&ref, &row) != c.GHOSTTY_SUCCESS) return c.GHOSTTY_ROW_SEMANTIC_NONE;
         var sp: c.GhosttyRowSemanticPrompt = c.GHOSTTY_ROW_SEMANTIC_NONE;
-        if (c.ghostty_row_get(row, c.GHOSTTY_ROW_DATA_SEMANTIC_PROMPT, &sp) != c.GHOSTTY_SUCCESS) return false;
-        return sp != c.GHOSTTY_ROW_SEMANTIC_NONE;
+        if (c.ghostty_row_get(row, c.GHOSTTY_ROW_DATA_SEMANTIC_PROMPT, &sp) != c.GHOSTTY_SUCCESS) return c.GHOSTTY_ROW_SEMANTIC_NONE;
+        return sp;
+    }
+
+    fn isPromptRow(self: *Terminal, y: u32) bool {
+        return self.promptRowKind(y) != c.GHOSTTY_ROW_SEMANTIC_NONE;
     }
 
     /// Selects the output of the last finished command, found through the shell's OSC 133 marks: the row above the prompt the
     /// cursor is on (or the nearest one above it) is the end of that output. The selection is the terminal's own, so Cmd+C
-    /// copies it. False, and no selection, with no marks, no output above, or on the alternate screen.
+    /// copies it. False, and no selection, with no marks, no output above (a command that printed nothing has none: the row above
+    /// is the previous prompt, never an older command's output), or on the alternate screen.
     pub fn selectLastOutput(self: *Terminal) bool {
         if (self.onAlternateScreen()) return false;
         var cursor_y: u16 = 0;
         _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_CURSOR_Y, &cursor_y);
         var y: u32 = @intCast(self.scrollbackRows() + cursor_y);
         while (!self.isPromptRow(y)) : (y -= 1) if (y == 0) return false; // no prompt mark at or above the cursor
-        while (y > 0 and self.isPromptRow(y - 1)) y -= 1; // a prompt of several lines: its first row
-        if (y == 0) return false; // nothing above it
+        while (y > 0 and self.promptRowKind(y) == c.GHOSTTY_ROW_SEMANTIC_PROMPT_CONTINUATION) y -= 1; // a prompt of several lines: its first row
+        if (y == 0 or self.isPromptRow(y - 1)) return false; // nothing above it, or the last command printed nothing
         const ref = self.gridRef(c.GHOSTTY_POINT_TAG_SCREEN, 0, y - 1) orelse return false;
         var sel = std.mem.zeroes(c.GhosttySelection);
         if (c.ghostty_terminal_select_output(self.handle, &ref, &sel) != c.GHOSTTY_SUCCESS) return false;
@@ -1408,6 +1413,25 @@ test "selectLastOutput selects the output of the last finished command" {
     const txt = try t.selectionText(std.testing.allocator);
     defer std.testing.allocator.free(txt);
     try std.testing.expectEqualStrings("gamma\ndelta", txt);
+}
+
+test "selectLastOutput does not reach back past a command that printed nothing" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    // `ls` printed "a b", then `true` printed nothing: the last command's output is empty, not "a b"
+    t.write("\x1b]133;A\x07$ ls\r\n\x1b]133;C\x07a b\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ true\r\n\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    try std.testing.expect(!t.selectLastOutput());
+    try std.testing.expectError(error.NoSelection, t.selectionText(std.testing.allocator));
+}
+
+test "selectLastOutput finds the output above a prompt of two lines" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("\x1b]133;A\x07$ one\r\n\x1b]133;C\x07out1\r\n\x1b]133;D;0\x07\x1b]133;A\x07~/src\r\n$ ");
+    try std.testing.expect(t.selectLastOutput());
+    const txt = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(txt);
+    try std.testing.expectEqualStrings("out1", txt);
 }
 
 test "selectLastOutput does nothing without marks, on the alternate screen, or after the scrollback was cleared" {

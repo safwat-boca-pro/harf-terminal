@@ -112,8 +112,8 @@ size_t harf_term_find(HarfTerm *t, const uint8_t *needle, size_t len);
 /* Selects the next match toward older output (older = 1) or newer (0), wrapping; scrolls to it and highlights it. Returns 1 with
  * the match's 1-based position `number` of `total`, or 0 if there are no matches. */
 int harf_term_find_step(HarfTerm *t, int older, size_t *number, size_t *total);
-/* Scrolls to the prompt `delta` prompts away (negative: older) using the shell's OSC 133 marks. Returns 1 if the view moved, 0 if not
-   (no marks that way, or the alternate screen: the key then belongs to the program). */
+/* Scrolls to the prompt `delta` prompts away (negative: older) using the shell's OSC 133 marks. Returns 1 if the key was taken (even
+   when there is no prompt that way, so the shell never sees it), 0 on the alternate screen: the key belongs to the program. */
 int harf_term_scroll_prompt(HarfTerm *t, int delta);
 /* Selects the output of the last finished command (the shell's OSC 133 marks); Cmd+C then copies it. Returns 1 if something was
    selected, 0 if not (no marks, or the alternate screen: the key then belongs to the program). */

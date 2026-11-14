@@ -18,7 +18,7 @@ panes I saw earlier came from rendering the whole window offscreen with `cacheDi
 
 ## Shell integration (zsh; marks prompts and commands with OSC 133)
 Open a **new** window or tab so the shell starts with the shim. Your own zsh setup (prompt theme, plugins) is the thing to judge: tell me if the prompt looks different or a startup file stopped loading.
-- [ ] Run a few commands, one of them long (`seq 1 200`). Cmd+Up goes to the previous prompt, again to the one before; Cmd+Down comes back. In a tab with no commands yet, or in vim, nothing happens.
+- [ ] Run a few commands, one of them long (`seq 1 200`). Cmd+Up goes to the previous prompt, again to the one before; Cmd+Down comes back. In a tab with no commands yet, nothing happens and nothing is typed at the prompt; in vim the key belongs to vim. Cmd+Shift+A right after a command that printed nothing (`true`) selects nothing.
 - [ ] Cmd+Shift+A selects the output of the last command (highlighted), Cmd+C and paste elsewhere gives exactly that text, without the prompt line.
 - [ ] `echo $ZDOTDIR` prints what you had before (nothing if you never set it). `print $HARF_SHELL_INTEGRATION` prints nothing.
 - [ ] `sleep 5` in one tab, then look at the tab bar from another tab: its title has a dot in front until the command ends. With a single tab the dot flickers on every command, by design.

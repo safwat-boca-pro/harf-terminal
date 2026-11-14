@@ -71,7 +71,7 @@ pub const Action = enum {
     clear,
     /// Only the visible screen (the scrollback stays); on the alternate screen the key goes to the program.
     clear_view,
-    /// Scroll to the previous / next shell prompt (OSC 133); the key goes to the program when there is none or on the alternate screen.
+    /// Scroll to the previous / next shell prompt (OSC 133); on the alternate screen the key goes to the program.
     prev_prompt,
     next_prompt,
     /// Select the last finished command's output (OSC 133), so Cmd+C copies it.

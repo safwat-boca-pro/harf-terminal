@@ -21,8 +21,8 @@ if [[ -n ${HARF_SHELL_INTEGRATION-} ]]; then
       printf '\e]133;A\a'
     }
     _harf_preexec() {
-      # `exec zsh` replaces this shell with one that has no hooks: it would never close the command
-      [[ $1 == exec || $1 == exec\ * ]] && return
+      # `exec zsh` replaces this shell with one that has no hooks: it would never close the command (also ` exec`, `builtin exec`)
+      [[ $1 =~ '^[[:space:]]*(builtin[[:space:]]+)?exec([[:space:]]|$)' ]] && return
       _harf_cmd=1
       printf '\e]133;C\a'
     }
