@@ -113,6 +113,9 @@ final class TerminalController {
     var onNotify: (String, String) -> Void = { _, _ in }
     /// Where OSC 52 writes go (the self-test points it at a private pasteboard).
     var clipboard: NSPasteboard = .general
+    /// May a program change the clipboard right now? Only while the user is looking at this terminal: a program in a window or
+    /// tab in the background must not replace what the user copied (paste-jacking). The self-test overrides it.
+    lazy var clipboardWriteAllowed: () -> Bool = { [weak self] in NSApp.isActive && self?.view.window?.isKeyWindow == true }
 
     /// `argv` nil runs the login shell. `frame` is the view's initial size in points.
     init?(argv: [String]?, frame: NSSize, scale: CGFloat = 2) {
@@ -338,6 +341,7 @@ final class TerminalController {
 
     /// OSC 52: the core allowed a program to put text on the clipboard (policy, standard clipboard only).
     fileprivate func clipboardOnMain(_ text: String) {
+        guard clipboardWriteAllowed() else { return }
         clipboard.clearContents()
         clipboard.setString(text, forType: .string)
     }

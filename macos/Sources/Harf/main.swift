@@ -496,10 +496,16 @@ func selfTest() -> Never {
         let pb = NSPasteboard(name: NSPasteboard.Name("app.harf.selftest"))
         pb.clearContents()
         c.clipboard = pb
+        c.clipboardWriteAllowed = { false }   // not focused: the program's write must be ignored
         var notes: [(String, String)] = []
         c.onNotify = { notes.append(($0, $1)) }
         if !pump(5, until: { c.rowText(0).contains("evil") }) { fail("OSC: row 0 is '\(c.rowText(0))'") }
-        if pb.string(forType: .string) != "hello" { fail("OSC 52: the clipboard holds \(String(describing: pb.string(forType: .string)))") }
+        if pb.string(forType: .string) != nil { fail("OSC 52: a write while the terminal is not focused changed the clipboard") }
+        guard let c2 = TerminalController(argv: ["/bin/sh", "-c", "printf '\\033]52;c;aGVsbG8=\\007'; sleep 2"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the second OSC 52 session") }
+        c2.clipboard = pb
+        c2.clipboardWriteAllowed = { true }   // focused
+        if !pump(5, until: { pb.string(forType: .string) == "hello" }) { fail("OSC 52: the clipboard holds \(String(describing: pb.string(forType: .string)))") }
+        c2.close()
         if notes.count != 1 || notes[0].1 != "Build done" { fail("OSC 9: notifications are \(notes)") }
         let cell = c.cellSizePt
         func at(_ col: Double) -> NSPoint { NSPoint(x: c.insetPt + cell.width * col, y: c.insetPt + cell.height * 0.5) }   // the view is y-down
