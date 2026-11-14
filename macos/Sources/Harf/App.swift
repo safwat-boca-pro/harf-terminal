@@ -67,6 +67,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window = NSWindow(contentRect: NSRect(origin: .zero, size: content), styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "Harf"
+        // The default (wide-gamut) window color space makes AppKit keep two backing surfaces once the view has been
+        // redrawn (about 5 MB more at 700x420 pt); sRGB keeps one. Measured in docs/perf.md (slice 4 attribution).
+        // Colors are also interpreted as sRGB, which is what the theme and ANSI palette are defined in.
+        window.colorSpace = .sRGB
         window.contentView = c.view
         binding = WindowBinding(window: window, controller: c)
         window.center()

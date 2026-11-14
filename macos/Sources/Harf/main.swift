@@ -211,6 +211,32 @@ func selfTest() -> Never {
         b.close()
     }
 
+    // 1f. HARF_MEASURE=1: a 100 MB flood must not leave memory growing (phys_footprint, the budget's own measure).
+    if ProcessInfo.processInfo.environment["HARF_MEASURE"] == "1" {
+        func physFootprintMB() -> Double {
+            var info = task_vm_info_data_t()
+            var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+            let kr = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+            }
+            return kr == KERN_SUCCESS ? Double(info.phys_footprint) / 1_048_576 : -1
+        }
+        guard let warm = TerminalController(argv: ["/bin/sh", "-c", "sleep 30"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the baseline session") }
+        _ = pump(1.5) { false }
+        let before = physFootprintMB()
+        guard let flood = TerminalController(argv: ["/bin/sh", "-c", "yes 'flood flood flood flood flood flood flood flood flood flood flood flood flood' | head -c 100000000"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the flood session") }
+        if !pump(120, until: { flood.exitStatus != nil }) { fail("flood did not finish in 120 s") }
+        _ = pump(2) { false }
+        let during = physFootprintMB()
+        flood.close()
+        _ = pump(2) { false }
+        let after = physFootprintMB()
+        warm.close()
+        print(String(format: "selftest: footprint before flood %.1f MB, with the flooded session open %.1f MB, after it is closed %.1f MB", before, during, after))
+        if during - before > 2 { fail(String(format: "footprint after a flood is %.1f MB above before (limit 2 MB)", during - before)) }
+        if after - before > 2 { fail(String(format: "footprint after closing the flood session is %.1f MB above before (limit 2 MB)", after - before)) }
+    }
+
     // 2. Typing (a letter, an Arabic letter, Return) goes through the view's own key path.
     let echo = ["/bin/sh", "-c", "read x; echo got:$x"]
     func rows(_ c: TerminalController) -> String { (0..<6).map { c.rowText($0) }.joined(separator: "|") }

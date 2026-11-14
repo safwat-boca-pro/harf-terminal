@@ -248,3 +248,21 @@ the whole process is only about 2 to 3 MB above the empty CPU-drawn prototype (2
 
 **Ranked candidates.** 1. sRGB window color space: about 5 MB once the view has redrawn. 2. Nothing else is above the 2 MB
 threshold the plan set for a fix.
+
+## Slice 4: footprint after the fix (2026-11-14)
+
+Change: `window.colorSpace = .sRGB` in `AppDelegate` (the attribution above). Same method, build and machine as the slice 4
+baseline; three runs per state.
+
+| State | Before (3 runs) | After (3 runs) | IOSurface after |
+|---|---|---|---|
+| Settled, empty session | 28, 28, 27 MB | **25, 25, 25 MB** | 4976 KB |
+| After printing 6000 lines (1 MiB scrollback full) | 34, 32, 32 MB | **26, 26, 26 MB** | 4976 KB |
+| After printing 100 MB, then settled | 32, 32, 31 MB | **26, 26, 26 MB** | 4976 KB |
+
+**The 30 MB target holds in every state with about 4 MB of margin** (run-to-run spread under 1 MB). The self-test section
+`HARF_MEASURE=1` also checks that a 100 MB flood through a session leaves `phys_footprint` within 2 MB of before: it read
+48.0 MB before, 48.6 MB with the flooded session open, 47.6 MB after closing it (the self-test process is larger than the app
+because it holds many sessions); no growth. What changes for the eye: the window is now an sRGB window, so colors are
+interpreted as sRGB (what the theme and the ANSI palette are defined in) instead of in the display's wide-gamut space; the
+`docs/slice3` and `docs/phase4` pictures, which are rendered into a bitmap, regenerate byte-identical.
