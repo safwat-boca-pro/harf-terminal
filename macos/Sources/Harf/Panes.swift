@@ -1,12 +1,21 @@
 import AppKit
 import CHarf
 
+/// What to tell the user when a command ends: nothing unless it ran at least 10 seconds. The command's own text is never used
+/// (a program writes the marks, so it is untrusted); only whether it failed.
+func commandNotification(exitCode: Int32?, durationMs: UInt32) -> (title: String, body: String)? {
+    guard durationMs >= 10_000 else { return nil }
+    return ("Command finished", exitCode.map { $0 == 0 ? "Done" : "Failed (exit \($0))" } ?? "Done")
+}
+
 /// One terminal, and the find bar that floats over its top right corner while Find is open.
 @MainActor
 final class TerminalPane: NSView {
     let controller: TerminalController
     /// The title the program set; the window shows the focused pane's.
     var title = "Harf"
+    /// A command is running in this pane (the shell's OSC 133 marks).
+    var running = false
     private var findBar: FindBar?
 
     init(controller: TerminalController) {
@@ -198,19 +207,33 @@ final class WindowController: NSObject, NSWindowDelegate {
         c.onTitle = { [weak self, weak pane] title in
             guard let self, let pane else { return }
             pane.title = title
-            if self.focusedPane() === pane { self.window.title = title }
+            if self.focusedPane() === pane { self.setTitle(title) }
         }
         c.onFocus = { [weak self, weak pane] in
-            if let self, let pane { self.window.title = pane.title }
+            if let self, let pane { self.setTitle(pane.title) }
+        }
+        c.onCommand = { [weak self, weak pane, weak c] running, exitCode, durationMs in
+            guard let self, let pane, let c else { return }
+            pane.running = running
+            self.setTitle(self.window.title)
+            if !running, let n = commandNotification(exitCode: exitCode, durationMs: durationMs) {
+                Notifier.post(title: n.title, body: n.body, focused: c.hasKeyboard())
+            }
         }
         c.onBell = { NSSound.beep() }
         c.onNotify = { [weak c] title, body in Notifier.post(title: title, body: body, focused: c?.hasKeyboard() ?? false) }
         c.onExit = { [weak self, weak pane] status in
             guard let self, let pane else { return }
             // A clean exit closes the pane (the last one closes the window). A failure keeps it, so the last output stays readable.
-            if status == 0 { self.close(pane: pane) } else { pane.title = "Harf (exited (\(status)))"; if self.focusedPane() === pane { self.window.title = pane.title } }
+            if status == 0 { self.close(pane: pane) } else { pane.title = "Harf (exited (\(status)))"; if self.focusedPane() === pane { self.setTitle(pane.title) } }
         }
         return pane
+    }
+
+    /// The window's title, and the tab's: the same, with a dot in front while a command runs in any pane of the window.
+    private func setTitle(_ title: String) {
+        window.title = title
+        window.tab.title = (allPanes.contains { $0.running } ? "● " : "") + title
     }
 
     var allPanes: [TerminalPane] { panes(under: window.contentView) }

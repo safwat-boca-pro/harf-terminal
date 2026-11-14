@@ -29,6 +29,10 @@ private let titleCallback: @convention(c) (UnsafeMutableRawPointer?) -> Void = {
 private let bellCallback: @convention(c) (UnsafeMutableRawPointer?) -> Void = { ctx in hop(ctx) { $0.onBell() } }
 private let exitedCallback: @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void = { ctx, status in hop(ctx) { $0.exitedOnMain(status) } }
 
+private let commandCallback: @convention(c) (UnsafeMutableRawPointer?, Int32, Int32, Int32, UInt32) -> Void = { ctx, running, exitCode, hasExitCode, ms in
+    hop(ctx) { $0.onCommand(running != 0, hasExitCode != 0 ? exitCode : nil, ms) }
+}
+
 private func utf8String(_ p: UnsafePointer<UInt8>?, _ n: Int) -> String {
     guard let p, n > 0 else { return "" }
     return String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)   // copies: the core's bytes are borrowed
@@ -113,6 +117,8 @@ final class TerminalController {
     var onExit: (Int32) -> Void = { _ in }
     /// A program asked for a desktop notification (OSC 9, OSC 777): sanitized title (may be empty) and body.
     var onNotify: (String, String) -> Void = { _, _ in }
+    /// OSC 133: a command started running or ended (its exit code if the shell sent one, and how long it ran in milliseconds).
+    var onCommand: (_ running: Bool, _ exitCode: Int32?, _ durationMs: UInt32) -> Void = { _, _, _ in }
     /// The view became the first responder (the window's title follows the focused pane).
     var onFocus: () -> Void = {}
     /// Where OSC 52 writes go (the self-test points it at a private pasteboard).
@@ -140,7 +146,7 @@ final class TerminalController {
         let cstrs: [UnsafeMutablePointer<CChar>?] = (argv ?? []).map { strdup($0) } + [nil]
         defer { cstrs.forEach { free($0) } }
         var cb = HarfTermCallbacks(ctx: nil, wake: wakeCallback, title: titleCallback, bell: bellCallback, exited: exitedCallback,
-                                 clipboard_write: clipboardCallback, notify: notifyCallback, command: nil)
+                                 clipboard_write: clipboardCallback, notify: notifyCallback, command: commandCallback)
         let cwdC = cwd.flatMap { strdup($0) }
         defer { free(cwdC) }
         let retained = Unmanaged.passRetained(target)

@@ -16,6 +16,16 @@ panes I saw earlier came from rendering the whole window offscreen with `cacheDi
 - [ ] Open the find bar in a narrow split pane: nothing is cut off.
 - [ ] Title and tab name follow the focused pane. Tab drag and "Merge All Windows" from the Window menu work.
 
+## Shell integration (zsh; marks prompts and commands with OSC 133)
+Open a **new** window or tab so the shell starts with the shim. Your own zsh setup (prompt theme, plugins) is the thing to judge: tell me if the prompt looks different or a startup file stopped loading.
+- [ ] Run a few commands, one of them long (`seq 1 200`). Cmd+Up goes to the previous prompt, again to the one before; Cmd+Down comes back. In a tab with no commands yet, or in vim, nothing happens.
+- [ ] Cmd+Shift+A selects the output of the last command (highlighted), Cmd+C and paste elsewhere gives exactly that text, without the prompt line.
+- [ ] `echo $ZDOTDIR` prints what you had before (nothing if you never set it). `print $HARF_SHELL_INTEGRATION` prints nothing.
+- [ ] `sleep 5` in one tab, then look at the tab bar from another tab: its title has a dot in front until the command ends. With a single tab the dot flickers on every command, by design.
+- [ ] `sleep 12`, switch to another tab or app: when it ends, a "Command finished" notification says "Done" (`false; sleep 12; false` style failures say "Failed (exit N)"). A short command makes no notification. **The OSC 9 notification did not show on screen earlier; say if this one does not either.**
+- [ ] `exec zsh` does not leave the dot on the tab (the new shell has no marks until you open a new tab, which is a known limit).
+- [ ] `shell_integration = off` in the config, then a new tab: no dot, Cmd+Up does nothing. bash and fish get no marks at all.
+
 ## Configuration (`Cmd+,` opens `~/.config/harf/config`, creating it with every setting commented out)
 - [ ] `font_size = 18` then save: the font changes at once in every window, no restart. `font_family = Monaco` works; `font_family = Helvetica` prints a warning to stderr and keeps Menlo.
 - [ ] Cmd+= / Cmd+- / Cmd+0 change the font size for this run.
