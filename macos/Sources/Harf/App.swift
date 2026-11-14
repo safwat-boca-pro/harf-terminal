@@ -57,7 +57,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if p.count == 2 { content = NSSize(width: p[0], height: p[1]) }
         }
         let scale = NSScreen.main?.backingScaleFactor ?? 2
-        guard let c = TerminalController(argv: nil, frame: content, scale: scale) else { fatalError("cannot start the terminal") }
+        // Measurement hook (bench/footprint.sh): HARF_CHILD_CMD runs a command first, then the user's shell.
+        var argv: [String]? = nil
+        if let cmd = ProcessInfo.processInfo.environment["HARF_CHILD_CMD"], !cmd.isEmpty {
+            let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+            argv = ["/bin/sh", "-c", "\(cmd); exec \(shell) -l"]
+        }
+        guard let c = TerminalController(argv: argv, frame: content, scale: scale) else { fatalError("cannot start the terminal") }
         window = NSWindow(contentRect: NSRect(origin: .zero, size: content), styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "Harf"

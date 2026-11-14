@@ -191,3 +191,27 @@ Two other findings:
 - The flood itself runs at only about 3 MB/s end to end in this harness (a 22 MB `seq` in 8 s). That is far below the
   186 to 448 MB/s the Phase 3 spike measured for parsing alone, so the limit is elsewhere (the child writing through the pty,
   the 64 KiB read size, or the per-wake path). It is a slice 4 (`vtebench`) question, not a P4 one.
+
+## Slice 4 baseline (2026-11-14)
+
+Method: `bench/footprint.sh [settle=15] [mode]`: starts `macos/.build/Harf.app/Contents/MacOS/Harf` itself with
+`HARF_CONTENT_SIZE=700x420`, tracks that pid, waits for the child to finish (modes that print first), settles 15 s, reads
+`footprint <pid>`, and kills only its own process. Release build (`macos/build-app.sh`, which always relinks), Apple M1,
+macOS 27.0.1, Zig 0.17.1, commit c0fc58f plus the script. Target: 30 MB `phys_footprint` at 700x420 pt, empty session.
+
+| State | Footprint (3 runs) | Malloc Small | IOSurface | IOAccelerator (graphics) |
+|---|---|---|---|---|
+| Settled, empty session, at the prompt | 28, 28, 27 MB | 13 MB | 4976 KB (one surface) | 1.3 MB |
+| After printing 6000 lines (1 MiB scrollback full) | 34, 32, 32 MB | 13, 11, 11 MB | 4976 KB once, then 9952 KB (two surfaces) | about 1.3 MB |
+| After printing 100 MB, then settled | 32, 32, 31 MB | 11 MB | 9952 KB (two surfaces) | 1.3 MB |
+
+- **The empty settled state is under the 30 MB target** (27 to 28 MB), with margin of 2 to 3 MB.
+- **Every state where the view has been redrawn is 2 to 6 MB higher, and most of that is a second `IOSurface`** (9.95 MB instead
+  of 4.98 MB: two 1400x904 BGRA surfaces, the window's backing store plus a second drawable). This is the spike's unexplained extra
+  surface. It appears once content changes and redraws, not at an idle empty prompt. Task 1 attributes it.
+- `Malloc Small` is the largest single line (11 to 13 MB) in every state. It is lower after a flood (11 MB) than at idle (13 MB),
+  so most of it is fixed startup state (fonts, frameworks, Swift runtime), not data that grows.
+- The ad hoc readings of 38 to 40 MB quoted earlier in `docs/perf.md` were taken 5 s after launch on a stale build (before
+  `build-app.sh` relinked) and are superseded by this table.
+- A 100 MB `yes | head -c` flood finishes in about 4 s through the real app (about 25 MB/s end to end including drawing).
+  The 3 MB/s of the Zig flood benchmark is mostly `seq` itself (it writes one line at a time); Task 3 separates the two.
