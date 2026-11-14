@@ -147,8 +147,9 @@ final class TerminalController {
 
     private func fitGrid(_ size: NSSize) -> (cols: Int, rows: Int) {
         let cw = cellPx.w / scale, ch = cellPx.h / scale
-        return (max(1, Int(((size.width - 2 * inset) / cw).rounded(.down))),
-                max(1, Int(((size.height - 2 * inset) / ch).rounded(.down))))
+        // The small slack keeps a window sized for exactly N cells at N columns despite floating-point rounding.
+        return (max(1, Int(((size.width - 2 * inset) / cw + 1e-6).rounded(.down))),
+                max(1, Int(((size.height - 2 * inset) / ch + 1e-6).rounded(.down))))
     }
 
     /// The view's size or backing scale changed: refit the grid and tell the session.
@@ -254,7 +255,22 @@ final class TerminalController {
     fileprivate func wakeOnMain() {
         guard let t = term else { return }
         harf_term_wake_handled(t)   // re-arm before reading, so output arriving during the draw wakes us again
+        followProgramGrid()
         markDirty()
+    }
+
+    /// A program can change the grid itself (DECCOLM switches 80 and 132 columns). The window follows: it is resized so the
+    /// grid fits it exactly, which also keeps the right-hand columns from being clipped. A window the user has put
+    /// in full screen refuses the resize and keeps its size; the next ordinary resize refits the grid to the window.
+    private func followProgramGrid() {
+        let g = coreGrid()
+        guard g.cols > 0, g.rows > 0, g.cols != gridSize.cols || g.rows != gridSize.rows else { return }
+        let rowsChanged = g.rows != gridSize.rows
+        gridSize = g
+        // Only the dimension the program changed is resized, so a window dragged to an odd height keeps it.
+        let size = NSSize(width: CGFloat(g.cols) * cellPx.w / scale + 2 * inset,
+                          height: rowsChanged ? CGFloat(g.rows) * cellPx.h / scale + 2 * inset : view.bounds.height)
+        if let w = view.window { w.setContentSize(size) } else { view.setFrameSize(size) }   // either one ends in layoutChanged
     }
 
     /// Asks AppKit to draw the view. The one place the wake path does it, so the latency check can see it happen.

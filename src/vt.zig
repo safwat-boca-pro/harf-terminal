@@ -118,6 +118,8 @@ pub const Terminal = struct {
     sel_anchor: ?struct { x: u16, y: u32 } = null,
     /// The pointer left the press cell, so a one-cell selection is now wanted.
     sel_dragged: bool = false,
+    /// Clicks in the gesture's press: 1 drags by character, 2 by word, 3 or more by line.
+    sel_clicks: u8 = 1,
     /// A selection exists as of the last `update` (cells ask whether they are in it only then).
     selection_active: bool = false,
     mouse_encoder: c.GhosttyMouseEncoder,
@@ -312,21 +314,28 @@ pub const Terminal = struct {
         const pos = self.clampCell(col, row);
         self.sel_anchor = .{ .x = pos.col, .y = @intCast(self.viewport().offset + pos.row) };
         self.sel_dragged = false;
+        self.sel_clicks = click_count;
         if (click_count <= 1) return self.setSelection(null);
         const ref = self.gridRef(c.GHOSTTY_POINT_TAG_VIEWPORT, pos.col, pos.row) orelse return;
+        const sel = self.unitAround(ref, click_count) orelse return;
+        self.setSelection(sel);
+    }
+
+    /// The word (two clicks) or line (three or more) around `ref`.
+    fn unitAround(self: *Terminal, ref: c.GhosttyGridRef, click_count: u8) ?c.GhosttySelection {
         var sel = std.mem.zeroes(c.GhosttySelection);
         if (click_count == 2) {
             var o = std.mem.zeroes(c.GhosttyTerminalSelectWordOptions);
             o.size = @sizeOf(c.GhosttyTerminalSelectWordOptions);
             o.ref = ref;
-            if (c.ghostty_terminal_select_word(self.handle, &o, &sel) != c.GHOSTTY_SUCCESS) return;
+            if (c.ghostty_terminal_select_word(self.handle, &o, &sel) != c.GHOSTTY_SUCCESS) return null;
         } else {
             var o = std.mem.zeroes(c.GhosttyTerminalSelectLineOptions);
             o.size = @sizeOf(c.GhosttyTerminalSelectLineOptions);
             o.ref = ref;
-            if (c.ghostty_terminal_select_line(self.handle, &o, &sel) != c.GHOSTTY_SUCCESS) return;
+            if (c.ghostty_terminal_select_line(self.handle, &o, &sel) != c.GHOSTTY_SUCCESS) return null;
         }
-        self.setSelection(sel);
+        return sel;
     }
 
     /// The pointer moved to a viewport cell with the left button down after a one-click press.
@@ -335,15 +344,33 @@ pub const Terminal = struct {
         const pos = self.clampCell(col, row);
         const here_y: u32 = @intCast(self.viewport().offset + pos.row);
         if (pos.col != anchor.x or here_y != anchor.y) self.sel_dragged = true;
+        if (self.sel_clicks >= 2) return self.dragByUnit(anchor.x, anchor.y, pos.col, pos.row, here_y);
         if (!self.sel_dragged) return; // a jiggle inside the press cell selects nothing
         const start = self.gridRef(c.GHOSTTY_POINT_TAG_SCREEN, anchor.x, anchor.y) orelse return;
         const end = self.gridRef(c.GHOSTTY_POINT_TAG_VIEWPORT, pos.col, pos.row) orelse return;
         self.setSelection(.{ .start = start, .end = end, .rectangle = false });
     }
 
+    /// After a double or triple click the drag grows the selection by whole words or lines: from the unit that was
+    /// pressed to the unit under the pointer, whichever way the pointer went. Both ends are looked up again here
+    /// (the pressed one by its screen position), so nothing is held that scrolling or output could invalidate.
+    fn dragByUnit(self: *Terminal, ax: u16, ay: u32, col: u16, row: u16, here_y: u32) void {
+        const first = self.gridRef(c.GHOSTTY_POINT_TAG_SCREEN, ax, ay) orelse return;
+        const here = self.gridRef(c.GHOSTTY_POINT_TAG_VIEWPORT, col, row) orelse return;
+        const pressed = self.unitAround(first, self.sel_clicks) orelse return;
+        const under = self.unitAround(here, self.sel_clicks) orelse c.GhosttySelection{ .start = here, .end = here, .rectangle = false };
+        const forward = here_y > ay or (here_y == ay and col >= ax);
+        self.setSelection(.{
+            .start = if (forward) pressed.start else under.start,
+            .end = if (forward) under.end else pressed.end,
+            .rectangle = false,
+        });
+    }
+
     pub fn selectionRelease(self: *Terminal) void {
         self.sel_anchor = null;
         self.sel_dragged = false;
+        self.sel_clicks = 1;
     }
 
     pub fn clearSelection(self: *Terminal) void {
@@ -388,6 +415,13 @@ pub const Terminal = struct {
         const ev: c.GhosttyFocusEvent = if (gained) c.GHOSTTY_FOCUS_GAINED else c.GHOSTTY_FOCUS_LOST;
         if (c.ghostty_focus_encode(ev, out.ptr, out.len, &written) != c.GHOSTTY_SUCCESS) return out[0..0];
         return out[0..written];
+    }
+
+    /// True unless the program reset alternate scroll (mode 1007): on the alternate screen the wheel then sends arrow keys.
+    pub fn alternateScroll(self: *Terminal) bool {
+        var cfg: c.GhosttyTerminalModeConfig = .{ .mode = c.ghostty_mode_new(1007, false), .value = false };
+        if (c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_MODE, &cfg) != c.GHOSTTY_SUCCESS) return true;
+        return cfg.value;
     }
 
     /// True while the program has any mouse tracking mode on (X10, normal, button or any-event).
@@ -1159,6 +1193,16 @@ test "mouse tracking follows the program's request" {
     try std.testing.expect(!t.mouseTracking());
 }
 
+test "alternate scroll (mode 1007) follows the program, on unless it is reset" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    try std.testing.expect(t.alternateScroll()); // the library's default, which keeps the wheel working in less and man
+    t.write("\x1b[?1007l");
+    try std.testing.expect(!t.alternateScroll());
+    t.write("\x1b[?1007h");
+    try std.testing.expect(t.alternateScroll());
+}
+
 test "mouse reports in SGR mode, 1-based, at the cell's center" {
     const t = try Terminal.init(std.testing.allocator, .{});
     defer t.deinit();
@@ -1239,6 +1283,52 @@ test "selection copy is logical text" {
         defer std.testing.allocator.free(got);
         try std.testing.expectEqualStrings(str, got);
     }
+}
+
+fn dragText(t: *Terminal, clicks: u8, from: [2]u16, to: [2]u16) ![]u8 {
+    t.selectionPress(from[0], from[1], clicks);
+    t.selectionDrag(to[0], to[1]);
+    t.selectionRelease();
+    return t.selectionText(std.testing.allocator);
+}
+
+test "double-click then drag extends the selection in whole words, forward and backward" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 30, .rows = 5 });
+    defer t.deinit();
+    t.write("alpha beta gamma delta");
+    // press inside "beta" (col 7), drag into the middle of "gamma" (col 13): both words whole
+    const fwd = try dragText(t, 2, .{ 7, 0 }, .{ 13, 0 });
+    defer std.testing.allocator.free(fwd);
+    try std.testing.expectEqualStrings("beta gamma", fwd);
+    // drag back into "alpha" (col 2): from the start of alpha to the end of beta
+    const back = try dragText(t, 2, .{ 7, 0 }, .{ 2, 0 });
+    defer std.testing.allocator.free(back);
+    try std.testing.expectEqualStrings("alpha beta", back);
+    // still inside the pressed word: just that word
+    const same = try dragText(t, 2, .{ 7, 0 }, .{ 8, 0 });
+    defer std.testing.allocator.free(same);
+    try std.testing.expectEqualStrings("beta", same);
+}
+
+test "triple-click then drag extends the selection in whole lines" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 30, .rows = 5 });
+    defer t.deinit();
+    t.write("first line\r\nsecond line\r\nthird line");
+    const down = try dragText(t, 3, .{ 3, 0 }, .{ 2, 2 });
+    defer std.testing.allocator.free(down);
+    try std.testing.expectEqualStrings("first line\nsecond line\nthird line", down);
+    const up = try dragText(t, 3, .{ 3, 2 }, .{ 4, 1 });
+    defer std.testing.allocator.free(up);
+    try std.testing.expectEqualStrings("second line\nthird line", up);
+}
+
+test "a single-click drag still selects characters" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 30, .rows = 5 });
+    defer t.deinit();
+    t.write("alpha beta gamma delta");
+    const got = try dragText(t, 1, .{ 7, 0 }, .{ 13, 0 });
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings("eta gam", got);
 }
 
 test "selection copy joins soft wraps and keeps hard newlines, without trailing blanks" {

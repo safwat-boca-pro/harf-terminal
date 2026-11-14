@@ -19,3 +19,9 @@ Build and open: `macos/build-app.sh && open macos/.build/Harf.app`. Only you can
 - [ ] `bench/idle.sh macos/.build/Harf.app 60`: idle CPU about 0.01 percent.
 - [ ] `bench/startup.sh 10`: about 120 ms; decide the startup budget question in `docs/phase3-done.md`.
 - [ ] The window now uses the sRGB color space (to save about 5 MB): look at the theme and the ANSI colors in `ls --color` and vim; tell me if they look wrong on your display.
+
+**Closed decisions (only a person can judge these)**
+- [ ] Selection: double-click a word in the shell, hold the button and drag across two more words: whole words are selected, in both directions. Triple-click and drag: whole lines.
+- [ ] Wheel in `less` or `man` still scrolls. In a program that resets mode 1007 (`printf '\e[?1049h\e[?1007l'; sleep 30`) the wheel does nothing.
+- [ ] A program that never ends a synchronized update (`printf '\e[?2026h'; echo stuck; sleep 30`) shows `stuck` after about a second.
+- [ ] Run `vttest`, menu 1, the 132-column screens: the window widens to fit 132 columns and returns to 80 when vttest switches back. (`printf '\e[?40h\e[?3h'` does it by hand.)

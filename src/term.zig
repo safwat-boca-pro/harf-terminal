@@ -26,6 +26,8 @@ pub const Options = struct {
     /// The program to run (`argv[0]` is its path). Null runs the user's login shell.
     argv: ?[]const [:0]const u8 = null,
     callbacks: Callbacks = .{},
+    /// How long a synchronized-output hold (mode 2026) may last before the display is let go anyway.
+    hold_deadline_ms: u32 = 1000,
 };
 
 /// Most bytes `Session.input` queues before refusing more.
@@ -51,8 +53,10 @@ pub const Session = struct {
     stop_pipe: [2]c_int = .{ -1, -1 },
     wake_pending: std.atomic.Value(bool) = .init(false),
     focus: std.atomic.Value(bool) = .init(true),
-    /// True inside a render hold (synchronized output). Set by the parser callback (terminal lock held).
+    /// True inside a render hold (synchronized output). Set by the parser callback (terminal lock held), and cleared
+    /// by the I/O thread when `hold_deadline_ms` runs out.
     held: std.atomic.Value(bool) = .init(false),
+    hold_deadline_ms: u32 = 1000,
     /// Wheel rows carried toward the next wheel event (|rows| < 3); guarded by `term_lock`.
     wheel_rows: i32 = 0,
     /// The pointer's last cell, packed (col << 16 | row).
@@ -65,7 +69,7 @@ pub const Session = struct {
     pub fn start(gpa: std.mem.Allocator, opts: Options) !*Session {
         const self = try gpa.create(Session);
         errdefer gpa.destroy(self);
-        self.* = .{ .gpa = gpa, .pty = undefined, .term = undefined, .callbacks = opts.callbacks };
+        self.* = .{ .gpa = gpa, .pty = undefined, .term = undefined, .callbacks = opts.callbacks, .hold_deadline_ms = opts.hold_deadline_ms };
         if (c.pipe(&self.stop_pipe) != 0) return error.PipeFailed;
         pty.setCloexec(self.stop_pipe[0]);
         pty.setCloexec(self.stop_pipe[1]);
@@ -203,8 +207,8 @@ pub const Session = struct {
         return t.selectionText(gpa) catch |e| if (e == error.NoSelection) null else e;
     }
 
-    /// True while the program is inside a synchronized-output hold. There is no deadline: the hold ends when
-    /// the program ends it, on RIS, or on resize (resizing the window is the way out of a stuck hold).
+    /// True while the program is inside a synchronized-output hold. The hold ends when the program ends it, on RIS,
+    /// on resize, or `hold_deadline_ms` (1 s) after it began, so a program that never ends one cannot freeze the display.
     pub fn renderHeld(self: *const Session) bool {
         return self.held.load(.acquire);
     }
@@ -240,7 +244,7 @@ pub const Session = struct {
 
     /// The wheel or trackpad: `delta_rows` rows toward newer output when positive, older when negative.
     /// On the alternate screen the program gets that many Up or Down key presses (in its cursor key
-    /// mode); otherwise the viewport scrolls through the scrollback. At most 64 presses per call.
+    /// mode) unless it reset alternate scroll (mode 1007); otherwise the viewport scrolls through the scrollback. At most 64 presses per call.
     pub fn scroll(self: *Session, delta_rows: i32) !void {
         if (delta_rows == 0) return;
         var buf: [64 * 8]u8 = undefined;
@@ -262,9 +266,12 @@ pub const Session = struct {
                 const events = @min(@abs(notches), 16);
                 for (0..events) |_| n += t.encodeMouse(.press, button, 0, @intCast(p >> 16), @intCast(p & 0xFFFF), cp >> 16, cp & 0xFFFF, buf[n..]).len;
             } else if (self.resetWheel() and t.onAlternateScreen()) {
-                const arrow = keys.fromMac(if (delta_rows < 0) 126 else 125).?; // Up, Down
-                const presses = @min(@abs(delta_rows), 64);
-                for (0..presses) |_| n += t.encodeKey(arrow, 0, "", 0, .press, buf[n..]).len;
+                // Mode 1007 (on by default) asks for arrows; a program that reset it gets nothing, and there is no scrollback to scroll.
+                if (t.alternateScroll()) {
+                    const arrow = keys.fromMac(if (delta_rows < 0) 126 else 125).?; // Up, Down
+                    const presses = @min(@abs(delta_rows), 64);
+                    for (0..presses) |_| n += t.encodeKey(arrow, 0, "", 0, .press, buf[n..]).len;
+                }
             } else {
                 t.scrollViewport(delta_rows);
             }
@@ -404,6 +411,12 @@ pub const Session = struct {
         return self.pty.pid;
     }
 
+    fn monotonicMs() i64 {
+        var ts: c.timespec = undefined;
+        _ = c.clock_gettime(.MONOTONIC, &ts);
+        return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+    }
+
     fn requestWake(self: *Session) void {
         // A program inside a synchronized-output hold (mode 2026) is mid-frame: draw nothing until it ends.
         if (self.held.load(.acquire)) return;
@@ -419,14 +432,28 @@ pub const Session = struct {
             .{ .fd = self.kick_pipe[0], .events = c.POLL.IN, .revents = 0 },
         };
         const readable = c.POLL.IN | c.POLL.HUP | c.POLL.ERR | c.POLL.NVAL;
+        var hold_began: ?i64 = null; // when the open hold began (monotonic ms); I/O thread only
         while (true) {
             // Watch for POLLOUT only while there is something to send: idle means no wake-ups.
             fds[0].events = if (self.pendingInput() > 0) c.POLL.IN | c.POLL.OUT else c.POLL.IN;
-            const r = c.poll(&fds, fds.len, -1);
+            // The one timed wait in the product: only while a hold is open, and only until its deadline. Idle has none.
+            if (!self.held.load(.acquire)) hold_began = null; // ended by RIS or resize, which do not pass through a read
+            var timeout: c_int = -1;
+            if (hold_began) |t0| {
+                const left = @as(i64, self.hold_deadline_ms) - (monotonicMs() - t0);
+                timeout = @intCast(@max(left, 0));
+            }
+            const r = c.poll(&fds, fds.len, timeout);
             if (r < 0) {
                 if (std.posix.errno(@as(isize, r)) == .INTR) continue;
                 break;
             }
+            if (hold_began) |t0| if (monotonicMs() - t0 >= self.hold_deadline_ms) {
+                // The program has held the frame past the deadline: show what is there, and stop timing this hold.
+                self.held.store(false, .release);
+                hold_began = null;
+                self.requestWake();
+            };
             if (fds[1].revents != 0) return; // deinit: it hangs up on the child and reaps it
             if (fds[2].revents != 0) {
                 var junk: [64]u8 = undefined;
@@ -439,6 +466,9 @@ pub const Session = struct {
                 _ = c.pthread_mutex_lock(&self.term_lock);
                 self.term.write(buf[0..n]);
                 _ = c.pthread_mutex_unlock(&self.term_lock);
+                if (self.held.load(.acquire)) {
+                    if (hold_began == null) hold_began = monotonicMs();
+                } else hold_began = null;
                 self.requestWake();
             }
             if (self.pendingInput() > 0) self.flushOutput();
@@ -861,6 +891,16 @@ test "scroll: the alternate screen gets arrow keys, in the terminal's cursor key
     try std.testing.expect(hexOf(s, "1b 5b 41 1b 5b 41 1b 5b 41 1b 5b 42"));
 }
 
+test "scroll: with alternate scroll (mode 1007) reset, the alternate screen's wheel sends nothing" {
+    const script = "printf '\\033[?1049h\\033[?1007l'; stty raw -echo; echo ready; dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -s ' '";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    try s.scroll(-3); // would be three Up presses with 1007 set
+    try s.input("Z");
+    try std.testing.expect(hexOf(s, "5a")); // the child's first byte is the Z: the wheel sent nothing before it
+}
+
 test "mouse: reports reach a program that asked for them, and nothing goes out otherwise" {
     const script = "printf '\\033[?1000h\\033[?1006h'; stty raw -echo; echo ready; dd bs=1 count=18 2>/dev/null | xxd -p";
     const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
@@ -1054,4 +1094,25 @@ test "synchronized output: a flood inside a hold does not deadlock" {
     try std.testing.expect(waitFor(30_000, Row{ .s = s, .want = "finished" }, Row.ok));
     try std.testing.expect(!s.renderHeld());
     try std.testing.expect(spy.wakes.load(.monotonic) <= 3); // the whole flood was one held frame
+}
+
+test "synchronized output: a hold that never ends is released after the deadline and the view is woken" {
+    var spy: Spy = .{};
+    // opens a hold, draws, and never closes it
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf '\\033[?2026h'; printf 'stuck-frame'; sleep 20" }, .callbacks = spy.callbacks(), .hold_deadline_ms = 300 });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, Held{ .s = s, .want = true }, Held.ok));
+    try std.testing.expectEqual(@as(u32, 0), spy.wakes.load(.monotonic)); // held: nothing yet
+    try std.testing.expect(waitFor(5_000, Held{ .s = s, .want = false }, Held.ok)); // the deadline lets go
+    try std.testing.expect(waitFor(5_000, Row{ .s = s, .want = "stuck-frame" }, Row.ok));
+    try std.testing.expectEqual(@as(u32, 1), spy.wakes.load(.monotonic)); // and the view is told to draw it
+}
+
+test "synchronized output: a program that holds again after the deadline is held again" {
+    var spy: Spy = .{};
+    const script = "printf '\\033[?2026h'; sleep 0.6; printf '\\033[?2026l'; printf '\\033[?2026h'; printf 'second'; sleep 20";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script }, .callbacks = spy.callbacks(), .hold_deadline_ms = 300 });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "second" }, Row.ok));
+    try std.testing.expect(s.renderHeld()); // a fresh hold started after the first one timed out
 }

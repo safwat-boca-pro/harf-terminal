@@ -168,6 +168,25 @@ after launch at 700x420 pt) and is the slice 4 question, but it is above the 30 
 `bench/idle.sh` now starts the binary itself and tracks that pid (it used `pgrep -x | head -1` and `kill`, which could end a
 different running copy of the app).
 
+**Deadline (decided 2026-11-14, option b).** A hold now ends at the latest 1 s (`Options.hold_deadline_ms`) after it began, so a
+program that never resets mode 2026 cannot freeze the display. The I/O thread's `poll` takes a timeout only while a hold is open
+(the time left to the deadline, one wait, no ticking); with no hold it still waits forever. Idle check after the change, window
+open, no output, 30 s: mean 0.02 percent, max 0.30 percent, cumulative CPU 0:00.15 to 0:00.16 (0.01 s), the Phase 0 level.
+Mutation-checked: removing the line that clears the flag fails the deadline test. A program that sets mode 2026 again without
+having reset it, after a timeout, is not held for that frame (the library treats a second set as a no-op and reports no new hold);
+a program that resets and sets it again is held again (tested).
+
+### P3: dirty rows, closed as not worth it (2026-11-14)
+
+The gate in the plan: after P1 a full frame should be about 0.5 ms; if so, dirty rows are an energy optimization only, and the owner
+decides. Measured after P1: plain full frame 0.5 ms painter-only, 0.6 ms with AppKit's bitmap path (the colored plain screen's
+second draw in the self-test); one row 20 µs. A frame is drawn once per wake and redraws coalesce to one per display refresh, so
+the most it costs is 60 frames x 0.6 ms = 36 ms per second (3.6 percent of one core) during a flood that dirties nearly every row
+anyway, and typing at 10 keys per second costs 6 ms per second (0.6 percent) against about 0.2 percent with dirty rows. The
+saving is about 0.4 percent of one core while typing and none during output. Against that, the plan lists eight invalidation
+hazards (cursor rows, focus, selection, scroll, resize, alternate screen, palette, style-only rows), and a missed one shows
+as a stale row on screen. Not implemented. Reopen if a display-link frame budget or a battery measurement says otherwise.
+
 ### P4 gate: does drawing slow the parsing of a flood? (2026-11-14)
 
 Harness: `test "bench: flood parse throughput ..."` in `src/capi.zig`, skipped unless `HARF_BENCH=1`

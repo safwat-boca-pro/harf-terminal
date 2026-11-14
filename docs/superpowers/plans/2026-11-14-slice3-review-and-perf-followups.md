@@ -179,6 +179,8 @@ Also established by reading the vendored libghostty-vt 1.0.1 headers and source:
 
 ## Owner decisions needed before work starts
 
+*Resolved 2026-11-14 on the user's "handle these": P2 bounded timeout (1 s, poll timeout only while a hold is open); P3 closed by measurement; R7 honor 1007; R8 build word and line drag. Details in `docs/perf.md` and `ARCHITECTURE.md`.*
+
 1. P2: no deadline, or a bounded 100 ms poll timeout while a hold is active.
 2. P3: is the battery win worth the invalidation complexity once P1 lands?
 3. R7: honor mode 1007, or keep arrows regardless.

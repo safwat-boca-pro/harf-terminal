@@ -313,6 +313,26 @@ func selfTest() -> Never {
         c.close()
     }
 
+    // 1j. A program that switches the terminal to 132 columns (DECCOLM) gets a window that fits them, and the window follows
+    // it back to 80. Before this the grid changed and the window did not, so the right-hand columns were clipped.
+    do {
+        // The first second is for the window to finish its own refit, which would otherwise reset the grid under the program.
+        let script = "sleep 1; printf '\\033[?40h\\033[?3h'; printf wide; sleep 3; printf '\\033[?3l'; printf narrow; sleep 3"
+        guard let c = TerminalController(argv: ["/bin/sh", "-c", script], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the DECCOLM session") }
+        let w = makeTerminalWindow(content: NSSize(width: 700, height: 420), view: c.view)
+        func fits(_ cols: Int) -> Bool {
+            let want = CGFloat(cols) * c.cellSizePt.width + 2 * c.insetPt
+            return abs(c.view.bounds.width - want) < 1 && c.gridSize.cols == cols && c.coreGrid().cols == cols
+        }
+        if !pump(5, until: { c.coreGrid().cols == 132 }) { fail("DECCOLM: the core never went to 132 columns (grid \(c.coreGrid()), row0 '\(c.rowText(0))')") }
+        if !pump(3, until: { fits(132) }) { fail("DECCOLM: the program switched to 132 columns but the window is \(c.view.bounds.width) pt wide, grid \(c.gridSize), core \(c.coreGrid())") }
+        _ = pump(0.3) { false }
+        if !fits(132) { fail("DECCOLM: the 132-column fit did not hold (view \(c.view.bounds.width) pt, grid \(c.gridSize), core \(c.coreGrid()))") }
+        if !pump(5, until: { fits(80) && c.rowText(0).contains("narrow") }) { fail("DECCOLM: back to 80 columns, the window is \(c.view.bounds.width) pt wide, grid \(c.gridSize), core \(c.coreGrid())") }
+        c.close()
+        _ = w
+    }
+
     // 2. Typing (a letter, an Arabic letter, Return) goes through the view's own key path.
     let echo = ["/bin/sh", "-c", "read x; echo got:$x"]
     func rows(_ c: TerminalController) -> String { (0..<6).map { c.rowText($0) }.joined(separator: "|") }

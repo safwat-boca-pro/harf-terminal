@@ -101,7 +101,7 @@ func conformance(dir: String) -> Never {
             let human = !text.contains("RETURN")
             let title = text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? ""
             var header = "# \(base)  grid \(grid.cols)x\(grid.rows)"
-            if grid.cols != 80 || grid.rows != 24 { header += "  (the view is 80x24: columns past the window's edge are not visible in the picture)" }
+            if grid.cols != 80 || grid.rows != 24 { header += "  (the view follows the program's grid)" }
             try? (header + "\n" + text + "\n").write(toFile: dir + "/" + base + ".txt", atomically: true, encoding: .utf8)
             if let rep = c.view.bitmapImageRepForCachingDisplay(in: c.view.bounds) {
                 c.view.cacheDisplay(in: c.view.bounds, to: rep)
