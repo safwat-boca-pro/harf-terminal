@@ -34,6 +34,8 @@ pub const Options = struct {
     hold_deadline_ms: u32 = 1000,
     /// May a program write the clipboard (OSC 52)?
     allow_clipboard_write: bool = true,
+    /// The directory the child starts in (a shell: `$HOME` when null). A directory that cannot be entered means `/`.
+    cwd: ?[:0]const u8 = null,
 };
 
 /// Most bytes `Session.input` queues before refusing more.
@@ -102,9 +104,9 @@ pub const Session = struct {
         });
         errdefer self.term.deinit();
         self.pty = if (opts.argv) |argv|
-            try pty.Pty.spawn(gpa, .{ .argv = argv, .cols = opts.cols, .rows = opts.rows })
+            try pty.Pty.spawn(gpa, .{ .argv = argv, .cols = opts.cols, .rows = opts.rows, .cwd = opts.cwd })
         else
-            try pty.Pty.spawnShell(gpa, opts.cols, opts.rows);
+            try pty.Pty.spawnShell(gpa, opts.cols, opts.rows, opts.cwd);
         errdefer self.pty.deinit();
         self.thread = try std.Thread.spawn(.{}, ioLoop, .{self});
         return self;
@@ -517,6 +519,31 @@ pub const Session = struct {
         if (self.callbacks.notify) |f| f(self.callbacks.ctx, heading, body);
     }
 
+    /// Starts a find for `needle` and returns the number of matches (0 ends it); see `vt.Terminal.findSet`.
+    pub fn find(self: *Session, needle: []const u8) usize {
+        const t = self.lock();
+        const n = t.findSet(needle);
+        self.unlock();
+        self.requestWake();
+        return n;
+    }
+
+    /// The next match toward older output or newer (wrapping): selected, scrolled to and highlighted. Null if there is none.
+    pub fn findStep(self: *Session, older: bool) ?vt.Terminal.FindPosition {
+        const t = self.lock();
+        const r = t.findStep(older);
+        self.unlock();
+        self.requestWake();
+        return r;
+    }
+
+    pub fn findEnd(self: *Session) void {
+        const t = self.lock();
+        t.findEnd();
+        self.unlock();
+        self.requestWake();
+    }
+
     /// Clear screen: the screen and the scrollback are emptied here, then Ctrl+L is typed so a shell redraws its prompt at the
     /// top. A full-screen program (the alternate screen) owns its screen, so nothing happens then.
     pub fn clearScreen(self: *Session) void {
@@ -891,6 +918,15 @@ test "clearScreen empties the screen and the scrollback, types Ctrl+L, and leave
     defer alt.unlock();
     var b2: [200]u8 = undefined;
     try std.testing.expect(std.mem.indexOf(u8, at.rowText(0, &b2), "INALT") != null);
+}
+
+test "a session starts in the directory it is given" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "pwd -P; sleep 1" }, .cwd = "/usr" });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "/usr"));
+    const missing = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "pwd -P; sleep 1" }, .cwd = "/no/such/directory" });
+    defer missing.deinit();
+    try std.testing.expect(waitFor(10_000, Row{ .s = missing, .want = "/", .exact = true }, Row.ok)); // it cannot be entered: the root
 }
 
 test "key: Ctrl letters follow the layout, not the physical key" {

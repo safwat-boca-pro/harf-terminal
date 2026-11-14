@@ -134,10 +134,10 @@ pub const Pty = struct {
         return .{ .fd = master, .pid = pid };
     }
 
-    /// The user's login shell (`$SHELL`, else /bin/zsh) in `$HOME`.
-    pub fn spawnShell(gpa: std.mem.Allocator, cols: u16, rows: u16) !Pty {
+    /// The user's login shell (`$SHELL`, else /bin/zsh) in `cwd`, or in `$HOME` if there is none (or it cannot be entered).
+    pub fn spawnShell(gpa: std.mem.Allocator, cols: u16, rows: u16, cwd: ?[:0]const u8) !Pty {
         const shell: [:0]const u8 = if (c.getenv("SHELL")) |s| std.mem.span(s) else "/bin/zsh";
-        const home: [:0]const u8 = if (c.getenv("HOME")) |h| std.mem.span(h) else "/";
+        const home: [:0]const u8 = cwd orelse if (c.getenv("HOME")) |h| std.mem.span(h) else "/";
         var name_buf: [256]u8 = undefined;
         if (shell.len + 2 > name_buf.len) return error.ShellPathTooLong;
         const name = loginArgv0(&name_buf, shell);

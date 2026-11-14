@@ -69,6 +69,19 @@ export fn harf_term_new(
     argv: ?[*:null]const ?[*:0]const u8,
     cb: ?*const HarfTermCallbacks,
 ) ?*HarfTerm {
+    return harf_term_new_in(cols, rows, scrollback_bytes, argv, null, cb);
+}
+
+/// Like harf_term_new, starting the child in `cwd` (NULL: a shell starts in $HOME, a program where the app is; a directory that
+/// cannot be entered means "/").
+export fn harf_term_new_in(
+    cols: u16,
+    rows: u16,
+    scrollback_bytes: usize,
+    argv: ?[*:null]const ?[*:0]const u8,
+    cwd: ?[*:0]const u8,
+    cb: ?*const HarfTermCallbacks,
+) ?*HarfTerm {
     if (cols == 0 or rows == 0) return null;
     const gpa = std.heap.smp_allocator;
     const self = gpa.create(HarfTerm) catch return null;
@@ -86,9 +99,35 @@ export fn harf_term_new(
         .rows = rows,
         .scrollback_bytes = scrollback_bytes,
         .argv = if (argv != null and list.items.len > 0) list.items else null,
+        .cwd = if (cwd) |d| std.mem.span(d) else null,
         .callbacks = .{ .ctx = self, .wake = HarfTerm.wake, .title = HarfTerm.title, .bell = HarfTerm.bell, .exited = HarfTerm.exited, .clipboard_write = HarfTerm.clipboardWrite, .notify = HarfTerm.notify },
     }) catch return null;
     return self;
+}
+
+/// The child's process id (to ask the system for its working directory).
+export fn harf_term_pid(t: *HarfTerm) c_int {
+    return t.session.pid();
+}
+
+/// Starts a find for `needle` (UTF-8; ASCII letters match in either case) over the screen and scrollback. Returns the number of
+/// matches; an empty needle ends the find. Nothing is selected until harf_term_find_step.
+export fn harf_term_find(t: *HarfTerm, needle: [*]const u8, len: usize) usize {
+    return t.session.find(needle[0..len]);
+}
+
+/// Selects the next match toward older output (`older` 1) or newer (0), wrapping, scrolls to it and highlights it. Returns 1 and
+/// the match's position (1-based `number` of `total`) or 0 if there are no matches.
+export fn harf_term_find_step(t: *HarfTerm, older: c_int, number: *usize, total: *usize) c_int {
+    const r = t.session.findStep(older != 0) orelse return 0;
+    number.* = r.number;
+    total.* = r.total;
+    return 1;
+}
+
+/// Ends the find and clears its selection.
+export fn harf_term_find_end(t: *HarfTerm) void {
+    t.session.findEnd();
 }
 
 /// Stops the session; the child is hung up on if it is still running. No callback runs after this returns.

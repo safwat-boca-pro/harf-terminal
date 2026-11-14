@@ -625,6 +625,72 @@ func selfTest() -> Never {
         if Settings.shared.fontPt != 14 || !Settings.shared.clipboardWrite { fail("config: an empty directory did not give the defaults") }
     }
 
+    // 2j. Panes, through the window controller the app uses: a split shares the window and starts where its neighbour's shell is,
+    // splits nest, a closed pane gives its place to its neighbour, the keyboard moves between panes, and the last pane closes the
+    // window. Find counts matches in the scrollback and scrolls to each.
+    do {
+        setenv("SHELL", "/bin/sh", 1)   // a split starts the login shell: keep the user's own startup files out of the test
+        let script = "echo needle-top; seq 1 100; echo needle-bottom; sleep 30"
+        guard let wc = WindowController(argv: ["/bin/sh", "-c", script], content: NSSize(width: 700, height: 420), cwd: "/usr") else { fail("cannot make a window controller") }
+        var windowClosed = false
+        wc.onClose = { _ in windowClosed = true }
+        guard let first = wc.allPanes.first, wc.allPanes.count == 1 else { fail("a new window should have one pane") }
+        let cols = first.controller.gridSize.cols
+        if !pump(5, until: { (0..<first.controller.gridSize.rows).contains { first.controller.rowText($0).contains("needle-bottom") } }) { fail("panes: the first pane's output never arrived") }
+        // find: two matches, the newest first; the older one is in the scrollback and the view is taken to it
+        if first.controller.findStart("NEEDLE") != 2 { fail("find: expected two matches for NEEDLE") }
+        guard let a = first.controller.findStep(older: true), a.number == 1, a.total == 2 else { fail("find: the first step should be match 1 of 2") }
+        guard let b = first.controller.findStep(older: true), b.number == 2 else { fail("find: the second step should be match 2 of 2") }
+        if !(0..<first.controller.gridSize.rows).contains(where: { first.controller.rowText($0).contains("needle-top") }) { fail("find: the view did not scroll to the older match") }
+        first.showFind()
+        if !first.isFindOpen { fail("find: the bar did not open") }
+        first.hideFind()
+        if first.isFindOpen || first.controller.findStart("") != 0 { fail("find: the bar did not close") }
+        // split: a second shell in the directory the first one is in, side by side
+        wc.split(first, vertical: true)
+        guard wc.allPanes.count == 2, wc.allPanes[0] === first else { fail("split: expected two panes") }
+        let second = wc.allPanes[1]
+        if !(second.controller.gridSize.cols < cols && first.controller.gridSize.cols < cols) { fail("split: the panes should each be narrower than the whole window (\(first.controller.gridSize.cols), \(second.controller.gridSize.cols) of \(cols))") }
+        if abs(first.frame.width - second.frame.width) > 24 { fail("split: unequal panes \(first.frame.width) and \(second.frame.width)") }
+        if wc.focusedPane() !== second { fail("split: the new pane should have the keyboard") }
+        second.controller.sendText("pwd -P\n")
+        if !pump(8, until: { (0..<second.controller.gridSize.rows).contains { second.controller.rowText($0).trimmingCharacters(in: .whitespaces) == "/usr" } }) {
+            fail("split: the new shell did not start in /usr: '\((0..<4).map { second.controller.rowText($0) })'")
+        }
+        // nest a split below the second pane, move the keyboard around, close the middle one
+        wc.split(second, vertical: false)
+        if wc.allPanes.count != 3 { fail("split: expected three panes") }
+        let third = wc.allPanes[2]
+        if let dir = ProcessInfo.processInfo.environment["HARF_SELFTEST_PNG_DIR"] {   // pictures for a human, drawn offscreen
+            first.showFind()
+            first.findChanged("needle")
+            _ = pump(0.5) { false }
+            func shot(_ v: NSView, _ name: String) {
+                v.layoutSubtreeIfNeeded()
+                guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+                v.cacheDisplay(in: v.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir + "/" + name))
+            }
+            shot(wc.window.contentView!, "shell-panes-whole.png")
+            shot(first, "shell-pane-first.png")
+            shot(second, "shell-pane-second.png")
+            shot(third.controller.view, "shell-view-third.png")
+            first.hideFind()
+            wc.window.makeFirstResponder(third.controller.view)
+        }
+        wc.focusPane(next: true)
+        if wc.focusedPane() !== first { fail("focus: next from the last pane should wrap to the first") }
+        wc.focusPane(next: false)
+        if wc.focusedPane() !== third { fail("focus: previous from the first pane should wrap to the last") }
+        wc.close(pane: second)
+        if wc.allPanes.count != 2 || wc.allPanes[0] !== first || wc.allPanes[1] !== third { fail("close: the neighbour should take the closed pane's place") }
+        if abs(third.frame.width - first.frame.width) > 24 { fail("close: the remaining panes should share the window (\(first.frame.width), \(third.frame.width))") }
+        wc.close(pane: third)
+        if wc.allPanes.count != 1 || windowClosed { fail("close: one pane should remain and the window stay open") }
+        wc.close(pane: first)
+        if !windowClosed || !wc.closed { fail("close: closing the last pane should close the window") }
+    }
+
     // 5. A failing shell keeps its window and says so.
     guard let bad = TerminalController(argv: ["/bin/sh", "-c", "echo boom; exit 3"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start failing session") }
     let win2 = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)

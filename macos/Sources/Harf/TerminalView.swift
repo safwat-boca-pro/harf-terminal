@@ -113,6 +113,8 @@ final class TerminalController {
     var onExit: (Int32) -> Void = { _ in }
     /// A program asked for a desktop notification (OSC 9, OSC 777): sanitized title (may be empty) and body.
     var onNotify: (String, String) -> Void = { _, _ in }
+    /// The view became the first responder (the window's title follows the focused pane).
+    var onFocus: () -> Void = {}
     /// Where OSC 52 writes go (the self-test points it at a private pasteboard).
     var clipboard: NSPasteboard = .general
     /// May a program change the clipboard right now? Only while the user is looking at this terminal: a program in a window or
@@ -120,7 +122,7 @@ final class TerminalController {
     lazy var clipboardWriteAllowed: () -> Bool = { [weak self] in NSApp.isActive && self?.view.window?.isKeyWindow == true }
 
     /// `argv` nil runs the login shell. `frame` is the view's initial size in points.
-    init?(argv: [String]?, frame: NSSize, scale: CGFloat = 2) {
+    init?(argv: [String]?, frame: NSSize, scale: CGFloat = 2, cwd: String? = nil) {
         self.scale = scale
         view = TerminalView(frame: NSRect(origin: .zero, size: frame))
         target.controller = self
@@ -130,13 +132,15 @@ final class TerminalController {
         defer { cstrs.forEach { free($0) } }
         var cb = HarfTermCallbacks(ctx: nil, wake: wakeCallback, title: titleCallback, bell: bellCallback, exited: exitedCallback,
                                  clipboard_write: clipboardCallback, notify: notifyCallback)
+        let cwdC = cwd.flatMap { strdup($0) }
+        defer { free(cwdC) }
         let retained = Unmanaged.passRetained(target)
         retainedTarget = retained
         cb.ctx = retained.toOpaque()
         term = cstrs.withUnsafeBufferPointer { buf -> OpaquePointer? in
             let argvPtr = UnsafeMutablePointer(mutating: buf.baseAddress!)
             return argvPtr.withMemoryRebound(to: UnsafePointer<CChar>?.self, capacity: buf.count) { p in
-                harf_term_new(UInt16(size.cols), UInt16(size.rows), Settings.shared.scrollbackBytes, argv == nil ? nil : p, &cb)
+                harf_term_new_in(UInt16(size.cols), UInt16(size.rows), Settings.shared.scrollbackBytes, argv == nil ? nil : p, cwdC, &cb)
             }
         }
         guard term != nil else { return nil }
@@ -163,6 +167,36 @@ final class TerminalController {
         if var theme = Settings.shared.theme() { _ = harf_term_set_theme(t, &theme) }
         harf_term_set_scheme(t, Settings.shared.isDark ? 1 : 0)
         view.needsDisplay = true
+    }
+
+    /// The child's working directory, so a new tab or pane can start where this one is. Nil if the system will not say.
+    func currentDirectory() -> String? {
+        guard let t = term else { return nil }
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        guard proc_pidinfo(harf_term_pid(t), PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+        let path = withUnsafePointer(to: &info.pvi_cdir.vip_path) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
+        }
+        return path.isEmpty ? nil : path
+    }
+
+    /// Find: the number of matches for `text` (an empty text ends the find). Nothing is selected until `findStep`.
+    func findStart(_ text: String) -> Int {
+        guard let t = term else { return 0 }
+        let bytes = Array(text.utf8)
+        return bytes.withUnsafeBufferPointer { Int(harf_term_find(t, $0.baseAddress ?? UnsafePointer(bitPattern: 1)!, bytes.count)) }
+    }
+
+    /// Selects the next match toward older output (or newer), wrapping, and scrolls to it: its 1-based number and the total.
+    func findStep(older: Bool) -> (number: Int, total: Int)? {
+        guard let t = term else { return nil }
+        var number = 0, total = 0
+        return harf_term_find_step(t, older ? 1 : 0, &number, &total) == 1 ? (number, total) : nil
+    }
+
+    func findEnd() {
+        if let t = term { harf_term_find_end(t) }
     }
 
     /// An action that works on this terminal. False if it is not one (the app handles it, or it does not exist).
@@ -475,9 +509,15 @@ final class TerminalView: NSView {
     /// A key the configuration binds (Command shortcuts, `send:` remaps) runs its action and never reaches the program. This
     /// runs before the main menu sees the key, so a binding wins over a menu shortcut.
     private func runBinding(_ event: NSEvent) -> Bool {
-        guard let t = Trigger(event), let b = Settings.shared.bindings[t] else { return false }
+        // a text field (the find bar) that has the keyboard keeps its own copy, paste and typing
+        guard !(window?.firstResponder is NSTextView), let t = Trigger(event), let b = Settings.shared.bindings[t] else { return false }
         if controller?.perform(b.action, arg: b.arg) == true { return true }   // copy, paste, clear, send: this terminal's own
         return (NSApp.delegate as? AppDelegate)?.perform(b.action, b.arg, from: controller) ?? false
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        controller?.onFocus()
+        return super.becomeFirstResponder()
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {

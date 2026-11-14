@@ -56,24 +56,44 @@ final class ActionBox: NSObject {
 /// The menus: title, then (item, action). Each item shows the shortcut the key bindings give its action.
 private let menuLayout: [(String, [(String, String)])] = [
     ("Harf", [("Settings…", "open_config"), ("Reload Config", "reload_config"), ("Quit Harf", "quit")]),
-    ("Shell", [("Close", "close"), ("Clear", "clear")]),
-    ("Edit", [("Copy", "copy"), ("Paste", "paste")]),
+    ("Shell", [("New Window", "new_window"), ("New Tab", "new_tab"), ("Close", "close"), ("Split Right", "split_right"), ("Split Down", "split_down"), ("Clear", "clear")]),
+    ("Edit", [("Copy", "copy"), ("Paste", "paste"), ("Find…", "find"), ("Find Next", "find_next"), ("Find Previous", "find_prev")]),
     ("View", [("Larger", "font_larger"), ("Smaller", "font_smaller"), ("Actual Size", "font_reset")]),
+    ("Window", [("Next Tab", "next_tab"), ("Previous Tab", "prev_tab"), ("Next Pane", "focus_next"), ("Previous Pane", "focus_prev")]),
 ]
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    var window: NSWindow!
-    var binding: WindowBinding!
+    private var windows: [WindowController] = []
 
-    /// The terminal that has the keyboard, if one does.
-    func focusedController() -> TerminalController? {
-        (NSApp.keyWindow?.firstResponder as? TerminalView)?.controller
+    /// The terminal that has the keyboard, if one does (the find field of a pane counts as its pane's).
+    func focusedController() -> TerminalController? { focusedPane()?.controller }
+
+    private func controller(of window: NSWindow?) -> WindowController? { windows.first { $0.window === window } }
+
+    func focusedPane() -> TerminalPane? { controller(of: NSApp.keyWindow)?.focusedPane() }
+
+    /// A new window (or a tab of the key window) with a login shell, starting where the focused terminal is.
+    @discardableResult
+    func openWindow(tab: Bool, argv: [String]? = nil, content: NSSize? = nil) -> WindowController? {
+        let key = NSApp.keyWindow
+        let size = content ?? key?.contentView?.bounds.size ?? NSSize(width: 700, height: 420)
+        guard let wc = WindowController(argv: argv, content: size, cwd: focusedController()?.currentDirectory()) else { return nil }
+        wc.onClose = { [weak self] closing in self?.windows.removeAll { $0 === closing } }
+        windows.append(wc)
+        if tab, let key { key.addTabbedWindow(wc.window, ordered: .above) }
+        else if let key { wc.window.cascadeTopLeft(from: NSPoint(x: key.frame.minX + 28, y: key.frame.maxY - 28)) }
+        else { wc.window.center() }
+        wc.window.makeKeyAndOrderFront(nil)
+        wc.window.makeFirstResponder(wc.allPanes.first?.controller.view)
+        return wc
     }
 
     /// Runs an action named by a key binding or a menu item. Returns whether it was one.
     @discardableResult
     func perform(_ action: String, _ arg: [UInt8], from c: TerminalController?) -> Bool {
+        let wc = controller(of: c?.view.window ?? NSApp.keyWindow)
+        let pane = c.flatMap { enclosingPane(of: $0.view) } ?? wc?.focusedPane()
         switch action {
         case "quit": NSApp.terminate(nil)
         case "open_config": Settings.shared.openConfigFile()
@@ -81,8 +101,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "font_larger": Settings.shared.fontLarger()
         case "font_smaller": Settings.shared.fontSmaller()
         case "font_reset": Settings.shared.fontReset()
-        case "close": (c?.view.window ?? NSApp.keyWindow)?.performClose(nil)
-        default: return c?.perform(action, arg: arg) ?? false
+        case "new_window": openWindow(tab: false)
+        case "new_tab": openWindow(tab: true)
+        case "close": if let pane, let wc { wc.close(pane: pane) } else { NSApp.keyWindow?.performClose(nil) }
+        case "split_right": if let pane, let wc { wc.split(pane, vertical: true) }
+        case "split_down": if let pane, let wc { wc.split(pane, vertical: false) }
+        case "focus_next": wc?.focusPane(next: true)
+        case "focus_prev": wc?.focusPane(next: false)
+        case "next_tab": NSApp.keyWindow?.selectNextTab(nil)
+        case "prev_tab": NSApp.keyWindow?.selectPreviousTab(nil)
+        case "goto_tab":
+            let n = Int(String(decoding: arg, as: UTF8.self)) ?? 0
+            if let tabs = NSApp.keyWindow?.tabbedWindows, n >= 1, n <= tabs.count { tabs[n - 1].makeKeyAndOrderFront(nil) }
+        case "find": pane?.showFind()
+        case "find_next", "find_prev":
+            if let pane, pane.isFindOpen { pane.findStep(older: action == "find_next") } else { pane?.showFind() }
+        case "copy", "paste":
+            // the find field has the keyboard: it is the one to copy from and paste into
+            if let text = NSApp.keyWindow?.firstResponder as? NSTextView {
+                if action == "copy" { text.copy(nil) } else { text.paste(nil) }
+            } else if let c { return c.perform(action, arg: arg) } else { return pane?.controller.perform(action, arg: arg) ?? false }
+        default: return c?.perform(action, arg: arg) ?? pane?.controller.perform(action, arg: arg) ?? false
         }
         return true
     }
@@ -116,6 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 menu.addItem(mi)
             }
             top.submenu = menu
+            if title == "Window" { NSApp.windowsMenu = menu }   // AppKit adds the tab and window items to it
         }
         NSApp.mainMenu = main
     }
@@ -131,22 +171,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let p = s.split(separator: "x").compactMap { Double($0) }
             if p.count == 2 { content = NSSize(width: p[0], height: p[1]) }
         }
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
         // Measurement hook (bench/footprint.sh): HARF_CHILD_CMD runs a command first, then the user's shell.
         var argv: [String]? = nil
         if let cmd = ProcessInfo.processInfo.environment["HARF_CHILD_CMD"], !cmd.isEmpty {
             let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
             argv = ["/bin/sh", "-c", "\(cmd); exec \(shell) -l"]
         }
-        guard let c = TerminalController(argv: argv, frame: content, scale: scale) else { fatalError("cannot start the terminal") }
-        traceStep("terminal controller created (core, painter, shell spawned)")
-        window = makeTerminalWindow(content: content, view: c.view)
-        binding = WindowBinding(window: window, controller: c)
-        window.center()
-        traceStep("window built")
-        window.makeKeyAndOrderFront(nil)
-        traceStep("window ordered front")
-        window.makeFirstResponder(c.view)
+        guard openWindow(tab: false, argv: argv, content: content) != nil else { fatalError("cannot start the terminal") }
+        traceStep("window built and shown")
         NSApp.activate()
     }
 

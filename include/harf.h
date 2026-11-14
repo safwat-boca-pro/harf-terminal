@@ -37,6 +37,11 @@ typedef struct {
  * Returns NULL for a zero size or if the child cannot start. */
 HarfTerm *harf_term_new(uint16_t cols, uint16_t rows, size_t scrollback_bytes,
                         const char *const *argv, const HarfTermCallbacks *cb);
+/* Like harf_term_new, starting the child in `cwd` (NULL: a shell starts in $HOME; a directory that cannot be entered means "/"). */
+HarfTerm *harf_term_new_in(uint16_t cols, uint16_t rows, size_t scrollback_bytes, const char *const *argv, const char *cwd,
+                           const HarfTermCallbacks *cb);
+/* The child's process id (ask the system for its working directory with it). */
+int harf_term_pid(HarfTerm *t);
 /* Stops the session (hangs up on the child if it still runs). No callback runs after it returns. */
 void harf_term_free(HarfTerm *t);
 /* Sends bytes to the child as if typed. 0 = ok. */
@@ -98,6 +103,14 @@ int harf_term_selection_event(HarfTerm *t, HarfPainter *p, int phase, int click_
 /* The OSC 8 hyperlink under a pixel of the grid: copies its URI (no NUL) into out and returns its length, or 0 if there is
  * none or it does not fit cap. */
 size_t harf_term_hyperlink_at(HarfTerm *t, HarfPainter *p, double x_px, double y_px, uint8_t *out, size_t cap);
+/* Starts a find for `needle` (UTF-8; ASCII letters match in either case) over the screen and scrollback; returns the number of
+ * matches (an empty needle ends the find). Nothing is selected until harf_term_find_step. */
+size_t harf_term_find(HarfTerm *t, const uint8_t *needle, size_t len);
+/* Selects the next match toward older output (older = 1) or newer (0), wrapping; scrolls to it and highlights it. Returns 1 with
+ * the match's 1-based position `number` of `total`, or 0 if there are no matches. */
+int harf_term_find_step(HarfTerm *t, int older, size_t *number, size_t *total);
+/* Ends the find and clears its highlight. */
+void harf_term_find_end(HarfTerm *t);
 /* Clear screen and scrollback, then type Ctrl+L so a shell redraws its prompt; nothing happens on the alternate screen. */
 void harf_term_clear(HarfTerm *t);
 /* Whether a program may write the clipboard with OSC 52 (1 yes, 0 no; the default is yes). Reading is never allowed. */

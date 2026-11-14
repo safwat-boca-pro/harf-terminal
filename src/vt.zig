@@ -229,6 +229,8 @@ pub const Terminal = struct {
     mouse_encoder: c.GhosttyMouseEncoder,
     mouse_event: c.GhosttyMouseEvent,
     allow_clipboard_write: bool = true,
+    /// The find in progress, if any (Cmd+F); freed with the terminal.
+    search: c.GhosttySearch = null,
     /// The library's own 256-color palette, read once: a theme sets 16 of its colors over it.
     builtin_palette: [256]c.GhosttyColorRgb = undefined,
     /// The system appearance the program is told about (CSI ? 996 n, mode 2031).
@@ -296,6 +298,7 @@ pub const Terminal = struct {
     }
 
     pub fn deinit(self: *Terminal) void {
+        self.findEnd();
         c.ghostty_mouse_event_free(self.mouse_event);
         c.ghostty_mouse_encoder_free(self.mouse_encoder);
         c.ghostty_key_event_free(self.key_event);
@@ -468,6 +471,50 @@ pub const Terminal = struct {
         var n: usize = 0;
         if (c.ghostty_color_scheme_report_encode(if (dark) c.GHOSTTY_COLOR_SCHEME_DARK else c.GHOSTTY_COLOR_SCHEME_LIGHT, out, out.len, &n) != c.GHOSTTY_SUCCESS) return "";
         return out[0..n];
+    }
+
+    /// Starts (or changes) a find for `needle` (ASCII letters match in either case) over the screen and the scrollback, and returns
+    /// the number of matches. An empty needle ends the find. Nothing is selected yet: `findStep` does that.
+    pub fn findSet(self: *Terminal, needle: []const u8) usize {
+        if (needle.len == 0) {
+            self.findEnd();
+            return 0;
+        }
+        if (self.search == null and c.ghostty_search_new(null, &self.search, self.handle) != c.GHOSTTY_SUCCESS) {
+            self.search = null;
+            return 0;
+        }
+        var str: c.GhosttyString = .{ .ptr = needle.ptr, .len = needle.len };
+        if (c.ghostty_search_set(self.search, c.GHOSTTY_SEARCH_OPT_NEEDLE, &str) != c.GHOSTTY_SUCCESS) return 0;
+        _ = c.ghostty_search_run(self.search); // a one-shot, blocking run: the scrollback is bounded, so this is short
+        var total: usize = 0;
+        _ = c.ghostty_search_get(self.search, c.GHOSTTY_SEARCH_DATA_TOTAL_MATCHES, &total);
+        return total;
+    }
+
+    pub const FindPosition = struct { number: usize, total: usize };
+
+    /// Selects the next match toward older output (`older`) or toward newer, wrapping around, scrolls the view to it, and makes
+    /// it the terminal's selection (so it is highlighted, and Cmd+C copies it). Null if there are no matches.
+    pub fn findStep(self: *Terminal, older: bool) ?FindPosition {
+        if (self.search == null) return null;
+        const r = if (older) c.ghostty_search_select_next(self.search) else c.ghostty_search_select_prev(self.search);
+        if (r != c.GHOSTTY_SUCCESS) return null;
+        var match = std.mem.zeroes(c.GhosttySelection);
+        if (c.ghostty_search_get(self.search, c.GHOSTTY_SEARCH_DATA_SELECTED_MATCH, &match) == c.GHOSTTY_SUCCESS) self.setSelection(match);
+        var total: usize = 0;
+        var index: usize = 0;
+        _ = c.ghostty_search_get(self.search, c.GHOSTTY_SEARCH_DATA_TOTAL_MATCHES, &total);
+        _ = c.ghostty_search_get(self.search, c.GHOSTTY_SEARCH_DATA_SELECTED_INDEX, &index);
+        return .{ .number = index + 1, .total = total };
+    }
+
+    /// Ends the find and clears the match selection. Safe to call when none is active.
+    pub fn findEnd(self: *Terminal) void {
+        if (self.search == null) return;
+        c.ghostty_search_free(self.search);
+        self.search = null;
+        self.setSelection(null);
     }
 
     /// Changes whether a program may write the clipboard (config reload).
@@ -1096,6 +1143,35 @@ test "the color scheme is answered to a query and reported on change only to a p
     t.write("\x1b[?2031h");
     try std.testing.expectEqualStrings("\x1b[?997;1n", t.setScheme(true, &buf));
     try std.testing.expectEqualStrings("", t.setScheme(true, &buf)); // no change, no report
+}
+
+test "find: counts matches across scrollback, selects them newest first, wraps, scrolls to them, and ends cleanly" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("needle-one at the very top\r\n");
+    writeLines(t, 100);
+    t.write("needle-two near the bottom\r\n");
+    try std.testing.expect(t.scrollbackRows() > 0);
+    try std.testing.expectEqual(@as(usize, 2), t.findSet("NEEDLE")); // ASCII case does not matter
+    const first = t.findStep(true).?; // the newest match: it is on the live screen
+    try std.testing.expectEqual(@as(usize, 1), first.number);
+    try std.testing.expectEqual(@as(usize, 2), first.total);
+    try std.testing.expect(t.atBottom());
+    const txt = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(txt);
+    try std.testing.expectEqualStrings("needle", txt); // the match itself is the selection
+    const second = t.findStep(true).?; // older: in the scrollback, and the viewport follows it there
+    try std.testing.expectEqual(@as(usize, 2), second.number);
+    try std.testing.expect(!t.atBottom());
+    const wrapped = t.findStep(true).?; // after the oldest, the newest again
+    try std.testing.expectEqual(@as(usize, 1), wrapped.number);
+    const back = t.findStep(false).?; // the other direction
+    try std.testing.expectEqual(@as(usize, 2), back.number);
+    try std.testing.expectEqual(@as(usize, 0), t.findSet("no such text anywhere"));
+    try std.testing.expect(t.findStep(true) == null);
+    t.findEnd();
+    try std.testing.expect(!t.hasSelection());
+    t.findEnd(); // ending twice is fine
 }
 
 test "a new terminal starts with its field defaults" {
