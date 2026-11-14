@@ -14,8 +14,6 @@ final class TerminalPane: NSView {
     let controller: TerminalController
     /// The title the program set; the window shows the focused pane's.
     var title = "Harf"
-    /// A command is running in this pane (the shell's OSC 133 marks).
-    var running = false
     private var findBar: FindBar?
 
     init(controller: TerminalController) {
@@ -207,15 +205,13 @@ final class WindowController: NSObject, NSWindowDelegate {
         c.onTitle = { [weak self, weak pane] title in
             guard let self, let pane else { return }
             pane.title = title
-            if self.focusedPane() === pane { self.setTitle(title) }
+            if self.focusedPane() === pane { self.window.title = title }
         }
         c.onFocus = { [weak self, weak pane] in
-            if let self, let pane { self.setTitle(pane.title) }
+            if let self, let pane { self.window.title = pane.title }
         }
-        c.onCommand = { [weak self, weak pane, weak c] running, exitCode, durationMs in
-            guard let self, let pane, let c else { return }
-            pane.running = running
-            self.setTitle(self.window.title)
+        c.onCommand = { [weak c] running, exitCode, durationMs in
+            guard let c else { return }
             if !running, let n = commandNotification(exitCode: exitCode, durationMs: durationMs) {
                 Notifier.post(title: n.title, body: n.body, focused: c.hasKeyboard())
             }
@@ -225,15 +221,9 @@ final class WindowController: NSObject, NSWindowDelegate {
         c.onExit = { [weak self, weak pane] status in
             guard let self, let pane else { return }
             // A clean exit closes the pane (the last one closes the window). A failure keeps it, so the last output stays readable.
-            if status == 0 { self.close(pane: pane) } else { pane.title = "Harf (exited (\(status)))"; if self.focusedPane() === pane { self.setTitle(pane.title) } }
+            if status == 0 { self.close(pane: pane) } else { pane.title = "Harf (exited (\(status)))"; if self.focusedPane() === pane { self.window.title = pane.title } }
         }
         return pane
-    }
-
-    /// The window's title, and the tab's: the same, with a dot in front while a command runs in any pane of the window.
-    private func setTitle(_ title: String) {
-        window.title = title
-        window.tab.title = (allPanes.contains { $0.running } ? "● " : "") + title
     }
 
     var allPanes: [TerminalPane] { panes(under: window.contentView) }

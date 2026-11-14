@@ -27,9 +27,7 @@ Open a **new** window or tab so the shell starts with the shim. Your own zsh set
 - [ ] Run a few commands, one of them long (`seq 1 200`). Cmd+Up goes to the previous prompt, again to the one before; Cmd+Down comes back. In a tab with no commands yet, nothing happens and nothing is typed at the prompt; in vim the key belongs to vim. Cmd+Shift+A right after a command that printed nothing (`true`) selects nothing.
 - [ ] Cmd+Shift+A selects the output of the last command (highlighted), Cmd+C and paste elsewhere gives exactly that text, without the prompt line.
 - [ ] `echo $ZDOTDIR` prints what you had before (nothing if you never set it). `print $HARF_SHELL_INTEGRATION` prints nothing.
-- [ ] `sleep 5` in one tab, then look at the tab bar from another tab: its title has a dot in front until the command ends. With a single tab the dot flickers on every command, by design.
 - [ ] `sleep 12`, switch to another tab or app: when it ends, a "Command finished" notification says "Done" (`false; sleep 12; false` style failures say "Failed (exit N)"). A short command makes no notification. **The OSC 9 notification did not show on screen earlier; say if this one does not either.**
-- [ ] `exec zsh` does not leave the dot on the tab (the new shell has no marks until you open a new tab, which is a known limit).
 - [ ] `shell_integration = off` in the config, then a new tab: no dot, Cmd+Up does nothing. bash and fish get no marks at all.
 
 ## Paste guard (a sheet before a risky paste; `paste_guard = off` turns it off)
