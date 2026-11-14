@@ -20,6 +20,9 @@ pub const Callbacks = struct {
 
 pub const Rgb = struct { r: u8, g: u8, b: u8 };
 
+/// What the terminal answers to XTVERSION (CSI > q). Keep the number in step with build.zig.zon.
+pub const xtversion = "Harf 0.0.1";
+
 /// Harf's default colors (the slice 2 theme): foreground 0.92, background (0.06, 0.06, 0.07).
 pub const theme_fg: Rgb = .{ .r = 235, .g = 235, .b = 235 };
 pub const theme_bg: Rgb = .{ .r = 15, .g = 15, .b = 18 };
@@ -100,6 +103,20 @@ fn renderHoldTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, held: bool) callc
     if (self.callbacks.render_hold) |f| f(self.callbacks.ctx, held);
 }
 
+/// XTVERSION: the library's own answer would be "libghostty".
+fn xtversionTrampoline(_: c.GhosttyTerminal, _: ?*anyopaque) callconv(.c) c.GhosttyString {
+    return .{ .ptr = xtversion.ptr, .len = xtversion.len };
+}
+
+/// XTWINOPS size queries (CSI 14, 16, 18, 19 t). Unanswered (false) until a resize has told us the cell size in pixels.
+fn sizeTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, out: *c.GhosttySizeReportSize) callconv(.c) bool {
+    const self: *Terminal = @ptrCast(@alignCast(ud.?));
+    if (self.cell_px[0] == 0 or self.cell_px[1] == 0) return false;
+    const sz = self.size();
+    out.* = .{ .rows = sz.rows, .columns = sz.cols, .cell_width = self.cell_px[0], .cell_height = self.cell_px[1] };
+    return true;
+}
+
 fn titleTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(ud.?));
     if (self.callbacks.title_changed) |f| f(self.callbacks.ctx);
@@ -124,6 +141,8 @@ pub const Terminal = struct {
     selection_active: bool = false,
     mouse_encoder: c.GhosttyMouseEncoder,
     mouse_event: c.GhosttyMouseEvent,
+    /// One cell in pixels (width, height) as of the last `resize`; 0 until then.
+    cell_px: [2]u32 = .{ 0, 0 },
     /// Colors as of the last `update`.
     palette: [256]Rgb = @splat(.{ .r = 0, .g = 0, .b = 0 }),
     default_colors: Colors = .{ .fg = theme_fg, .bg = theme_bg, .cursor = null },
@@ -131,8 +150,19 @@ pub const Terminal = struct {
     pub fn init(gpa: std.mem.Allocator, opts: Options) Error!*Terminal {
         const self = try gpa.create(Terminal);
         errdefer gpa.destroy(self);
-        self.gpa = gpa;
-        self.callbacks = opts.callbacks;
+        // `create` applies no field defaults; this literal does, and the handles below are set one by one.
+        self.* = .{
+            .gpa = gpa,
+            .callbacks = opts.callbacks,
+            .handle = undefined,
+            .render_state = undefined,
+            .row_iter = undefined,
+            .row_cells = undefined,
+            .key_encoder = undefined,
+            .key_event = undefined,
+            .mouse_encoder = undefined,
+            .mouse_event = undefined,
+        };
         try check(c.ghostty_terminal_new(null, &self.handle, opts.cols, opts.rows));
         errdefer c.ghostty_terminal_free(self.handle);
         // Callback options take the function pointer (or the userdata pointer) itself as the value.
@@ -141,6 +171,8 @@ pub const Terminal = struct {
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_BELL, @as(?*const anyopaque, @ptrCast(&bellTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, @as(?*const anyopaque, @ptrCast(&titleTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_RENDER_HOLD, @as(?*const anyopaque, @ptrCast(&renderHoldTrampoline))));
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_XTVERSION, @as(?*const anyopaque, @ptrCast(&xtversionTrampoline))));
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_SIZE, @as(?*const anyopaque, @ptrCast(&sizeTrampoline))));
         var fg: c.GhosttyColorRgb = .{ .r = opts.default_fg.r, .g = opts.default_fg.g, .b = opts.default_fg.b };
         var bg: c.GhosttyColorRgb = .{ .r = opts.default_bg.r, .g = opts.default_bg.g, .b = opts.default_bg.b };
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &fg));
@@ -557,9 +589,10 @@ pub const Terminal = struct {
         return .{ .cols = cols, .rows = rows };
     }
 
-    /// Changes the grid size (the library reflows). The pixel size of a cell is informational
-    /// (size reports sent to the child); pass 0 if unknown.
+    /// Changes the grid size (the library reflows). The pixel size of a cell is what size reports (XTWINOPS)
+    /// tell the child; pass 0 if unknown and those queries go unanswered.
     pub fn resize(self: *Terminal, cols: u16, rows: u16, cell_w_px: u32, cell_h_px: u32) void {
+        self.cell_px = .{ cell_w_px, cell_h_px };
         _ = c.ghostty_terminal_resize(self.handle, cols, rows, cell_w_px, cell_h_px);
     }
 
@@ -805,6 +838,43 @@ test "cursor position report goes to write_pty" {
     defer t2.deinit();
     t2.write("ab\x1b[6n");
     try std.testing.expectEqualStrings("\x1b[1;3R", spy2.replyText());
+}
+
+test "a new terminal starts with its field defaults" {
+    // gpa.create gives memory with no defaults applied; init must set them (Debug fills it with 0xAA).
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    try std.testing.expectEqual(@as(?@TypeOf(t.sel_anchor.?), null), t.sel_anchor);
+    try std.testing.expect(!t.sel_dragged);
+    try std.testing.expect(!t.selection_active);
+    try std.testing.expectEqual(@as(u8, 1), t.sel_clicks);
+    try std.testing.expectEqual([2]u32{ 0, 0 }, t.cell_px);
+    try std.testing.expectEqual(theme_bg, t.default_colors.bg);
+}
+
+test "XTVERSION names Harf, not the library" {
+    var spy: Spy = .{};
+    const t = try Terminal.init(std.testing.allocator, .{ .callbacks = spy.callbacks() });
+    defer t.deinit();
+    t.write("\x1b[>0q");
+    try std.testing.expectEqualStrings("\x1bP>|" ++ xtversion ++ "\x1b\\", spy.replyText());
+}
+
+test "XTWINOPS size queries are answered once the cell size is known" {
+    var spy: Spy = .{};
+    const t = try Terminal.init(std.testing.allocator, .{ .callbacks = spy.callbacks() });
+    defer t.deinit();
+    t.write("\x1b[16t"); // the cell size is not known yet: no answer, as before
+    try std.testing.expectEqual(@as(usize, 0), spy.reply_len);
+    t.resize(100, 30, 17, 33);
+    t.write("\x1b[16t"); // one cell, in pixels: CSI 6 ; height ; width t
+    try std.testing.expectEqualStrings("\x1b[6;33;17t", spy.replyText());
+    spy.reply_len = 0;
+    t.write("\x1b[14t"); // the text area, in pixels: CSI 4 ; height ; width t
+    try std.testing.expectEqualStrings("\x1b[4;990;1700t", spy.replyText());
+    spy.reply_len = 0;
+    t.write("\x1b[18t"); // the text area, in cells: CSI 8 ; rows ; columns t
+    try std.testing.expectEqualStrings("\x1b[8;30;100t", spy.replyText());
 }
 
 fn writeLines(t: *Terminal, n: usize) void {

@@ -45,8 +45,8 @@ without color until the proxy dropped it. A real Harf window never sets `NO_COLO
 
 **Gaps found** (none stopped it):
 
-1. **XTVERSION says `libghostty`**, not Harf. A program that special-cases terminals by name will treat Harf as Ghostty.
-2. **`CSI 16 t` (cell size in pixels) is never answered.** Claude asks at startup and again after every resize.
+1. **XTVERSION says `libghostty`**, not Harf. A program that special-cases terminals by name will treat Harf as Ghostty. (Fixed, below.)
+2. **`CSI 16 t` (cell size in pixels) is never answered.** Claude asks at startup and again after every resize. (Fixed, below.)
 3. **Kitty graphics probe** (`ESC _ G ... a=q`) and **`OSC 7501 ; ?`** are not answered (no graphics support; the second is
    unknown to me). Claude carried on within a second.
 4. **Mode 2031** (color-scheme change reports) is switched on by Claude and never answered; Harf's theme is fixed anyway.
@@ -83,9 +83,23 @@ started Codex's managed app-server daemon and its updater (they run whenever Cod
 - Key release events. Codex asks for event types (flag 2); the harness sends presses only, and I did not check that the Swift
   shell forwards releases.
 
+## Fixes after the spike (same day)
+
+- **XTVERSION** now answers `Harf 0.0.1` (`GHOSTTY_TERMINAL_OPT_XTVERSION`, `vt.xtversion`). The number is kept in step with
+  `build.zig.zon` by hand. Log of the next Claude Code run: `OUT CSI > 0 q`, `IN DCS > | Harf 0.0.1 ST`.
+- **XTWINOPS size queries** (`CSI 14, 16, 18, 19 t`) are answered (`GHOSTTY_TERMINAL_OPT_SIZE`). The cell size in pixels is what
+  `harf_term_resize` last passed, which the view does at its first layout, so a query before that goes unanswered as before.
+  Claude Code's `CSI 16 t` at startup and after each of four resizes now gets `CSI 6;33;17 t` (17 x 33 px: Menlo 14 pt at 2x);
+  it still starts, draws and exits with status 0. The harness now makes that first-layout resize too.
+- **A latent bug found on the way:** `Terminal.init` allocated with `gpa.create`, which applies no field defaults, so
+  `sel_anchor`, `sel_dragged`, `sel_clicks`, `selection_active`, `palette` and `default_colors` started as uninitialized memory.
+  The old fields were always written before they were read, so nothing showed; the new `cell_px` read 0xAAAAAAAA and made the
+  library send `CSI 6;2863311530;2863311530 t`. `init` now starts from a struct literal. Test: "a new terminal starts with its
+  field defaults".
+- Still unanswered: the kitty graphics probe, `OSC 7501 ; ?`, mode 2031. Claude Code does not need them.
+
 ## Next
 
 1. Owner, by hand in the real app: run `claude` and `codex` for a real answer. Watch for flicker, tearing, a stuck cursor, wrong
    widths, a scrolled-off frame, selecting and copying out of the alternate screen. For Codex, choose the gate options yourself.
-2. Small, safe to do next: answer `CSI 16 t`; set XTVERSION to `Harf <version>` (check whether libghostty-vt allows it).
-3. Then the brief's remaining Phase 5 list: OSC 8 click, OSC 52 with a permission, OSC 9/777 notifications, kitty release events.
+2. The brief's remaining Phase 5 list: OSC 8 click, OSC 52 with a permission, OSC 9/777 notifications, kitty release events.

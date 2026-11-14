@@ -116,6 +116,7 @@ test "agent spike: run the program in HARF_AGENT_CMD through the proxy and follo
     var rows: u16 = 32;
     const s = try Session.start(gpa, .{ .cols = cols, .rows = rows, .argv = argv.items });
     defer s.deinit();
+    try s.resize(cols, rows, 17, 33); // what the app does at its first layout: Menlo 14 pt at 2x is 17 x 33 px
 
     var steps = std.mem.splitScalar(u8, env("HARF_AGENT_SCRIPT") orelse "wait:8000;dump", ';');
     var dumps: usize = 0;
@@ -161,7 +162,7 @@ test "agent spike: run the program in HARF_AGENT_CMD through the proxy and follo
             var it = std.mem.splitScalar(u8, arg, 'x');
             cols = try std.fmt.parseInt(u16, it.next() orelse "100", 10);
             rows = try std.fmt.parseInt(u16, it.next() orelse "32", 10);
-            try s.resize(cols, rows, 8, 16);
+            try s.resize(cols, rows, 17, 33);
         } else {
             std.debug.print("unknown step '{s}'\n", .{step});
         }
