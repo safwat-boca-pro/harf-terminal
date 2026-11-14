@@ -73,8 +73,11 @@ func pasteSummary(of text: String, risk: Int32) -> PasteSummary {
         let head = String(String.UnicodeScalarView(scalars.prefix(80)))
         return scalars.count > 80 ? head + "…" : head
     }
-    let rows = text.prefix(1000).split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r" || $0 == "\r\n" })
+    let head = text.prefix(1000)
+    let rows = head.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r" || $0 == "\r\n" })
     var preview = rows.prefix(5).map(shown)
+    // the last row read may go on past what was read: say so, or a long line looks like it ends where the reading stopped
+    if head.endIndex < text.endIndex, rows.count <= 5, let last = preview.indices.last, !preview[last].hasSuffix("…") { preview[last] += "…" }
     if lineCount > min(5, rows.count) { preview.append("…") }
     return PasteSummary(title: title, detail: (reasons + [""] + preview).joined(separator: "\n"))
 }

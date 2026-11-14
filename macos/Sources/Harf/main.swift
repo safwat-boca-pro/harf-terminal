@@ -640,6 +640,11 @@ func selfTest() -> Never {
         if pasteSummary(of: "a\u{2028}b\u{0B}c", risk: 1).title.contains("lines") { fail("paste guard: U+2028 and VT are not line breaks for the program") }
         if pasteSummary(of: "ls\n", risk: 1).title.contains("lines") { fail("paste guard: 'ls' plus its line break is one line") }
         if !pasteSummary(of: "a\r\nb\rc\nd", risk: 1).title.contains("4 lines") { fail("paste guard: CRLF, CR and LF are one break each") }
+        // A row the preview had to cut (here by the first-1000-characters limit, not the 80-column one) must say it goes on: four long lines,
+        // then a fifth whose first 36 characters are all that was read.
+        let cutText = (0..<4).map { _ in String(repeating: "a", count: 240) }.joined(separator: "\n") + "\n" + String(repeating: "b", count: 500)
+        let cutRows = pasteSummary(of: cutText, risk: 1).detail.split(separator: "\n", omittingEmptySubsequences: false).filter { $0.hasPrefix("a") || $0.hasPrefix("b") }
+        if cutRows.last.map({ !$0.hasSuffix("…") }) ?? true { fail("paste guard: a row cut by the preview's read limit shows no ellipsis ('\(cutRows.last ?? "")')") }
         // A 10 MB paste on one line is the very large case the guard exists for: the sheet must not wait on the whole text.
         let huge = String(repeating: "abcdefghij", count: 1_000_000)
         let began = Date()
