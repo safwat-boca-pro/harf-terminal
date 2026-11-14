@@ -884,6 +884,11 @@ export fn harf_config_notifications(cfg: *config.Config) c_int {
     return @intFromEnum(cfg.notifications);
 }
 
+/// The `editor` template (NUL-terminated, empty when none is set).
+export fn harf_config_editor(cfg: *config.Config) [*:0]const u8 {
+    return cfg.editor.ptr;
+}
+
 /// 1 on, 0 off.
 export fn harf_config_paste_guard(cfg: *config.Config) c_int {
     return @intFromBool(cfg.paste_guard);

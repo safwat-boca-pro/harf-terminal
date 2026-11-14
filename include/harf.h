@@ -179,6 +179,7 @@ int harf_config_clipboard_write(HarfConfig *cfg); /* 1 allow, 0 deny */
 int harf_config_notifications(HarfConfig *cfg);   /* 0 unfocused, 1 always, 2 off */
 int harf_config_shell_integration(HarfConfig *cfg); /* 0 auto, 1 off */
 int harf_config_paste_guard(HarfConfig *cfg);       /* 1 on, 0 off */
+const char *harf_config_editor(HarfConfig *cfg);    /* how Cmd-click opens a file; empty = the default text editor */
 /* The directory holding the zsh shim (`zsh/.zshenv`): a login zsh started afterwards emits OSC 133 marks. NULL turns it off. */
 void harf_set_shell_integration_dir(const char *dir);
 /* The theme for a dark (1) or light (0) system appearance. */

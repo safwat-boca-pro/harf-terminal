@@ -125,6 +125,8 @@ pub const Config = struct {
     shell_integration: ShellIntegration = .auto,
     /// Confirm a paste that would run lines in a program without bracketed paste, or that is very large.
     paste_guard: bool = true,
+    /// How Cmd-click on a file path opens it: a URL template, a command template, or `app:<path>`; empty is the default text editor.
+    editor: [:0]const u8 = "",
     /// The theme for a dark and for a light system appearance (index 0 and 1), with the file's own colors applied on top.
     themes: [2]Theme = .{ builtin_dark, builtin_dark },
     theme_names: [2][]const u8 = .{ "dark", "dark" },
@@ -171,6 +173,9 @@ pub const Config = struct {
             if (std.mem.eql(u8, value, "allow")) self.clipboard_write = true else if (std.mem.eql(u8, value, "deny")) self.clipboard_write = false else try self.warn("", line, "clipboard_write is allow or deny, not '{s}'", .{value});
         } else if (std.mem.eql(u8, key, "notifications")) {
             self.notifications = std.meta.stringToEnum(Notifications, value) orelse return self.warn("", line, "notifications is unfocused, always or off, not '{s}'", .{value});
+        } else if (std.mem.eql(u8, key, "editor")) {
+            if (value.len > 256) return self.warn("", line, "editor is at most 256 bytes", .{});
+            self.editor = try std.mem.Allocator.dupeSentinel(a, u8, value, 0);
         } else if (std.mem.eql(u8, key, "paste_guard")) {
             if (std.mem.eql(u8, value, "on")) self.paste_guard = true else if (std.mem.eql(u8, value, "off")) self.paste_guard = false else try self.warn("", line, "paste_guard is on or off, not '{s}'", .{value});
         } else if (std.mem.eql(u8, key, "shell_integration")) {
@@ -508,6 +513,13 @@ pub const template =
     \\# is over 100,000 bytes; off never asks.
     \\# paste_guard = on
     \\
+    \\# Editor for Cmd-click on a file name in the output (`path`, `path:line` or `path:line:col`). {path}, {line} and {col} are filled
+    \\# in (line and col are 1 when the text has none). A URL template opens through the system; a command runs without a shell;
+    \\# app:<path to an .app> opens the file in that app, with no line number. With none set the file opens in the default text editor.
+    \\# editor = vscode://file{path}:{line}:{col}
+    \\# editor = code --goto {path}:{line}:{col}
+    \\# editor = app:/Applications/Sublime Text.app
+    \\
     \\# Key bindings: keybind = trigger = action. Triggers are modifiers (cmd, ctrl, option, shift) and a key, joined with +:
     \\# cmd+t, option+left, cmd+shift+d, f5, cmd+]. Your lines replace the default for the same trigger; `unbind` removes it.
     \\# Actions: new_window new_tab close split_right split_down focus_next focus_prev next_tab prev_tab goto_tab:N clear clear_view prev_prompt next_prompt select_output find
@@ -605,8 +617,10 @@ test "settings" {
         \\notifications = always
         \\shell_integration = off
         \\paste_guard = off
+        \\editor = vscode://file{path}:{line}:{col}
     );
     defer c.deinit();
+    try testing.expectEqualStrings("vscode://file{path}:{line}:{col}", c.editor);
     try testing.expectEqual(ShellIntegration.off, c.shell_integration);
     try testing.expect(!c.paste_guard);
     try testing.expectEqual(@as(usize, 0), c.warnings.items.len);
@@ -621,6 +635,17 @@ test "settings" {
     try testing.expect(d.clipboard_write);
     try testing.expectEqual(Notifications.unfocused, d.notifications);
     try testing.expect(d.paste_guard);
+    try testing.expectEqualStrings("", d.editor);
+}
+
+test "an editor template longer than 256 bytes is a warning and changes nothing" {
+    var text: [300]u8 = undefined;
+    @memcpy(text[0..9], "editor = ");
+    @memset(text[9..], 'x');
+    const c = try parseOwned(&text);
+    defer c.deinit();
+    try testing.expectEqualStrings("", c.editor);
+    try testing.expectEqual(@as(usize, 1), c.warnings.items.len);
 }
 
 test "a bad line is a warning with its line number, and the rest still applies" {
@@ -761,7 +786,7 @@ test "every example line of the template is valid once uncommented" {
     while (lines.next()) |l| {
         if (!std.mem.startsWith(u8, l, "# ")) continue;
         const rest = l[2..];
-        for ([_][]const u8{ "font_family = ", "font_size = ", "theme = ", "foreground = ", "background = ", "cursor_color = ", "scrollback_bytes = ", "clipboard_write = ", "notifications = ", "shell_integration = ", "paste_guard = ", "keybind = " }) |k| {
+        for ([_][]const u8{ "font_family = ", "font_size = ", "theme = ", "foreground = ", "background = ", "cursor_color = ", "scrollback_bytes = ", "clipboard_write = ", "notifications = ", "shell_integration = ", "paste_guard = ", "editor = ", "keybind = " }) |k| {
             if (std.mem.startsWith(u8, rest, k)) {
                 try live.appendSlice(testing.allocator, rest);
                 try live.append(testing.allocator, '\n');

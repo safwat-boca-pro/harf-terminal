@@ -60,6 +60,8 @@ final class Settings {
     private(set) var notifications: Int32 = 0
     /// Confirm a paste that would run lines in a program without bracketed paste, or that is very large.
     private(set) var pasteGuard = true
+    /// How Cmd-click on a file path opens it (see `editorLaunch`); empty means the default text editor.
+    private(set) var editor = ""
     private(set) var bindings: [Trigger: Binding] = [:]
     private(set) var warnings: [String] = []
 
@@ -89,6 +91,7 @@ final class Settings {
         clipboardWrite = harf_config_clipboard_write(cfg) != 0
         notifications = harf_config_notifications(cfg)
         pasteGuard = harf_config_paste_guard(cfg) != 0
+        editor = String(cString: harf_config_editor(cfg))
         // The zsh shim (OSC 133 marks) ships in the app bundle; shells started after this get it unless the config says off.
         let shim = Bundle.main.resourceURL?.appendingPathComponent("shell-integration").path
         if harf_config_shell_integration(cfg) == 0, let shim, FileManager.default.fileExists(atPath: shim + "/zsh/.zshenv") {

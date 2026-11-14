@@ -530,6 +530,36 @@ final class TerminalController {
         return url
     }
 
+    /// The plain http or https URL under `p` (view points), if there is one: text a program printed without OSC 8.
+    func urlTarget(at p: NSPoint) -> URL? {
+        guard let t = term, let painter else { return nil }
+        var buf = [UInt8](repeating: 0, count: 2048)
+        let n = harf_term_url_at(t, painter, Double((p.x - inset) * scale), Double((p.y - inset) * scale), &buf, buf.count)
+        guard n > 0, let url = URL(string: String(decoding: buf[0..<n], as: UTF8.self)),
+              let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) else { return nil }
+        return url
+    }
+
+    /// The file under `p` (view points): a path as printed (`~/x`, absolute, or relative to this pane's directory), with its `:line`
+    /// and `:col`. Nil unless it exists and is a regular file: the text came from a program, so it is checked, not trusted.
+    func pathTarget(at p: NSPoint) -> PathTarget? {
+        guard let t = term, let painter else { return nil }
+        var buf = [UInt8](repeating: 0, count: 1024)
+        var line: UInt32 = 0, col: UInt32 = 0
+        let n = harf_term_path_at(t, painter, Double((p.x - inset) * scale), Double((p.y - inset) * scale), &buf, buf.count, &line, &col)
+        guard n > 0 else { return nil }
+        var path = (String(decoding: buf[0..<n], as: UTF8.self) as NSString).expandingTildeInPath
+        if !path.hasPrefix("/") { path = (currentDirectory() ?? NSHomeDirectory()) + "/" + path }
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else { return nil }
+        return PathTarget(url: url, line: Int(line), col: Int(col))
+    }
+
+    /// What a Command-click on a path or URL does; the self-test replaces them.
+    lazy var openPath: (PathTarget) -> Void = { launchEditor($0) }
+    lazy var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
+
     fileprivate func exitedOnMain(_ status: Int32) {
         exitStatus = status
         onExit(status)
@@ -658,9 +688,21 @@ final class TerminalView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         // Command-click opens an OSC 8 link, even while a program tracks the mouse
-        if event.modifierFlags.contains(.command), let url = controller?.hyperlink(at: convert(event.locationInWindow, from: nil)) {
-            NSWorkspace.shared.open(url)
-            return
+        // (then a plain http(s) URL a program printed, then a file path, which opens in the editor)
+        let at = convert(event.locationInWindow, from: nil)
+        if event.modifierFlags.contains(.command) {
+            if let url = controller?.hyperlink(at: at) {
+                NSWorkspace.shared.open(url)
+                return
+            }
+            if let url = controller?.urlTarget(at: at) {
+                controller?.openURL(url)
+                return
+            }
+            if let target = controller?.pathTarget(at: at) {
+                controller?.openPath(target)
+                return
+            }
         }
         selecting = !sendMouse(0, 1, event)
         if selecting { selectionEvent(0, event) }

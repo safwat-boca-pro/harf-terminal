@@ -653,6 +653,59 @@ func selfTest() -> Never {
         if took > 0.25 || !hs.title.contains("MB") { fail("paste guard: summarising 10 MB took \(took) s ('\(hs.title)')") }
     }
 
+    // 3c. Command-click on a path or a plain URL. The editor templates (URL, command run without a shell, app, default), a path under the
+    // pointer (resolved against the pane's directory, and the file must exist), a plain http(s) URL, and the order: OSC 8, URL, path.
+    do {
+        let url12 = URL(string: "vscode://file/tmp/my%20dir/a%20b.swift:12:5")!
+        if editorLaunch(template: "vscode://file{path}:{line}:{col}", path: "/tmp/my dir/a b.swift", line: 12, col: 5) != .url(url12) { fail("editor: the URL template gave \(editorLaunch(template: "vscode://file{path}:{line}:{col}", path: "/tmp/my dir/a b.swift", line: 12, col: 5))") }
+        let hostile = "/tmp/x; rm -rf ~ $(id) 'q'.txt"
+        if editorLaunch(template: "code --goto {path}:{line}:{col}", path: hostile, line: 0, col: 0) != .command(["code", "--goto", hostile + ":1:1"]) { fail("editor: a hostile file name must stay one argument") }
+        if editorLaunch(template: "", path: "/tmp/a", line: 1, col: 1) != .textEditor { fail("editor: no template means the default text editor") }
+        if editorLaunch(template: "app:/Applications/Sublime Text.app", path: "/tmp/a", line: 3, col: 1) != .app(URL(fileURLWithPath: "/Applications/Sublime Text.app")) { fail("editor: an app: template") }
+
+        let dir = NSTemporaryDirectory() + "harf-selftest-pathclick-\(getpid())"
+        try? FileManager.default.createDirectory(atPath: dir + "/sub", withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try? "x\n".write(toFile: dir + "/b.txt", atomically: false, encoding: .utf8)
+        let script = "printf 'see b.txt:4:2 ok /nope.txt:1 sub https://example.com/a. ftp://x.org/f\\n'; sleep 5"
+        guard let pc = TerminalController(argv: ["/bin/sh", "-c", script], frame: NSSize(width: 700, height: 420), cwd: dir) else { fail("cannot start the path-click session") }
+        if !pump(5, until: { pc.rowText(0).contains("ftp://") }) { fail("path click: row 0 is '\(pc.rowText(0))'") }
+        let cell = pc.cellSizePt
+        func at(_ col: Double) -> NSPoint { NSPoint(x: pc.insetPt + cell.width * (col + 0.5), y: pc.insetPt + cell.height * 0.5) }   // view coordinates (y-down)
+        guard let target = pc.pathTarget(at: at(5)) else { fail("path click: a relative file in the pane's directory was not found") }
+        if target.url.lastPathComponent != "b.txt" || target.line != 4 || target.col != 2 || !FileManager.default.fileExists(atPath: target.url.path) { fail("path click: the target is \(target)") }
+        if pc.pathTarget(at: at(20)) != nil { fail("path click: a file that does not exist was offered") }
+        if pc.pathTarget(at: at(30)) != nil { fail("path click: a directory was offered") }
+        if pc.pathTarget(at: at(3)) != nil { fail("path click: a space gave a path") }
+        if pc.urlTarget(at: at(40))?.absoluteString != "https://example.com/a" { fail("url click: got \(String(describing: pc.urlTarget(at: at(40))))") }
+        if pc.urlTarget(at: at(60)) != nil || pc.urlTarget(at: at(5)) != nil { fail("url click: ftp or a path gave a URL") }
+
+        // through the view: Command-click routes, a plain click does not
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
+        win.contentView = pc.view
+        func click(_ col: Double, _ flags: NSEvent.ModifierFlags) {
+            let p = NSPoint(x: pc.insetPt + cell.width * (col + 0.5), y: 420 - (pc.insetPt + cell.height * 0.5))
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: flags, timestamp: 0, windowNumber: win.windowNumber, context: nil,
+                                                 eventNumber: 0, clickCount: 1, pressure: 1) else { fail("cannot make a mouse event") }
+                if type == .leftMouseDown { pc.view.mouseDown(with: e) } else { pc.view.mouseUp(with: e) }
+            }
+        }
+        var paths: [PathTarget] = []
+        var urls: [URL] = []
+        pc.openPath = { paths.append($0) }
+        pc.openURL = { urls.append($0) }
+        click(5, [])
+        if !paths.isEmpty { fail("path click: a plain click opened a path") }
+        click(5, .command)
+        if paths.count != 1 || paths[0].line != 4 || !urls.isEmpty { fail("path click: a Command-click gave paths \(paths), urls \(urls)") }
+        click(40, .command)
+        if urls.map(\.absoluteString) != ["https://example.com/a"] || paths.count != 1 { fail("url click: a Command-click gave paths \(paths), urls \(urls)") }
+        click(60, .command)
+        if urls.count != 1 || paths.count != 1 { fail("a Command-click on ftp:// opened something") }
+        pc.close()
+    }
+
     // 4. Title and bell reach the window; a clean exit closes it.
     guard let wc1 = WindowController(argv: ["/bin/sh", "-c", "printf '\\033]0;T1\\007\\007'"], content: NSSize(width: 700, height: 420), cwd: nil) else { fail("cannot start title session") }
     var bells = 0
