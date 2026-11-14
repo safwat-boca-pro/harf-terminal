@@ -264,3 +264,53 @@ test "empty and blank rows" {
     try std.testing.expectEqual(@as(u16, 0), rl.n_cells);
     try std.testing.expectEqual(@as(f32, 20), rl.span(2, test_cell_w).x0);
 }
+
+test "visual order agrees with UAX #9" {
+    const samples = [_][]const u8{
+        "مرحبا world 123",
+        "السلام عليكم ورحمة الله",
+        "مُحَمَّد",
+        "لا إله إلا الله",
+        "ls ملف.txt",
+        "\"النتيجة: ١٢٣ (ناجح)\"",
+        "echo \"اختبار\" | wc -c",
+        "│ مرحبا    │",
+    };
+    const alloc = std.testing.allocator;
+    for (samples) |str| {
+        var row: TestRow = .{};
+        try row.init(str);
+        var ncp: usize = 0;
+        for (row.cells[0..row.n]) |c| ncp += c.cps.len;
+        const facts = rowfacts.analyze(row.cps[0..ncp], .auto);
+        var s = try shapeStr(str, facts.rtl_base);
+        defer freeShaped(&s);
+
+        var levels: [256]u8 = undefined;
+        _ = try bidi.resolve(alloc, row.cps[0..ncp], if (facts.rtl_base) .rtl else .ltr, levels[0..ncp]);
+        var cell_levels: [64]u8 = undefined;
+        var off: usize = 0;
+        for (row.cells[0..row.n], 0..) |c, i| {
+            cell_levels[i] = levels[off];
+            off += c.cps.len;
+        }
+        var want: [64]usize = undefined;
+        bidi.reorder(cell_levels[0..row.n], want[0..row.n]);
+
+        var got: [64]u16 = undefined;
+        for (0..row.n) |i| got[i] = @intCast(i);
+        const Ctx = struct {
+            rl: *const RowLayout,
+            fn less(c: @This(), a: u16, b: u16) bool {
+                return c.rl.span(a, test_cell_w).x0 < c.rl.span(b, test_cell_w).x0;
+            }
+        };
+        std.mem.sort(u16, got[0..row.n], Ctx{ .rl = &s.rl }, Ctx.less);
+        for (0..row.n) |i| {
+            if (want[i] != got[i]) {
+                std.debug.print("order differs for '{s}' (rtl base {}) at {d}\n want {any}\n  got {any}\n", .{ str, facts.rtl_base, i, want[0..row.n], got[0..row.n] });
+                return error.OrderDiffers;
+            }
+        }
+    }
+}
