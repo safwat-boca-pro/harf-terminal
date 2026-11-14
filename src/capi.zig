@@ -108,14 +108,14 @@ export fn harf_term_row_text(t: *HarfTerm, row: u16, out: [*]u8, cap: usize) usi
 /// text AppKit produced (may be empty), `action` 0 press, 1 release, 2 repeat. Returns 1 if the key was
 /// handled (and its bytes queued), 0 if it is a text key that the caller should send with
 /// harf_term_input, -1 on error.
-export fn harf_term_key(t: *HarfTerm, keycode: u16, mods: u32, utf8: ?[*]const u8, len: usize, action: c_int) c_int {
+export fn harf_term_key(t: *HarfTerm, keycode: u16, mods: u32, utf8: ?[*]const u8, len: usize, unshifted: u32, action: c_int) c_int {
     const act: vt.KeyAction = switch (action) {
         1 => .release,
         2 => .repeat,
         else => .press,
     };
     const text: []const u8 = if (utf8) |p| p[0..len] else "";
-    const handled = t.session.key(keycode, mods, text, act) catch return -1;
+    const handled = t.session.key(keycode, mods, text, std.math.cast(u21, unshifted) orelse 0, act) catch return -1;
     return if (handled) 1 else 0;
 }
 
@@ -198,9 +198,9 @@ test "harf_term_key and harf_term_paste" {
     const argv = [_:null]?[*:0]const u8{ "/bin/cat", null };
     const t = harf_term_new(80, 24, 1 << 20, &argv, null) orelse return error.TermNotCreated;
     defer harf_term_free(t);
-    try std.testing.expectEqual(@as(c_int, 1), harf_term_key(t, 126, 0, null, 0, 0)); // up arrow
-    try std.testing.expectEqual(@as(c_int, 1), harf_term_key(t, 56, 1, null, 0, 0)); // shift alone
-    try std.testing.expectEqual(@as(c_int, 0), harf_term_key(t, 200, 0, "x", 1, 0)); // unknown key: text path
+    try std.testing.expectEqual(@as(c_int, 1), harf_term_key(t, 126, 0, null, 0, 0, 0)); // up arrow
+    try std.testing.expectEqual(@as(c_int, 1), harf_term_key(t, 56, 1, null, 0, 0, 0)); // shift alone
+    try std.testing.expectEqual(@as(c_int, 0), harf_term_key(t, 200, 0, "x", 1, 0, 0)); // unknown key: text path
     try std.testing.expectEqual(@as(c_int, 0), harf_term_paste(t, "hi", 2));
 }
 

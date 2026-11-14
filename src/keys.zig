@@ -160,6 +160,44 @@ pub fn editorBytes(key: c.GhosttyKey, mods: u32) ?[]const u8 {
     };
 }
 
+/// The classic control code for Control plus the character `cp` (legacy keyboard mode), or null if
+/// there is none. Digits 2 to 8 follow xterm.
+pub fn controlByte(cp: u21) ?u8 {
+    return switch (cp) {
+        'a'...'z' => @intCast(cp - 'a' + 1),
+        'A'...'Z' => @intCast(cp - 'A' + 1),
+        '@', ' ', '2' => 0,
+        '[', '3' => 0x1b,
+        '\\', '4' => 0x1c,
+        ']', '5' => 0x1d,
+        '^', '6' => 0x1e,
+        '_', '-', '/', '7' => 0x1f,
+        '?', '8' => 0x7f,
+        else => null,
+    };
+}
+
+fn printableAscii(cp: u21) bool {
+    return cp >= 0x20 and cp < 0x7f;
+}
+
+/// The character a Control combination is named by: what the layout types for the key (so AZERTY,
+/// Dvorak and Colemak work), and the physical US key when the layout has no ASCII letter there
+/// (an Arabic layout), so Ctrl+C stays Ctrl+C. `utf8` is the layout's text with Control removed;
+/// `unshifted` is the layout's character with no modifiers (0 if unknown).
+pub fn layoutCodepoint(utf8: []const u8, unshifted: u21, key: c.GhosttyKey) u21 {
+    if (utf8.len > 0) {
+        const n = std.unicode.utf8ByteSequenceLength(utf8[0]) catch 0;
+        if (n > 0 and n <= utf8.len) {
+            if (std.unicode.utf8Decode(utf8[0..n])) |cp| {
+                if (printableAscii(cp)) return cp;
+            } else |_| {}
+        }
+    }
+    if (printableAscii(unshifted)) return unshifted;
+    return unshiftedCodepoint(key);
+}
+
 test "known and unknown keycodes" {
     try std.testing.expectEqual(@as(?c.GhosttyKey, c.GHOSTTY_KEY_ARROW_UP), fromMac(126));
     try std.testing.expectEqual(@as(?c.GhosttyKey, c.GHOSTTY_KEY_ENTER), fromMac(36));
@@ -207,4 +245,31 @@ test "editor keys: Option and Command combinations (brief section 5)" {
     try std.testing.expect(editorBytes(c.GHOSTTY_KEY_ARROW_LEFT, alt | Mods.ctrl) == null);
     try std.testing.expect(editorBytes(c.GHOSTTY_KEY_ARROW_UP, alt) == null);
     try std.testing.expect(editorBytes(c.GHOSTTY_KEY_A, alt) == null);
+}
+
+test "control bytes" {
+    try std.testing.expectEqual(@as(?u8, 3), controlByte('c'));
+    try std.testing.expectEqual(@as(?u8, 3), controlByte('C'));
+    try std.testing.expectEqual(@as(?u8, 0x1b), controlByte('['));
+    try std.testing.expectEqual(@as(?u8, 0x1c), controlByte('\\'));
+    try std.testing.expectEqual(@as(?u8, 0x1d), controlByte(']'));
+    try std.testing.expectEqual(@as(?u8, 0x1e), controlByte('^'));
+    try std.testing.expectEqual(@as(?u8, 0x1f), controlByte('_'));
+    try std.testing.expectEqual(@as(?u8, 0x1f), controlByte('-'));
+    try std.testing.expectEqual(@as(?u8, 0), controlByte('@'));
+    try std.testing.expectEqual(@as(?u8, 0), controlByte(' '));
+    try std.testing.expectEqual(@as(?u8, 0), controlByte('2'));
+    try std.testing.expectEqual(@as(?u8, 0x1e), controlByte('6'));
+    try std.testing.expectEqual(@as(?u8, 0x7f), controlByte('?'));
+    try std.testing.expectEqual(@as(?u8, null), controlByte('.'));
+    try std.testing.expectEqual(@as(?u8, null), controlByte('1'));
+    try std.testing.expectEqual(@as(?u8, null), controlByte(0x624));
+}
+
+test "layout codepoint: the layout's letter, else the physical key" {
+    try std.testing.expectEqual(@as(u21, 'a'), layoutCodepoint("a", 0, c.GHOSTTY_KEY_Q)); // AZERTY
+    try std.testing.expectEqual(@as(u21, 'j'), layoutCodepoint("", 'j', c.GHOSTTY_KEY_C)); // unshifted only
+    try std.testing.expectEqual(@as(u21, 'c'), layoutCodepoint("\u{624}", 0x624, c.GHOSTTY_KEY_C)); // Arabic: physical
+    try std.testing.expectEqual(@as(u21, 'c'), layoutCodepoint("\x03", 0, c.GHOSTTY_KEY_C)); // a control character is not text
+    try std.testing.expectEqual(@as(u21, 'a'), layoutCodepoint("", 0, c.GHOSTTY_KEY_A));
 }

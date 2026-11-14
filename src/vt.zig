@@ -149,7 +149,9 @@ pub const Terminal = struct {
     /// The bytes a key press sends to the child, for the terminal's current modes (application
     /// cursor keys, kitty flags). `mods` uses the bits of `keys.Mods`; `utf8` is the text the
     /// platform produced for the event (may be empty). Empty result: nothing to send.
-    pub fn encodeKey(self: *Terminal, key: c.GhosttyKey, mods: u32, utf8: []const u8, action: KeyAction, out: []u8) []const u8 {
+    /// `unshifted` is the layout's character for the key with no modifiers (0 if unknown); the kitty
+    /// protocol names a key by it. A private-use or control value (AppKit's for arrows) is ignored.
+    pub fn encodeKey(self: *Terminal, key: c.GhosttyKey, mods: u32, utf8: []const u8, unshifted: u21, action: KeyAction, out: []u8) []const u8 {
         _ = c.ghostty_key_encoder_set_from_terminal(self.key_encoder, self.handle);
         _ = c.ghostty_key_event_set_key(self.key_event, key);
         _ = c.ghostty_key_event_set_mods(self.key_event, @intCast(mods & 0xF));
@@ -166,7 +168,8 @@ pub const Terminal = struct {
         _ = c.ghostty_key_event_set_utf8(self.key_event, .{ .ptr = text.ptr, .len = text.len });
         // The kitty keyboard protocol names a key by its unshifted character; set it every call so
         // a previous key's value never leaks into a function key.
-        _ = c.ghostty_key_event_set_unshifted_codepoint(self.key_event, @import("keys.zig").unshiftedCodepoint(key));
+        const named = if (unshifted >= 0x20 and unshifted != 0x7f and !(unshifted >= 0xE000 and unshifted <= 0xF8FF)) unshifted else @import("keys.zig").unshiftedCodepoint(key);
+        _ = c.ghostty_key_event_set_unshifted_codepoint(self.key_event, named);
         var written: usize = 0;
         if (c.ghostty_key_encoder_encode(self.key_encoder, self.key_event, out.ptr, out.len, &written) != c.GHOSTTY_SUCCESS) return out[0..0];
         return out[0..written];
@@ -534,7 +537,7 @@ test "selectRow does not refresh" {
 }
 
 fn encFor(t: *Terminal, code: u16, mods: u32, utf8: []const u8, buf: []u8) []const u8 {
-    return t.encodeKey(@import("keys.zig").fromMac(code).?, mods, utf8, .press, buf);
+    return t.encodeKey(@import("keys.zig").fromMac(code).?, mods, utf8, 0, .press, buf);
 }
 
 test "up arrow, normal and application mode" {
@@ -590,6 +593,18 @@ test "ctrl letters under the kitty keyboard protocol (what Claude Code sets)" {
     try std.testing.expectEqualStrings("\x1b[100;5u", encFor(t, 2, 2, "\x04", &buf)); // ctrl d
     try std.testing.expectEqualStrings("\x1b[108;5u", encFor(t, 37, 2, "\x0c", &buf)); // ctrl l
     try std.testing.expectEqualStrings("\x1b[A", encFor(t, 126, 0, "\u{F700}", &buf)); // arrows unchanged
+}
+
+test "the layout's unshifted letter names the key under the kitty protocol" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("\x1b[>5u");
+    var buf: [32]u8 = undefined;
+    const q = @import("keys.zig").fromMac(12).?; // physical Q, AZERTY "a"
+    // unicode key code 97 (the layout's a), base-layout key 113 (the physical q), as the protocol says
+    try std.testing.expectEqualStrings("\x1b[97::113;5u", t.encodeKey(q, 2, "", 'a', .press, &buf));
+    // AppKit's private-use "unshifted" character for an arrow is not a codepoint to send
+    try std.testing.expectEqualStrings("\x1b[A", t.encodeKey(@import("keys.zig").fromMac(126).?, 0, "", 0xF700, .press, &buf));
 }
 
 test "ctrl c, enter, backspace, shift tab" {

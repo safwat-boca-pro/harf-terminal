@@ -130,10 +130,10 @@ final class TerminalController {
 
     /// A key event. Returns true if the terminal handled it (function keys, Control combinations,
     /// lone modifiers); false means it is a text key and the caller sends its text.
-    func sendKey(code: UInt16, mods: UInt32, text: String, action: Int32 = 0) -> Bool {
+    func sendKey(code: UInt16, mods: UInt32, text: String, unshifted: UInt32 = 0, action: Int32 = 0) -> Bool {
         guard let t = term else { return true }
         let bytes = Array(text.utf8)
-        return bytes.withUnsafeBufferPointer { harf_term_key(t, code, mods, $0.baseAddress, bytes.count, action) } != 0
+        return bytes.withUnsafeBufferPointer { harf_term_key(t, code, mods, $0.baseAddress, bytes.count, unshifted, action) } != 0
     }
 
     /// Text typed or composed: goes to the child as UTF-8.
@@ -214,17 +214,22 @@ final class TerminalView: NSView {
 
     /// Function keys and Control combinations are encoded by the core; everything else is text.
     /// `text` is called only for text keys (it runs `interpretKeyEvents` in the real path).
-    func handleKey(code: UInt16, mods: UInt32, characters: String, isRepeat: Bool, text: () -> Void) {
+    func handleKey(code: UInt16, mods: UInt32, characters: String, unshifted: UInt32 = 0, isRepeat: Bool, text: () -> Void) {
         if mods & UInt32(HARF_MOD_SUPER) != 0 {   // Command shortcuts belong to the menu; the core maps the editing keys
-            _ = controller?.sendKey(code: code, mods: mods, text: characters, action: isRepeat ? 2 : 0)
+            _ = controller?.sendKey(code: code, mods: mods, text: characters, unshifted: unshifted, action: isRepeat ? 2 : 0)
             return
         }
-        if controller?.sendKey(code: code, mods: mods, text: characters, action: isRepeat ? 2 : 0) == true { return }
+        if controller?.sendKey(code: code, mods: mods, text: characters, unshifted: unshifted, action: isRepeat ? 2 : 0) == true { return }
         text()
     }
 
     override func keyDown(with event: NSEvent) {
-        handleKey(code: event.keyCode, mods: Self.harfMods(event.modifierFlags), characters: event.characters ?? "",
+        // The layout's text with Control removed (Control turns "c" into U+0003), and its character with no
+        // modifiers: the core names Control combinations by them, so AZERTY, Dvorak and Colemak work.
+        let flags = event.modifierFlags
+        let text = event.characters(byApplyingModifiers: flags.subtracting(.control)) ?? event.characters ?? ""
+        let unshifted = event.characters(byApplyingModifiers: [])?.unicodeScalars.first?.value ?? 0
+        handleKey(code: event.keyCode, mods: Self.harfMods(flags), characters: text, unshifted: unshifted,
                   isRepeat: event.isARepeat) { interpretKeyEvents([event]) }
     }
 

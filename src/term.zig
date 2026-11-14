@@ -119,30 +119,47 @@ pub const Session = struct {
 
     /// Handles a key event the way a terminal must: function keys, and any key with Control held,
     /// are encoded for the terminal's current modes and queued. Returns false for text keys, which
-    /// the caller sends as text through `input` (that keeps dead keys and Arabic layouts working).
-    pub fn key(self: *Session, keycode: u16, mods: u32, utf8: []const u8, action: vt.KeyAction) !bool {
+    /// the caller sends as text through `input` (that keeps dead keys and Arabic layouts working),
+    /// and for a key that has no encoding. `utf8` is the text the layout types for the key with
+    /// Control removed, `unshifted` its character with no modifiers (0 if unknown).
+    pub fn key(self: *Session, keycode: u16, mods: u32, utf8: []const u8, unshifted: u21, action: vt.KeyAction) !bool {
         if (keys.isModifierKeycode(keycode)) return true; // nothing to send
         const k = keys.fromMac(keycode) orelse return false;
-        if (!keys.isFunctional(k) and mods & keys.Mods.ctrl == 0) return false;
+        const functional = keys.isFunctional(k);
+        if (!functional and mods & keys.Mods.ctrl == 0) return false;
         var buf: [128]u8 = undefined;
-        const t = self.lock();
-        const legacy = t.kittyFlags() == 0;
-        // Editor-style keys (brief section 5) are for programs that have not enabled the kitty
-        // protocol; once one has, it gets the full modifier encoding instead.
-        if (legacy and action != .release) {
-            if (keys.editorBytes(k, mods)) |seq| {
-                self.unlock();
-                try self.input(seq);
-                return true;
+        var n: usize = 0;
+        {
+            const t = self.lock();
+            defer self.unlock();
+            const legacy = t.kittyFlags() == 0;
+            if (legacy and action != .release) {
+                // Editor-style keys (brief section 5) are for programs that have not enabled the kitty
+                // protocol; once one has, it gets the full modifier encoding instead.
+                if (keys.editorBytes(k, mods)) |seq| {
+                    @memcpy(buf[0..seq.len], seq);
+                    n = seq.len;
+                } else if (mods & keys.Mods.super != 0) {
+                    return true; // other Command combinations belong to the app, not the shell
+                } else if (!functional) {
+                    // Control plus a character: the classic control code, named by the layout's letter.
+                    const cb = keys.controlByte(keys.layoutCodepoint(utf8, unshifted, k)) orelse return false;
+                    if (mods & keys.Mods.alt != 0) {
+                        buf[0] = 0x1b;
+                        n = 1;
+                    }
+                    buf[n] = cb;
+                    n += 1;
+                }
             }
-            if (mods & keys.Mods.super != 0) { // other Command combinations belong to the app, not the shell
-                self.unlock();
-                return true;
+            if (n == 0) {
+                // Control combinations carry no text of their own.
+                const text = if (mods & keys.Mods.ctrl != 0) "" else utf8;
+                n = t.encodeKey(k, mods, text, unshifted, action, &buf).len;
             }
         }
-        const bytes = t.encodeKey(k, mods, utf8, action, &buf);
-        self.unlock();
-        try self.input(bytes);
+        if (n == 0) return false;
+        try self.input(buf[0..n]);
         return true;
     }
 
@@ -502,8 +519,8 @@ test "key: text keys are left to the text path, Arabic text arrives intact" {
     const script = "stty raw -echo; echo ready; dd bs=1 count=2 2>/dev/null | od -An -tx1 | tr -s ' '";
     const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
     defer s.deinit();
-    try std.testing.expect(!try s.key(0, 0, "ش", .press)); // physical A on an Arabic layout
-    try std.testing.expect(!try s.key(200, 0, "م", .press)); // unknown keycode
+    try std.testing.expect(!try s.key(0, 0, "ش", 0, .press)); // physical A on an Arabic layout
+    try std.testing.expect(!try s.key(200, 0, "م", 0, .press)); // unknown keycode
     try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "ready", .exact = false }, Row.ok));
     try s.input("م");
     try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "d9 85", .exact = false }, Row.ok));
@@ -514,9 +531,9 @@ test "key: arrows and ctrl c are encoded, modifier keys send nothing" {
     const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
     defer s.deinit();
     try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "ready", .exact = false }, Row.ok));
-    try std.testing.expect(try s.key(56, 1, "", .press)); // shift alone
-    try std.testing.expect(try s.key(126, 0, "", .press)); // up arrow: ESC [ A (3 bytes)
-    try std.testing.expect(try s.key(8, keys.Mods.ctrl, "\x03", .press)); // ctrl c: 1 byte
+    try std.testing.expect(try s.key(56, 1, "", 0, .press)); // shift alone
+    try std.testing.expect(try s.key(126, 0, "", 0, .press)); // up arrow: ESC [ A (3 bytes)
+    try std.testing.expect(try s.key(8, keys.Mods.ctrl, "\x03", 0, .press)); // ctrl c: 1 byte
     try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "1b 5b 41 03", .exact = false }, Row.ok));
 }
 
@@ -553,12 +570,12 @@ test "key: Option and Command editing keys in legacy mode" {
     const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
     defer s.deinit();
     try std.testing.expect(hexOf(s, "ready"));
-    try std.testing.expect(try s.key(123, keys.Mods.alt, "", .press)); // Option+Left: ESC b
-    try std.testing.expect(try s.key(124, keys.Mods.alt, "", .press)); // Option+Right: ESC f
-    try std.testing.expect(try s.key(123, keys.Mods.super, "", .press)); // Cmd+Left: ^A
-    try std.testing.expect(try s.key(126, keys.Mods.super, "", .press)); // Cmd+Up: nothing for the shell
-    try std.testing.expect(try s.key(124, keys.Mods.super, "", .press)); // Cmd+Right: ^E
-    try std.testing.expect(try s.key(51, keys.Mods.super, "", .press)); // Cmd+Backspace: ^U
+    try std.testing.expect(try s.key(123, keys.Mods.alt, "", 0, .press)); // Option+Left: ESC b
+    try std.testing.expect(try s.key(124, keys.Mods.alt, "", 0, .press)); // Option+Right: ESC f
+    try std.testing.expect(try s.key(123, keys.Mods.super, "", 0, .press)); // Cmd+Left: ^A
+    try std.testing.expect(try s.key(126, keys.Mods.super, "", 0, .press)); // Cmd+Up: nothing for the shell
+    try std.testing.expect(try s.key(124, keys.Mods.super, "", 0, .press)); // Cmd+Right: ^E
+    try std.testing.expect(try s.key(51, keys.Mods.super, "", 0, .press)); // Cmd+Backspace: ^U
     try std.testing.expect(hexOf(s, "1b 62 1b 66 01 05 15"));
 }
 
@@ -567,6 +584,47 @@ test "key: Option+arrows send the full modifier encoding once the program asked 
     const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
     defer s.deinit();
     try std.testing.expect(hexOf(s, "ready"));
-    try std.testing.expect(try s.key(123, keys.Mods.alt, "", .press)); // ESC [ 1 ; 3 D
+    try std.testing.expect(try s.key(123, keys.Mods.alt, "", 0, .press)); // ESC [ 1 ; 3 D
     try std.testing.expect(hexOf(s, "1b 5b 31 3b 33 44"));
+}
+
+test "key: Ctrl letters follow the layout, not the physical key" {
+    const script = "stty raw -echo; echo ready; dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -s ' '";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    try std.testing.expect(try s.key(12, keys.Mods.ctrl, "a", 'a', .press)); // AZERTY: "a" sits where QWERTY has Q
+    try std.testing.expect(try s.key(34, keys.Mods.ctrl, "c", 'c', .press)); // Dvorak: "c" sits where QWERTY has I
+    try std.testing.expect(try s.key(8, keys.Mods.ctrl, "\u{624}", 0x624, .press)); // Arabic layout: falls back to the physical C
+    try std.testing.expect(hexOf(s, "01 03 03"));
+}
+
+test "key: Ctrl with punctuation and digits in legacy mode" {
+    const script = "stty raw -echo; echo ready; dd bs=1 count=5 2>/dev/null | od -An -tx1 | tr -s ' '";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    try std.testing.expect(try s.key(33, keys.Mods.ctrl, "[", '[', .press)); // ESC
+    try std.testing.expect(try s.key(46, keys.Mods.ctrl, "m", 'm', .press)); // CR
+    try std.testing.expect(try s.key(27, keys.Mods.ctrl, "-", '-', .press)); // 0x1f, readline undo
+    try std.testing.expect(try s.key(19, keys.Mods.ctrl | keys.Mods.shift, "@", '2', .press)); // NUL
+    try std.testing.expect(try s.key(34, keys.Mods.ctrl, "i", 'i', .press)); // TAB
+    try std.testing.expect(hexOf(s, "1b 0d 1f 00 09"));
+}
+
+test "key: Ctrl+C and AZERTY Ctrl+A reach a program that enabled the kitty protocol" {
+    const script = "stty raw -echo; printf '\\033[>5u'; echo ready; dd bs=1 count=19 2>/dev/null | xxd -p";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    try std.testing.expect(try s.key(8, keys.Mods.ctrl, "c", 'c', .press)); // ESC [ 99 ; 5 u
+    try std.testing.expect(try s.key(12, keys.Mods.ctrl, "a", 'a', .press)); // ESC [ 97 :: 113 ; 5 u: the layout's a, with the physical q as the base-layout key
+    try std.testing.expect(hexOf(s, "1b5b39393b35751b5b39373a3a3131333b3575"));
+}
+
+test "key: a key that produces nothing is not reported as handled" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 5" } });
+    defer s.deinit();
+    try std.testing.expect(!try s.key(47, keys.Mods.ctrl, ".", '.', .press)); // Ctrl+. has no control code
+    try std.testing.expectEqual(@as(usize, 0), s.pendingInput());
 }

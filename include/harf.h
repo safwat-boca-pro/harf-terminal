@@ -61,10 +61,14 @@ void harf_term_draw(HarfTerm *t, HarfPainter *p, void *cg_context, uint16_t firs
 #define HARF_MOD_CTRL 2
 #define HARF_MOD_ALT 4
 #define HARF_MOD_SUPER 8
-/* keycode: macOS virtual keycode. utf8: the text AppKit produced for the event (may be empty).
+/* keycode: macOS virtual keycode. utf8: the text the layout types for the key with Control removed
+ * (Shift applied; may be empty). unshifted: the layout's character for the key with no modifiers, as a
+ * Unicode scalar (0 if unknown). A Control combination is named by the layout's letter, so AZERTY,
+ * Dvorak and Colemak work, and by the physical US key when the layout has no ASCII letter there.
  * action: 0 press, 1 release, 2 repeat. Returns 1 if handled (function keys, Control combinations,
- * lone modifiers: bytes were queued), 0 if it is a text key to send with harf_term_input, -1 on error. */
-int harf_term_key(HarfTerm *t, uint16_t keycode, uint32_t mods, const uint8_t *utf8, size_t len, int action);
+ * lone modifiers: bytes were queued), 0 if it is a text key to send with harf_term_input or a key
+ * with no encoding, -1 on error. */
+int harf_term_key(HarfTerm *t, uint16_t keycode, uint32_t mods, const uint8_t *utf8, size_t len, uint32_t unshifted, int action);
 /* Pastes text, framed for the terminal's paste mode (bracketed, newlines as CR). 0 = ok. */
 int harf_term_paste(HarfTerm *t, const uint8_t *utf8, size_t len);
 void harf_term_wake_handled(HarfTerm *t);
