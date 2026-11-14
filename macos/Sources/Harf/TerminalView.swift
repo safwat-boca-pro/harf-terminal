@@ -143,6 +143,12 @@ final class TerminalController {
         _ = bytes.withUnsafeBufferPointer { harf_term_input(t, $0.baseAddress, bytes.count) }
     }
 
+    /// Wheel or trackpad, in rows: positive toward newer output.
+    func scroll(rows: Int32) {
+        guard let t = term, rows != 0 else { return }
+        _ = harf_term_scroll(t, rows)
+    }
+
     func paste(_ text: String) {
         guard let t = term, !text.isEmpty else { return }
         let bytes = Array(text.utf8)
@@ -235,6 +241,20 @@ final class TerminalView: NSView {
 
     @objc func paste(_ sender: Any?) {
         if let s = NSPasteboard.general.string(forType: .string) { controller?.paste(s) }
+    }
+
+    /// Trackpad points convert to rows at the cell height; a wheel notch is three rows. The remainder
+    /// carries over, so slow scrolling still moves. No timers.
+    private var scrollRemainder: CGFloat = 0
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let c = controller else { return }
+        if event.phase == .began || event.phase == .mayBegin { scrollRemainder = 0 }
+        let rows = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / max(1, c.cellSizePt.height) : event.scrollingDeltaY * 3
+        scrollRemainder += rows
+        let whole = scrollRemainder.rounded(.towardZero)
+        scrollRemainder -= whole
+        if whole != 0 { c.scroll(rows: Int32(-whole)) }   // fingers down shows older output: toward the top
     }
 
     override func draw(_ dirtyRect: NSRect) {

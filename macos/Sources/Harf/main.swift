@@ -173,6 +173,18 @@ func selfTest() -> Never {
                 contains: "1b 62 01")
     expectBytes("ctrl+c with kitty flags 5", prelude: "\\033[>5u", count: 7, events: [keyEvent(8, "\u{03}", [.control])], contains: "1b 5b 39 39 3b 35 75")
 
+    // 2d. The wheel scrolls through the scrollback (a real scroll event), and typing brings the view back.
+    guard let hist = TerminalController(argv: ["/bin/sh", "-c", "seq 1 80; exec cat"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start scrollback session") }
+    let lastRow = hist.gridSize.rows - 2
+    if !pump(5, until: { hist.rowText(lastRow).trimmingCharacters(in: .whitespaces) == "80" }) { fail("scrollback: rows are '\(hist.rowText(lastRow))'") }
+    let topBefore = Int(hist.rowText(0).trimmingCharacters(in: .whitespaces)) ?? -1
+    guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 3, wheel2: 0, wheel3: 0), let wheel = NSEvent(cgEvent: cg) else { fail("cannot make a scroll event") }
+    hist.view.scrollWheel(with: wheel)
+    if !pump(5, until: { (Int(hist.rowText(0).trimmingCharacters(in: .whitespaces)) ?? 999) < topBefore }) { fail("scrollback: wheel did not scroll, row 0 is '\(hist.rowText(0))'") }
+    hist.sendText("hi\n")
+    if !pump(5, until: { (0..<hist.gridSize.rows).contains { hist.rowText($0).contains("hi") } }) { fail("scrollback: typing did not bring the view back") }
+    hist.close()
+
     // 3. Paste, bracketed or not, arrives as typed text.
     guard let pasting = TerminalController(argv: echo, frame: NSSize(width: 700, height: 420)) else { fail("cannot start paste session") }
     pasting.paste("x y")

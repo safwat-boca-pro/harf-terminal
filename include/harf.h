@@ -69,6 +69,9 @@ void harf_term_draw(HarfTerm *t, HarfPainter *p, void *cg_context, uint16_t firs
  * lone modifiers: bytes were queued), 0 if it is a text key to send with harf_term_input or a key
  * with no encoding, -1 on error. */
 int harf_term_key(HarfTerm *t, uint16_t keycode, uint32_t mods, const uint8_t *utf8, size_t len, uint32_t unshifted, int action);
+/* Wheel or trackpad: delta_rows rows toward newer output when positive, toward older when negative.
+ * On the alternate screen the program gets that many Up/Down key presses instead. 0 = ok. */
+int harf_term_scroll(HarfTerm *t, int32_t delta_rows);
 /* Pastes text, framed for the terminal's paste mode (bracketed, newlines as CR). 0 = ok. */
 int harf_term_paste(HarfTerm *t, const uint8_t *utf8, size_t len);
 void harf_term_wake_handled(HarfTerm *t);

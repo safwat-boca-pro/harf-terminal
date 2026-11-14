@@ -309,6 +309,38 @@ pub const Terminal = struct {
         out.shrinkRetainingCapacity(start + written);
     }
 
+    /// Scrolls the viewport through the scrollback by `delta` rows (negative = toward older output).
+    /// The library clamps at both ends.
+    pub fn scrollViewport(self: *Terminal, delta: i32) void {
+        const behavior: c.GhosttyTerminalScrollViewport = .{ .tag = c.GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA, .value = .{ .delta = delta } };
+        _ = c.ghostty_terminal_scroll_viewport(self.handle, behavior);
+    }
+
+    pub fn scrollToBottom(self: *Terminal) void {
+        const behavior: c.GhosttyTerminalScrollViewport = .{ .tag = c.GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM, .value = .{ .delta = 0 } };
+        _ = c.ghostty_terminal_scroll_viewport(self.handle, behavior);
+    }
+
+    /// Where the viewport is in the scrollable area: `offset` rows from the top, `rows` visible, `total` in all.
+    pub const Viewport = struct { offset: usize, total: usize, rows: usize };
+
+    pub fn viewport(self: *Terminal) Viewport {
+        var sb: c.GhosttyTerminalScrollbar = std.mem.zeroes(c.GhosttyTerminalScrollbar);
+        _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_SCROLLBAR, &sb);
+        return .{ .offset = @intCast(sb.offset), .total = @intCast(sb.total), .rows = @intCast(sb.len) };
+    }
+
+    pub fn atBottom(self: *Terminal) bool {
+        const v = self.viewport();
+        return v.offset + v.rows >= v.total;
+    }
+
+    pub fn onAlternateScreen(self: *Terminal) bool {
+        var screen: c.GhosttyTerminalScreen = c.GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+        _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &screen);
+        return screen == c.GHOSTTY_TERMINAL_SCREEN_ALTERNATE;
+    }
+
     /// Number of history rows above the visible screen.
     pub fn scrollbackRows(self: *Terminal) usize {
         var rows: usize = 0;
@@ -856,4 +888,69 @@ test "erased cell keeps its background" {
     try std.testing.expectEqual(@as(usize, 0), c0.cps.len);
     try std.testing.expectEqual(t.paletteColor(4), c0.style.bg.?);
     try std.testing.expectEqual(t.paletteColor(4), cellOf(t, 0, 79, &buf).style.bg.?);
+}
+
+fn lineNo(t: *Terminal, row: u16) !i64 {
+    var buf: [64]u8 = undefined;
+    const text = t.rowText(row, &buf);
+    if (!std.mem.startsWith(u8, text, "line ")) return error.NotALine;
+    return std.fmt.parseInt(i64, text[5..], 10);
+}
+
+fn fillHistory(t: *Terminal, n: usize) void {
+    var buf: [32]u8 = undefined;
+    for (0..n) |i| t.write(std.fmt.bufPrint(&buf, "line {d}\r\n", .{i}) catch unreachable);
+}
+
+test "viewport scrolls into history" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer t.deinit();
+    fillHistory(t, 60);
+    _ = t.update();
+    const before = try lineNo(t, 0);
+    try std.testing.expect(t.viewport().offset + t.viewport().rows == t.viewport().total); // at the bottom
+    t.scrollViewport(-5);
+    _ = t.update();
+    try std.testing.expectEqual(before - 5, try lineNo(t, 0));
+    t.scrollToBottom();
+    _ = t.update();
+    try std.testing.expectEqual(before, try lineNo(t, 0));
+}
+
+test "viewport clamps" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer t.deinit();
+    fillHistory(t, 60);
+    t.scrollViewport(-100000);
+    _ = t.update();
+    try std.testing.expectEqual(@as(usize, 0), t.viewport().offset);
+    try std.testing.expectEqual(@as(i64, 0), try lineNo(t, 0)); // the oldest line
+    t.scrollViewport(100000);
+    try std.testing.expectEqual(t.viewport().total, t.viewport().offset + t.viewport().rows);
+    for (0..1000) |i| t.scrollViewport(if (i % 2 == 0) -7 else 3);
+    const v = t.viewport();
+    try std.testing.expect(v.offset + v.rows <= v.total);
+    t.scrollToBottom();
+    try std.testing.expectEqual(t.viewport().total, t.viewport().offset + t.viewport().rows);
+}
+
+test "cursor hidden while scrolled" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer t.deinit();
+    fillHistory(t, 60);
+    _ = t.update();
+    try std.testing.expect(t.cursor() != null);
+    t.scrollViewport(-5);
+    _ = t.update();
+    try std.testing.expect(t.cursor() == null);
+}
+
+test "alternate screen is reported" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    try std.testing.expect(!t.onAlternateScreen());
+    t.write("\x1b[?1049h");
+    try std.testing.expect(t.onAlternateScreen());
+    t.write("\x1b[?1049l");
+    try std.testing.expect(!t.onAlternateScreen());
 }

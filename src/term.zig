@@ -117,6 +117,46 @@ pub const Session = struct {
         _ = c.write(self.kick_pipe[1], "k", 1); // a full pipe means a wake-up is already pending
     }
 
+    /// Brings the viewport back to the live screen if it is scrolled up (typing, paste and keys do).
+    /// Not for the parser's replies: those run with the terminal lock held.
+    fn snapToBottom(self: *Session) void {
+        {
+            const t = self.lock();
+            defer self.unlock();
+            if (t.atBottom()) return;
+            t.scrollToBottom();
+        }
+        self.requestWake();
+    }
+
+    /// Typed text for the child: snaps the viewport to the bottom, then queues it like `input`.
+    pub fn typeText(self: *Session, bytes: []const u8) !void {
+        if (bytes.len == 0) return;
+        self.snapToBottom();
+        try self.input(bytes);
+    }
+
+    /// The wheel or trackpad: `delta_rows` rows toward newer output when positive, older when negative.
+    /// On the alternate screen the program gets that many Up or Down key presses (in its cursor key
+    /// mode); otherwise the viewport scrolls through the scrollback. At most 64 presses per call.
+    pub fn scroll(self: *Session, delta_rows: i32) !void {
+        if (delta_rows == 0) return;
+        var buf: [64 * 8]u8 = undefined;
+        var n: usize = 0;
+        {
+            const t = self.lock();
+            defer self.unlock();
+            if (t.onAlternateScreen()) {
+                const arrow = keys.fromMac(if (delta_rows < 0) 126 else 125).?; // Up, Down
+                const presses = @min(@abs(delta_rows), 64);
+                for (0..presses) |_| n += t.encodeKey(arrow, 0, "", 0, .press, buf[n..]).len;
+            } else {
+                t.scrollViewport(delta_rows);
+            }
+        }
+        if (n > 0) try self.input(buf[0..n]) else self.requestWake();
+    }
+
     /// Handles a key event the way a terminal must: function keys, and any key with Control held,
     /// are encoded for the terminal's current modes and queued. Returns false for text keys, which
     /// the caller sends as text through `input` (that keeps dead keys and Arabic layouts working),
@@ -159,12 +199,14 @@ pub const Session = struct {
             }
         }
         if (n == 0) return false;
+        self.snapToBottom();
         try self.input(buf[0..n]);
         return true;
     }
 
     /// Queues pasted text, framed for the terminal's current paste mode.
     pub fn paste(self: *Session, text: []const u8) !void {
+        if (text.len > 0) self.snapToBottom();
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.gpa);
         {
@@ -627,4 +669,71 @@ test "key: a key that produces nothing is not reported as handled" {
     defer s.deinit();
     try std.testing.expect(!try s.key(47, keys.Mods.ctrl, ".", '.', .press)); // Ctrl+. has no control code
     try std.testing.expectEqual(@as(usize, 0), s.pendingInput());
+}
+
+const AtBottom = struct {
+    s: *Session,
+    want: bool,
+    fn ok(self: AtBottom) bool {
+        const t = self.s.lock();
+        defer self.s.unlock();
+        const v = t.viewport();
+        return (v.offset + v.rows == v.total) == self.want;
+    }
+};
+
+test "scroll: the viewport moves, and typing snaps it to the bottom" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "seq 1 200; exec cat" } });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "200" }, Row.ok));
+    try s.scroll(-30);
+    try std.testing.expect(AtBottom.ok(.{ .s = s, .want = false }));
+    try s.typeText("xyz\n");
+    try std.testing.expect(waitFor(10_000, AtBottom{ .s = s, .want = true }, AtBottom.ok));
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "xyz", .exact = false }, Row.ok)); // the echo is on screen
+    try s.scroll(-30);
+    try std.testing.expect(AtBottom.ok(.{ .s = s, .want = false }));
+    _ = try s.key(126, 0, "", 0, .press); // an arrow key snaps too
+    try std.testing.expect(AtBottom.ok(.{ .s = s, .want = true }));
+    try s.scroll(-30);
+    try s.paste("p");
+    try std.testing.expect(AtBottom.ok(.{ .s = s, .want = true }));
+}
+
+test "scroll: new output does not move a scrolled viewport" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "seq 1 100; sleep 0.6; seq 101 160; sleep 5" } });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "100" }, Row.ok));
+    try s.scroll(-20);
+    var before: usize = 0;
+    var total_before: usize = 0;
+    {
+        const t = s.lock();
+        defer s.unlock();
+        before = t.viewport().offset;
+        total_before = t.viewport().total;
+    }
+    const Grew = struct {
+        s: *Session,
+        total: usize,
+        fn ok(self: @This()) bool {
+            const t = self.s.lock();
+            defer self.s.unlock();
+            return t.viewport().total > self.total;
+        }
+    };
+    try std.testing.expect(waitFor(10_000, Grew{ .s = s, .total = total_before }, Grew.ok));
+    const t = s.lock();
+    defer s.unlock();
+    try std.testing.expectEqual(before, t.viewport().offset);
+}
+
+test "scroll: the alternate screen gets arrow keys, in the terminal's cursor key mode" {
+    const script = "printf '\\033[?1049h'; stty raw -echo; echo ready; dd bs=1 count=12 2>/dev/null | od -An -tx1 | tr -s ' '";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    try s.scroll(-3); // three presses of Up: ESC [ A
+    try s.scroll(1); // one Down
+    try std.testing.expect(hexOf(s, "1b 5b 41 1b 5b 41 1b 5b 41 1b 5b 42"));
 }

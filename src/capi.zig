@@ -84,9 +84,16 @@ export fn harf_term_free(t: *HarfTerm) void {
     std.heap.smp_allocator.destroy(t);
 }
 
-/// Sends bytes to the child as if typed. 0 on success.
+/// Sends bytes to the child as if typed (the view snaps back to the live screen). 0 on success.
 export fn harf_term_input(t: *HarfTerm, bytes: [*]const u8, len: usize) c_int {
-    t.session.input(bytes[0..len]) catch return -1;
+    t.session.typeText(bytes[0..len]) catch return -1;
+    return 0;
+}
+
+/// Wheel or trackpad: `delta_rows` rows toward newer output when positive, older when negative. On the
+/// alternate screen it becomes Up/Down key presses for the program. 0 on success.
+export fn harf_term_scroll(t: *HarfTerm, delta_rows: i32) c_int {
+    t.session.scroll(delta_rows) catch return -1;
     return 0;
 }
 
