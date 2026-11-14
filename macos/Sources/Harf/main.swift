@@ -830,7 +830,7 @@ func selfTest() -> Never {
         let empty = tmp + "/empty"
         try? fm.createDirectory(atPath: empty, withIntermediateDirectories: true)
         Settings.shared.load(directory: empty)
-        if Settings.shared.fontPt != 14 || Settings.shared.windowWidth != 700 || Settings.shared.windowHeight != 420 || !Settings.shared.clipboardWrite { fail("config: an empty directory did not give the defaults") }
+        if Settings.shared.fontPt != 14 || Settings.shared.windowWidth != 1000 || Settings.shared.windowHeight != 720 || !Settings.shared.clipboardWrite { fail("config: an empty directory did not give the defaults") }
     }
 
     // 2j. Panes, through the window controller the app uses: a split shares the window and starts where its neighbour's shell is,

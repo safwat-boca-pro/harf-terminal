@@ -54,8 +54,8 @@ final class Settings {
     private var configPt: CGFloat = 14
     /// Added to the configured size by Larger and Smaller; a reload resets it.
     private var fontDelta: CGFloat = 0
-    private(set) var windowWidth: CGFloat = 700
-    private(set) var windowHeight: CGFloat = 420
+    private(set) var windowWidth: CGFloat = 1000
+    private(set) var windowHeight: CGFloat = 720
     private(set) var scrollbackBytes = 1 << 20
     private(set) var clipboardWrite = true
     /// 0 unfocused, 1 always, 2 off.
