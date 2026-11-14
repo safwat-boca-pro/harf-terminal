@@ -1040,6 +1040,80 @@ func selfTest() -> Never {
         if commandNotification(exitCode: 0, durationMs: 9_999) != nil { fail("a short command must not notify") }
     }
 
+    // 2q. Opening folders via Finder Services, `open -a` (`application(_:open:)`), and CLI arguments.
+    do {
+        let fm = FileManager.default
+        let base = NSTemporaryDirectory() + "harf-selftest-open-\(getpid())"
+        let dirA = base + "/folder a"
+        let dirB = base + "/folder-b"
+        let linkB = base + "/link-b"
+        let fileA = dirA + "/note.txt"
+        try? fm.createDirectory(atPath: dirA, withIntermediateDirectories: true)
+        try? fm.createDirectory(atPath: dirB, withIntermediateDirectories: true)
+        try? fm.createSymbolicLink(atPath: linkB, withDestinationPath: dirB)
+        try? "hi\n".write(toFile: fileA, atomically: true, encoding: .utf8)
+        defer { try? fm.removeItem(atPath: base) }
+
+        if resolveDirectory(URL(fileURLWithPath: dirA)) != dirA { fail("open dir: directory resolution failed") }
+        if resolveDirectory(URL(fileURLWithPath: linkB)) != linkB { fail("open dir: symlink directory resolution failed") }
+        if resolveDirectory(URL(fileURLWithPath: fileA)) != dirA { fail("open dir: file should resolve to parent dir") }
+        if resolveDirectory(URL(fileURLWithPath: base + "/missing")) != nil { fail("open dir: missing path should be nil") }
+        let parsed = launchDirectories(from: ["Harf", "-psn_0_99", "-NSDocumentRevisionsDebugMode", "YES", dirA, "--", dirB])
+        if parsed != [dirA, dirB] { fail("open dir: launchDirectories returned \(parsed)") }
+
+        setenv("SHELL", "/bin/sh", 1)
+        let d0 = AppDelegate()
+        if !d0.applicationShouldOpenUntitledFile(NSApp) { fail("open dir: fresh delegate should allow untitled window") }
+        d0.launchDirectories = [dirA]
+        if d0.applicationShouldOpenUntitledFile(NSApp) { fail("open dir: delegate with launchDirectories should suppress untitled window") }
+
+        let d = AppDelegate()
+        NSApp.delegate = d
+        defer { NSApp.delegate = nil }
+        let before = NSApp.windows.count
+        d.application(NSApp, open: [URL(fileURLWithPath: dirA)])
+        if NSApp.windows.count != before + 1 { fail("open dir: application(_:open:) did not open a window") }
+        if d.applicationShouldOpenUntitledFile(NSApp) { fail("open dir: should not open an untitled window after open(_:open:)") }
+        d.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        _ = pump(0.15) { false }
+        if NSApp.windows.count != before + 1 { fail("open dir: didFinishLaunching opened an extra window") }
+
+        guard let w1 = NSApp.windows.last, let p1 = panes(under: w1.contentView).first else { fail("open dir: missing first pane") }
+        p1.controller.sendText("pwd\n")
+        if !pump(5, until: { (0..<p1.controller.gridSize.rows).contains { p1.controller.rowText($0).contains("folder a") } }) {
+            fail("open dir: first window did not start in '\(dirA)'")
+        }
+
+        let pb = NSPasteboard(name: NSPasteboard.Name("harf.selftest.service.\(getpid())"))
+        pb.clearContents()
+        pb.writeObjects([URL(fileURLWithPath: dirB) as NSURL])
+        var serviceErr: NSString?
+        d.newTerminalAtFolder(pb, userData: "New Tab", error: &serviceErr)
+        if serviceErr != nil { fail("open dir: service tab failed: \(String(describing: serviceErr))") }
+        if NSApp.windows.count != before + 2 { fail("open dir: service tab did not open a window") }
+        if w1.tabbedWindows?.count != 2 { fail("open dir: service New Tab did not attach as a tab") }
+        guard let w2 = NSApp.windows.last, let p2 = panes(under: w2.contentView).first else { fail("open dir: missing second pane") }
+        p2.controller.sendText("pwd\n")
+        if !pump(5, until: { (0..<p2.controller.gridSize.rows).contains { p2.controller.rowText($0).contains("folder-b") } }) {
+            fail("open dir: tab did not start in '\(dirB)'")
+        }
+
+        pb.clearContents()
+        pb.setString(dirA, forType: .string)
+        serviceErr = nil
+        d.newTerminalAtFolder(pb, userData: nil, error: &serviceErr)
+        if serviceErr != nil || NSApp.windows.count != before + 3 { fail("open dir: plain-text service failed") }
+
+        pb.clearContents()
+        pb.setString(base + "/missing", forType: .string)
+        serviceErr = nil
+        d.newTerminalAtFolder(pb, userData: nil, error: &serviceErr)
+        if serviceErr == nil || NSApp.windows.count != before + 3 { fail("open dir: invalid path should set service error") }
+
+        pb.clearContents()
+        for w in NSApp.windows.suffix(3) { w.close() }
+    }
+
     // 5. A failing shell keeps its window and says so.
     guard let wc2 = WindowController(argv: ["/bin/sh", "-c", "echo boom; exit 3"], content: NSSize(width: 700, height: 420), cwd: nil) else { fail("cannot start failing session") }
     let bad = wc2.allPanes[0].controller
@@ -1071,6 +1145,7 @@ if let i = args.firstIndex(of: "--conformance"), i + 1 < args.count {
 let app = NSApplication.shared
 traceStep("NSApplication.shared")
 let delegate = AppDelegate()
+delegate.launchDirectories = launchDirectories(from: args)
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()

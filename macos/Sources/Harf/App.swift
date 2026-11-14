@@ -20,9 +20,74 @@ private let menuLayout: [(String, [(String, String)])] = [
     ("Window", [("Next Tab", "next_tab"), ("Previous Tab", "prev_tab"), ("Next Pane", "focus_next"), ("Previous Pane", "focus_prev")]),
 ]
 
+/// Resolves `url` to an existing directory path (following symlinks and Finder aliases). If `url` is a regular file, uses its parent directory.
+func resolveDirectory(_ url: URL) -> String? {
+    guard url.isFileURL else { return nil }
+    let fm = FileManager.default
+    var isDir: ObjCBool = false
+    if fm.fileExists(atPath: url.path, isDirectory: &isDir) {
+        if isDir.boolValue { return url.path }
+        if let resolved = try? URL(resolvingAliasFileAt: url, options: []), resolved.path != url.path,
+           fm.fileExists(atPath: resolved.path, isDirectory: &isDir), isDir.boolValue {
+            return resolved.path
+        }
+        return url.deletingLastPathComponent().path
+    }
+    return nil
+}
+
+/// Extracts existing directory paths from a Services pasteboard (file URLs first, then newline-separated paths/URLs in plain text).
+func directories(from pboard: NSPasteboard) -> [String] {
+    if let urls = pboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+        return urls.compactMap(resolveDirectory)
+    }
+    guard let text = pboard.string(forType: .string) else { return [] }
+    return text.components(separatedBy: .newlines).compactMap { line in
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let expanded = NSString(string: trimmed).expandingTildeInPath
+        let url = expanded.hasPrefix("file://") ? URL(string: expanded) : (expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded) : nil)
+        return url.flatMap(resolveDirectory)
+    }
+}
+
+/// Resolves directory arguments passed on the command line (ignoring macOS launch flags like `-psn_...` or `-NS...`).
+func launchDirectories(from args: [String]) -> [String] {
+    var dirs: [String] = []
+    var i = 1
+    var literalOnly = false
+    while i < args.count {
+        let arg = args[i]
+        if !literalOnly, arg == "--" {
+            literalOnly = true
+            i += 1
+            continue
+        }
+        if !literalOnly, arg.hasPrefix("-") {
+            if (arg.hasPrefix("-NS") || arg.hasPrefix("-Apple")), i + 1 < args.count, !args[i + 1].hasPrefix("-") {
+                i += 2
+            } else {
+                i += 1
+            }
+            continue
+        }
+        let expanded = NSString(string: arg).expandingTildeInPath
+        let url = URL(fileURLWithPath: expanded).standardizedFileURL
+        if let dir = resolveDirectory(url) {
+            dirs.append(dir)
+        } else {
+            FileHandle.standardError.write(Data("harf: not a directory: \(arg)\n".utf8))
+        }
+        i += 1
+    }
+    return dirs
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windows: [WindowController] = []
+    var launchDirectories: [String] = []
+    private var openedOnLaunch = false
 
     /// The terminal that has the keyboard, if one does (the find field of a pane counts as its pane's).
     func focusedController() -> TerminalController? { focusedPane()?.controller }
@@ -31,21 +96,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func focusedPane() -> TerminalPane? { controller(of: NSApp.keyWindow)?.focusedPane() }
 
-    /// A new window (or a tab of the key window) with a login shell, starting where the focused terminal is.
+    private func frontmostWindow() -> NSWindow? {
+        NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.orderedWindows.first(where: { controller(of: $0) != nil }) ?? windows.last?.window
+    }
+
+    /// A new window (or a tab of the frontmost window) with a login shell, starting in `cwd` (or where the focused terminal is).
     @discardableResult
-    func openWindow(tab: Bool, argv: [String]? = nil, content: NSSize? = nil) -> WindowController? {
-        let key = NSApp.keyWindow
+    func openWindow(tab: Bool, argv: [String]? = nil, content: NSSize? = nil, cwd: String? = nil) -> WindowController? {
+        let target = frontmostWindow()
         let defaultSize = NSSize(width: Settings.shared.windowWidth, height: Settings.shared.windowHeight)
-        let size = content ?? (tab ? key?.contentView?.bounds.size : nil) ?? defaultSize
-        guard let wc = WindowController(argv: argv, content: size, cwd: focusedController()?.currentDirectory()) else { return nil }
+        let size = content ?? (tab ? target?.contentView?.bounds.size : nil) ?? defaultSize
+        guard let wc = WindowController(argv: argv, content: size, cwd: cwd ?? focusedController()?.currentDirectory()) else { return nil }
         wc.onClose = { [weak self] closing in self?.windows.removeAll { $0 === closing } }
         windows.append(wc)
-        if tab, let key { key.addTabbedWindow(wc.window, ordered: .above) }
-        else if let key { wc.window.cascadeTopLeft(from: NSPoint(x: key.frame.minX + 28, y: key.frame.maxY - 28)) }
+        if tab, let target { target.addTabbedWindow(wc.window, ordered: .above) }
+        else if let target { wc.window.cascadeTopLeft(from: NSPoint(x: target.frame.minX + 28, y: target.frame.maxY - 28)) }
         else { wc.window.center() }
         wc.window.makeKeyAndOrderFront(nil)
         wc.window.makeFirstResponder(wc.allPanes.first?.controller.view)
         return wc
+    }
+
+    private func initialContentSize() -> NSSize {
+        // Measurement hook (docs/perf.md): HARF_CONTENT_SIZE=WxH pins the window, e.g. 700x420 for the 80x24 class.
+        var content = NSSize(width: Settings.shared.windowWidth, height: Settings.shared.windowHeight)
+        if let s = ProcessInfo.processInfo.environment["HARF_CONTENT_SIZE"] {
+            let p = s.split(separator: "x").compactMap { Double($0) }
+            if p.count == 2 { content = NSSize(width: p[0], height: p[1]) }
+        }
+        return content
+    }
+
+    private func initialArgv() -> [String]? {
+        // Measurement hook (bench/footprint.sh): HARF_CHILD_CMD runs a command first, then the user's shell.
+        if let cmd = ProcessInfo.processInfo.environment["HARF_CHILD_CMD"], !cmd.isEmpty {
+            let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+            return ["/bin/sh", "-c", "\(cmd); exec \(shell) -l"]
+        }
+        return nil
+    }
+
+    private func openInitialWindow() {
+        openedOnLaunch = true
+        guard openWindow(tab: false, argv: initialArgv(), content: initialContentSize()) != nil else { fatalError("cannot start the terminal") }
+        traceStep("window built and shown")
+        NSApp.activate()
+    }
+
+    /// Opens a window (or tab in the frontmost window) for each directory in `dirs`.
+    @discardableResult
+    func openDirectories(_ dirs: [String], tab: Bool) -> Bool {
+        guard !dirs.isEmpty else { return false }
+        openedOnLaunch = true
+        for dir in dirs {
+            let size = windows.isEmpty ? initialContentSize() : nil
+            _ = openWindow(tab: tab, content: size, cwd: dir)
+        }
+        NSApp.activate()
+        return true
     }
 
     /// Runs an action named by a key binding or a menu item. Returns whether it was one.
@@ -121,25 +229,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = main
     }
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        traceStep("applicationWillFinishLaunching")
+        Settings.shared.load()   // before any terminal exists (including launch-time open or Services); it builds the menu
+        traceStep("main menu installed, configuration loaded")
+        NSApp.servicesProvider = self
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         traceStep("applicationDidFinishLaunching")
-        Settings.shared.load()   // before the first terminal exists, so its font, theme and scrollback are the configured ones; it builds the menu
-        traceStep("main menu installed, configuration loaded")
-        // Measurement hook (docs/perf.md): HARF_CONTENT_SIZE=WxH pins the window, e.g. 700x420 for the 80x24 class.
-        var content = NSSize(width: Settings.shared.windowWidth, height: Settings.shared.windowHeight)
-        if let s = ProcessInfo.processInfo.environment["HARF_CONTENT_SIZE"] {
-            let p = s.split(separator: "x").compactMap { Double($0) }
-            if p.count == 2 { content = NSSize(width: p[0], height: p[1]) }
+        if !launchDirectories.isEmpty {
+            openDirectories(launchDirectories, tab: false)
+            traceStep("window built and shown")
         }
-        // Measurement hook (bench/footprint.sh): HARF_CHILD_CMD runs a command first, then the user's shell.
-        var argv: [String]? = nil
-        if let cmd = ProcessInfo.processInfo.environment["HARF_CHILD_CMD"], !cmd.isEmpty {
-            let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-            argv = ["/bin/sh", "-c", "\(cmd); exec \(shell) -l"]
+    }
+
+    func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        launchDirectories.isEmpty && !openedOnLaunch && windows.isEmpty
+    }
+
+    func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        guard !openedOnLaunch && windows.isEmpty else { return false }
+        openInitialWindow()
+        return true
+    }
+
+    func application(_ sender: NSApplication, open urls: [URL]) {
+        openDirectories(urls.compactMap(resolveDirectory), tab: false)
+    }
+
+    @objc func newTerminalAtFolder(_ pboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        let dirs = directories(from: pboard)
+        guard !dirs.isEmpty else {
+            error.pointee = "No valid folder was selected." as NSString
+            return
         }
-        guard openWindow(tab: false, argv: argv, content: content) != nil else { fatalError("cannot start the terminal") }
-        traceStep("window built and shown")
-        NSApp.activate()
+        openDirectories(dirs, tab: userData == "New Tab")
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
