@@ -21,6 +21,8 @@ panes I saw earlier came from rendering the whole window offscreen with `cacheDi
 - [ ] Title and tab name follow the focused pane. Tab drag and "Merge All Windows" from the Window menu work.
 
 ## Shell integration (zsh; marks prompts and commands with OSC 133)
+Headless run on the owner's real zsh (oh-my-zsh, `➜  ~` prompt), 2026-11-14, with and without the shim: the screen text is identical (the prompt does not change); 6 commands gave 12 start/end events, `false` ended with exit 1; Cmd+Up's action reached the oldest prompt; select-output returned only the last command's output; `$ZDOTDIR` and `$HARF_SHELL_INTEGRATION` are empty inside the shell; ` exec zsh` left no stuck running state. Not checked, because it needs eyes and a keyboard: the key presses themselves, the highlight, the dot in the tab bar, and the notification on screen.
+
 Open a **new** window or tab so the shell starts with the shim. Your own zsh setup (prompt theme, plugins) is the thing to judge: tell me if the prompt looks different or a startup file stopped loading.
 - [ ] Run a few commands, one of them long (`seq 1 200`). Cmd+Up goes to the previous prompt, again to the one before; Cmd+Down comes back. In a tab with no commands yet, nothing happens and nothing is typed at the prompt; in vim the key belongs to vim. Cmd+Shift+A right after a command that printed nothing (`true`) selects nothing.
 - [ ] Cmd+Shift+A selects the output of the last command (highlighted), Cmd+C and paste elsewhere gives exactly that text, without the prompt line.
