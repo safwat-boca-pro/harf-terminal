@@ -56,6 +56,9 @@ pub extern const kCTFontAttributeName: *const CFString;
 pub extern const kCTParagraphStyleAttributeName: *const CFString;
 pub extern fn CTFontCreateWithName(name: *const CFString, size: CGFloat, matrix: ?*const anyopaque) ?*CTFont;
 pub extern fn CTFontCreateUIFontForLanguage(ui_type: u32, size: CGFloat, language: ?*const CFString) ?*CTFont;
+pub const trait_italic: u32 = 1 << 0; // kCTFontTraitItalic
+pub const trait_bold: u32 = 1 << 1; // kCTFontTraitBold
+pub extern fn CTFontCreateCopyWithSymbolicTraits(font: *const CTFont, size: CGFloat, matrix: ?*const anyopaque, value: u32, mask: u32) ?*CTFont;
 pub extern fn CTFontCreateForString(current: *const CTFont, string: *const CFString, range: CFRange) ?*CTFont;
 pub extern fn CTFontCopyFullName(font: *const CTFont) ?*const CFString;
 pub extern fn CTFontGetGlyphsForCharacters(font: *const CTFont, chars: [*]const UniChar, glyphs: [*]CGGlyph, count: CFIndex) bool;
@@ -94,4 +97,10 @@ pub extern fn CGContextSetGrayFillColor(ctx: *CGContext, gray: CGFloat, alpha: C
 pub extern fn CGContextScaleCTM(ctx: *CGContext, sx: CGFloat, sy: CGFloat) void;
 pub extern fn CGColorSpaceCreateDeviceRGB() ?*const anyopaque;
 pub extern fn CGColorSpaceRelease(space: *const anyopaque) void;
+pub extern fn CGContextSetRGBStrokeColor(ctx: *CGContext, r: CGFloat, g: CGFloat, b: CGFloat, a: CGFloat) void;
+pub extern fn CGContextSetLineWidth(ctx: *CGContext, w: CGFloat) void;
+pub extern fn CGContextBeginPath(ctx: *CGContext) void;
+pub extern fn CGContextMoveToPoint(ctx: *CGContext, x: CGFloat, y: CGFloat) void;
+pub extern fn CGContextAddLineToPoint(ctx: *CGContext, x: CGFloat, y: CGFloat) void;
+pub extern fn CGContextStrokePath(ctx: *CGContext) void;
 pub extern fn CGContextClipToRect(ctx: *CGContext, rect: CGRect) void;

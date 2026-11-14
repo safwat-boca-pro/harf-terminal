@@ -10,9 +10,39 @@ pub const Metrics = struct { cell_w: f32, cell_h: f32, ascent: f32 };
 
 pub const Glyph = struct { font: *const ct.CTFont, gid: u16 };
 
-/// Phase 3 theme (slice 3 replaces it with the terminal's own colors).
-const bg = [3]f64{ 0.06, 0.06, 0.07 };
-const fg = [3]f64{ 0.92, 0.92, 0.92 };
+const Rgb3 = [3]f64;
+
+fn rgb(c: vt.Rgb) Rgb3 {
+    return .{ @as(f64, @floatFromInt(c.r)) / 255.0, @as(f64, @floatFromInt(c.g)) / 255.0, @as(f64, @floatFromInt(c.b)) / 255.0 };
+}
+
+/// The colors a cell is drawn with: inverse swaps foreground and background, faint blends the
+/// foreground half way to the background. `has_bg` says the background differs from the default.
+const CellColors = struct { fg: Rgb3, bg: Rgb3, has_bg: bool };
+
+fn cellColors(style: vt.Style, d: vt.Colors) CellColors {
+    var f = style.fg orelse d.fg;
+    var b = style.bg orelse d.bg;
+    if (style.flags & vt.Style.Flag.inverse != 0) std.mem.swap(vt.Rgb, &f, &b);
+    var fc = rgb(f);
+    const bc = rgb(b);
+    if (style.flags & vt.Style.Flag.faint != 0) for (&fc, bc) |*x, y| {
+        x.* = (x.* + y) / 2;
+    };
+    return .{ .fg = fc, .bg = bc, .has_bg = b.r != d.bg.r or b.g != d.bg.g or b.b != d.bg.b };
+}
+
+/// Face index: 0 regular, 1 bold, 2 italic, 3 bold italic.
+fn faceOf(style: vt.Style) u2 {
+    const F = vt.Style.Flag;
+    return @as(u2, @intFromBool(style.flags & F.bold != 0)) | (@as(u2, @intFromBool(style.flags & F.italic != 0)) << 1);
+}
+
+/// A wide cell's spacer takes the wide cell's style (the library may leave it unstyled).
+fn styleAt(cells: []const vt.Cell, col: usize) vt.Style {
+    if (cells[col].wide == .spacer_tail and col > 0) return cells[col - 1].style;
+    return cells[col].style;
+}
 
 /// The glyph cache stops growing here; lookups past it still work, just uncached.
 const max_cached: usize = 4096;
@@ -28,7 +58,14 @@ pub const Painter = struct {
     metrics_: Metrics,
     /// Fonts CoreText picked for characters Menlo lacks (deduplicated, retained).
     fallbacks: std.ArrayList(*ct.CTFont) = .empty,
-    cache: std.AutoHashMapUnmanaged(u21, ?Glyph) = .empty,
+    /// Glyphs by codepoint and face (cp | face << 21).
+    cache: std.AutoHashMapUnmanaged(u32, ?Glyph) = .empty,
+    /// Regular, bold, italic, bold italic. `faces[0]` is `primary`; the others fall back to it if CoreText has no such face.
+    faces: [4]*ct.CTFont,
+    /// False draws the cursor as a hollow block (the window is not key).
+    focused: bool = true,
+    /// Thickness in pixels of underlines and cursor edges.
+    line_px: f32,
     /// Base-direction policy for rows with Arabic (brief 4.4). No config UI before Phase 6.
     policy: rowfacts.Policy = .auto,
     /// Counters that make the fast path and the cache testable.
@@ -56,9 +93,14 @@ pub const Painter = struct {
         const desc = @ceil(ct.CTFontGetDescent(font));
         const lead = @ceil(ct.CTFontGetLeading(font));
         const cell_w: f32 = @floatCast(@round(ct.CTFontGetAdvancesForGlyphs(font, ct.orientation_horizontal, &g, null, 1)));
+        const bold = ct.CTFontCreateCopyWithSymbolicTraits(font, size_px, null, ct.trait_bold, ct.trait_bold);
+        const italic = ct.CTFontCreateCopyWithSymbolicTraits(font, size_px, null, ct.trait_italic, ct.trait_italic);
+        const both = ct.CTFontCreateCopyWithSymbolicTraits(font, size_px, null, ct.trait_bold | ct.trait_italic, ct.trait_bold | ct.trait_italic);
         self.* = .{
             .gpa = gpa,
             .primary = font,
+            .faces = .{ font, bold orelse font, italic orelse font, both orelse font },
+            .line_px = @max(1, @round(size_px / 14)),
             .size_px = size_px,
             // The Arabic font is the primary font; CoreText's cascade picks the face (cell-model.md).
             .shaper = rowlayout.Shaper.init(gpa, font, cell_w),
@@ -72,6 +114,7 @@ pub const Painter = struct {
     }
 
     pub fn deinit(self: *Painter) void {
+        for (self.faces[1..]) |f| if (f != self.primary) ct.CFRelease(f);
         self.clearRows();
         self.rows.deinit(self.gpa);
         self.shaper.deinit();
@@ -93,13 +136,19 @@ pub const Painter = struct {
     /// The font and glyph that draw `cp`: Menlo if it has the character, else the font CoreText
     /// falls back to. Null if nothing has it.
     pub fn lookup(self: *Painter, cp: u21) ?Glyph {
-        if (self.cache.get(cp)) |hit| return hit;
-        const found = self.resolve(cp);
-        if (self.cache.count() < max_cached) self.cache.put(self.gpa, cp, found) catch {};
+        return self.lookupFace(cp, 0);
+    }
+
+    pub fn lookupFace(self: *Painter, cp: u21, face: u2) ?Glyph {
+        const key: u32 = @as(u32, cp) | (@as(u32, face) << 21);
+        if (self.cache.get(key)) |hit| return hit;
+        const found = self.resolve(cp, face);
+        if (self.cache.count() < max_cached) self.cache.put(self.gpa, key, found) catch {};
         return found;
     }
 
-    fn resolve(self: *Painter, cp: u21) ?Glyph {
+    fn resolve(self: *Painter, cp: u21, face: u2) ?Glyph {
+        const base = self.faces[face];
         var units: [2]ct.UniChar = undefined;
         const n: usize = if (cp < 0x10000) blk: {
             units[0] = @intCast(cp);
@@ -111,14 +160,14 @@ pub const Painter = struct {
             break :blk 2;
         };
         var gids = [2]ct.CGGlyph{ 0, 0 };
-        if (ct.CTFontGetGlyphsForCharacters(self.primary, &units, &gids, @intCast(n)) and gids[0] != 0) {
-            return .{ .font = self.primary, .gid = gids[0] };
+        if (ct.CTFontGetGlyphsForCharacters(base, &units, &gids, @intCast(n)) and gids[0] != 0) {
+            return .{ .font = base, .gid = gids[0] };
         }
         var utf8: [4]u8 = undefined;
         const len = std.unicode.utf8Encode(cp, &utf8) catch return null;
         const str = ct.cfString(utf8[0..len]) orelse return null;
         defer ct.CFRelease(str);
-        const fb = ct.CTFontCreateForString(self.primary, str, .{ .location = 0, .length = @intCast(n) }) orelse return null;
+        const fb = ct.CTFontCreateForString(base, str, .{ .location = 0, .length = @intCast(n) }) orelse return null;
         // CoreText returns a new reference every time; keep one per distinct font.
         var keep: *ct.CTFont = fb;
         for (self.fallbacks.items) |f| {
@@ -148,11 +197,11 @@ pub const Painter = struct {
         ct.CGContextFillRect(ctx, .{ .origin = .{ .x = x, .y = y }, .size = .{ .width = w, .height = h } });
     }
 
-    fn drawCell(self: *Painter, ctx: *ct.CGContext, cps: []const u21, x: f64, baseline: f64, color: [3]f64) void {
+    fn drawCell(self: *Painter, ctx: *ct.CGContext, cps: []const u21, face: u2, x: f64, baseline: f64, color: [3]f64) void {
         ct.CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], 1);
         for (cps) |cp| {
             if (cp == ' ') continue;
-            const g = self.lookup(cp) orelse continue;
+            const g = self.lookupFace(cp, face) orelse continue;
             ct.CGContextSaveGState(ctx);
             ct.CGContextTranslateCTM(ctx, 0, baseline);
             ct.CGContextScaleCTM(ctx, 1, -1); // the context is y-down: flip glyphs upright
@@ -211,9 +260,17 @@ pub const Painter = struct {
     }
 
     /// Draws a shaped row's glyphs (each horizontally scaled by its `sx`) with the pen at `baseline`.
-    fn drawShaped(self: *Painter, ctx: *ct.CGContext, rl: *const rowlayout.RowLayout, baseline: f64, color: [3]f64) void {
-        ct.CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], 1);
+    /// With `flat` every glyph takes that color (the cursor's inverted pass); otherwise each glyph
+    /// takes its cell's colors, and invisible cells draw nothing. Bold and italic are not applied:
+    /// the layouter shapes a row with one font (Decision 3).
+    fn drawShaped(self: *Painter, ctx: *ct.CGContext, rl: *const rowlayout.RowLayout, cells: []const vt.Cell, d: vt.Colors, baseline: f64, flat: ?Rgb3) void {
         for (rl.placed) |pl| {
+            const color = if (flat) |f| f else blk: {
+                const st = if (pl.lcol < cells.len) cells[pl.lcol].style else vt.Style{};
+                if (st.flags & vt.Style.Flag.invisible != 0) continue;
+                break :blk cellColors(st, d).fg;
+            };
+            ct.CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], 1);
             ct.CGContextSaveGState(ctx);
             ct.CGContextTranslateCTM(ctx, pl.x, baseline);
             ct.CGContextScaleCTM(ctx, pl.sx, -1); // y-down context: flip glyphs upright
@@ -224,10 +281,81 @@ pub const Painter = struct {
         }
     }
 
+    /// Underline (any style) and strikethrough for one cell box `x .. x + w`.
+    fn drawLines(self: *Painter, ctx: *ct.CGContext, style: vt.Style, cc: CellColors, x: f64, w: f64, top: f64) void {
+        const m = self.metrics_;
+        const th: f64 = self.line_px;
+        const ch: f64 = m.cell_h;
+        const base = top + m.ascent;
+        const ul = style.underline();
+        if (ul != .none) {
+            const color = if (style.underline_color) |u| rgb(u) else cc.fg;
+            // Below the baseline, inside the cell.
+            const y1 = @min(base + @max(th, (ch - m.ascent) * 0.25), top + ch - th);
+            switch (ul) {
+                .none => {},
+                .single => fill(ctx, x, y1, w, th, color),
+                .double => {
+                    const y2 = @min(y1 + 2 * th, top + ch - th);
+                    fill(ctx, x, y2 - 2 * th, w, th, color);
+                    fill(ctx, x, y2, w, th, color);
+                },
+                .curly => {
+                    ct.CGContextSetRGBStrokeColor(ctx, color[0], color[1], color[2], 1);
+                    ct.CGContextSetLineWidth(ctx, th);
+                    const amp = th;
+                    const yc = @min(y1 + th * 0.5, top + ch - th * 1.5 - amp * 0.5) - amp * 0.5;
+                    ct.CGContextBeginPath(ctx);
+                    ct.CGContextMoveToPoint(ctx, x, yc);
+                    const step = @max(2, th * 2);
+                    var dx: f64 = step;
+                    var up = true;
+                    while (dx < w + step) : (dx += step) {
+                        ct.CGContextAddLineToPoint(ctx, @min(x + dx, x + w), if (up) yc + amp else yc);
+                        up = !up;
+                    }
+                    ct.CGContextStrokePath(ctx);
+                },
+                .dotted => {
+                    var dx: f64 = 0;
+                    while (dx < w) : (dx += 2 * th) fill(ctx, x + dx, y1, @min(th, w - dx), th, color);
+                },
+                .dashed => {
+                    var dx: f64 = 0;
+                    while (dx < w) : (dx += 5 * th) fill(ctx, x + dx, y1, @min(3 * th, w - dx), th, color);
+                },
+            }
+        }
+        if (style.flags & vt.Style.Flag.strikethrough != 0) {
+            fill(ctx, x, top + m.ascent * 0.6 - th * 0.5, w, th, cc.fg);
+        }
+    }
+
+    /// Draws the cursor. `x0` and `bw` are the cell's pixel box; `inner` redraws the glyph under a solid block.
+    fn drawCursor(self: *Painter, ctx: *ct.CGContext, cur: vt.Terminal.Cursor, d: vt.Colors, x0: f64, bw: f64, top: f64) bool {
+        const m = self.metrics_;
+        const ch: f64 = m.cell_h;
+        const th: f64 = self.line_px;
+        const color = if (cur.color) |c| rgb(c) else rgb(d.fg);
+        const shape: vt.Terminal.CursorShape = if (!self.focused) .block_hollow else cur.shape;
+        switch (shape) {
+            .block => return true, // the caller fills the block and redraws the glyph
+            .bar => fill(ctx, x0, top, th, ch, color),
+            .underline => fill(ctx, x0, top + ch - th, bw, th, color),
+            .block_hollow => {
+                fill(ctx, x0, top, bw, th, color);
+                fill(ctx, x0, top + ch - th, bw, th, color);
+                fill(ctx, x0, top, th, ch, color);
+                fill(ctx, x0 + bw - th, top, th, ch, color);
+            },
+        }
+        return false;
+    }
+
     /// Draws rows `first_row` to `last_row` (inclusive; clamped to the grid) and the cursor into a
     /// y-down context in device pixels whose origin is the grid's top-left. The caller holds the
     /// session lock. Refreshes the render state once. Rows with RTL text are shaped (Phase 4); all
-    /// others are drawn one cell at a time.
+    /// others are drawn one cell at a time. Colors and styles come from the terminal (slice 3).
     pub fn drawRows(self: *Painter, term: *vt.Terminal, ctx: *ct.CGContext, first_row: u16, last_row: u16) void {
         const size = term.size();
         if (size.rows == 0 or first_row >= size.rows or !term.update()) return;
@@ -236,6 +364,8 @@ pub const Painter = struct {
         const cw: f64 = m.cell_w;
         const ch: f64 = m.cell_h;
         const grid_w = cw * @as(f64, @floatFromInt(size.cols));
+        const d = term.colors();
+        const default_bg = rgb(d.bg);
         ct.CGContextSaveGState(ctx);
         defer ct.CGContextRestoreGState(ctx);
         // Wide fallback glyphs must not spill past the grid.
@@ -245,40 +375,75 @@ pub const Painter = struct {
         var row: u16 = first_row;
         while (row <= last) : (row += 1) {
             const top = ch * @as(f64, @floatFromInt(row));
-            fill(ctx, 0, top, grid_w, ch, bg);
+            fill(ctx, 0, top, grid_w, ch, default_bg);
             if (!term.selectRow(row)) continue;
             const cells = self.gather(term, size.cols) catch continue;
             if ((self.shapedRow(cells) catch null)) |rl| {
-                self.drawShaped(ctx, rl, top + m.ascent, fg);
+                // Backgrounds by column box (columns past the text are plain cells), then glyphs, then lines.
+                for (0..cells.len) |col| {
+                    const sp = rl.span(@intCast(col), m.cell_w);
+                    const cc = cellColors(styleAt(cells, col), d);
+                    if (cc.has_bg) fill(ctx, sp.x0, top, sp.x1 - sp.x0, ch, cc.bg);
+                }
+                self.drawShaped(ctx, rl, cells, d, top + m.ascent, null);
+                for (0..cells.len) |col| {
+                    const st = styleAt(cells, col);
+                    if (st.underline() == .none and st.flags & vt.Style.Flag.strikethrough == 0) continue;
+                    const sp = rl.span(@intCast(col), m.cell_w);
+                    self.drawLines(ctx, st, cellColors(st, d), sp.x0, sp.x1 - sp.x0, top);
+                }
                 if (cur) |c| if (c.visible and c.row == row and c.col < size.cols) {
-                    // The block covers the column's box; the row's glyphs are redrawn inverted inside it.
                     const sp = rl.span(c.col, m.cell_w);
-                    const x0: f64 = sp.x0;
                     const bw: f64 = sp.x1 - sp.x0;
-                    fill(ctx, x0, top, bw, ch, fg);
-                    ct.CGContextSaveGState(ctx);
-                    ct.CGContextClipToRect(ctx, .{ .origin = .{ .x = x0, .y = top }, .size = .{ .width = bw, .height = ch } });
-                    self.drawShaped(ctx, rl, top + m.ascent, bg);
-                    ct.CGContextRestoreGState(ctx);
+                    if (self.drawCursor(ctx, c, d, sp.x0, bw, top)) {
+                        // A solid block covers the column's box and the row's glyphs are redrawn inverted inside it.
+                        const color = if (c.color) |cc| rgb(cc) else rgb(d.fg);
+                        fill(ctx, sp.x0, top, bw, ch, color);
+                        ct.CGContextSaveGState(ctx);
+                        ct.CGContextClipToRect(ctx, .{ .origin = .{ .x = sp.x0, .y = top }, .size = .{ .width = bw, .height = ch } });
+                        self.drawShaped(ctx, rl, cells, d, top + m.ascent, default_bg);
+                        ct.CGContextRestoreGState(ctx);
+                    }
                     cursor_drawn = true;
                 };
                 continue;
             }
             self.stats.plain_rows += 1;
-            for (cells, 0..) |cell, col| {
+            // Backgrounds: runs of equal color.
+            var col: usize = 0;
+            while (col < cells.len) {
+                const cc = cellColors(styleAt(cells, col), d);
+                var end = col + 1;
+                while (end < cells.len) : (end += 1) {
+                    const next = cellColors(styleAt(cells, end), d);
+                    if (!std.mem.eql(f64, &next.bg, &cc.bg)) break;
+                }
+                if (cc.has_bg) fill(ctx, cw * @as(f64, @floatFromInt(col)), top, cw * @as(f64, @floatFromInt(end - col)), ch, cc.bg);
+                col = end;
+            }
+            // Glyphs, then lines.
+            for (cells, 0..) |cell, ci| {
                 if (cell.wide == .spacer_tail or cell.wide == .spacer_head or cell.cps.len == 0) continue;
-                self.drawCell(ctx, cell.cps, cw * @as(f64, @floatFromInt(col)), top + m.ascent, fg);
+                if (cell.style.flags & vt.Style.Flag.invisible != 0) continue;
+                self.drawCell(ctx, cell.cps, faceOf(cell.style), cw * @as(f64, @floatFromInt(ci)), top + m.ascent, cellColors(cell.style, d).fg);
+            }
+            for (0..cells.len) |ci| {
+                const st = styleAt(cells, ci);
+                if (st.underline() == .none and st.flags & vt.Style.Flag.strikethrough == 0) continue;
+                self.drawLines(ctx, st, cellColors(st, d), cw * @as(f64, @floatFromInt(ci)), cw, top);
             }
         }
         const c = cur orelse return;
         if (cursor_drawn or !c.visible or c.row < first_row or c.row > last or c.col >= size.cols) return;
         const top = ch * @as(f64, @floatFromInt(c.row));
-        var buf: [16]u21 = undefined;
         const x = cw * @as(f64, @floatFromInt(c.col));
-        fill(ctx, x, top, cw, ch, fg);
-        if (term.selectRow(c.row)) {
-            const cell = term.cellInRow(c.col, &buf);
-            self.drawCell(ctx, cell.cps, x, top + m.ascent, bg); // the glyph under the block, inverted
+        var buf: [16]u21 = undefined;
+        var cell: vt.Cell = .{ .cps = buf[0..0], .wide = .narrow };
+        if (term.selectRow(c.row)) cell = term.cellInRow(c.col, &buf);
+        const bw: f64 = if (cell.wide == .wide) cw * 2 else cw; // the block covers both halves of a wide glyph
+        if (self.drawCursor(ctx, c, d, x, bw, top)) {
+            fill(ctx, x, top, bw, ch, if (c.color) |cc| rgb(cc) else rgb(d.fg));
+            if (cell.style.flags & vt.Style.Flag.invisible == 0) self.drawCell(ctx, cell.cps, faceOf(cell.style), x, top + m.ascent, default_bg); // the glyph under the block, inverted
         }
     }
 };
@@ -659,4 +824,231 @@ test "cache is capped" {
         try std.testing.expect(p.rows.count() <= Painter.max_cached_rows);
     }
     try std.testing.expectEqual(@as(u32, 1000), p.stats.shaped_rows);
+}
+
+// ---- slice 3: colors and styles ----
+
+fn near(p: [3]u8, r: u8, g: u8, b: u8, tol: u8) bool {
+    return @abs(@as(i32, p[0]) - r) <= tol and @abs(@as(i32, p[1]) - g) <= tol and @abs(@as(i32, p[2]) - b) <= tol;
+}
+
+fn anyNear(cv: Canvas, box: [4]usize, r: u8, g: u8, b: u8, tol: u8) bool {
+    var y = box[1];
+    while (y < @min(box[3], cv.h)) : (y += 1) {
+        var x = box[0];
+        while (x < @min(box[2], cv.w)) : (x += 1) if (near(cv.px(x, y), r, g, b, tol)) return true;
+    }
+    return false;
+}
+
+fn inkCount(cv: Canvas, box: [4]usize) usize {
+    var n: usize = 0;
+    var y = box[1];
+    while (y < @min(box[3], cv.h)) : (y += 1) {
+        var x = box[0];
+        while (x < @min(box[2], cv.w)) : (x += 1) if (!cv.isBg(x, y)) {
+            n += 1;
+        };
+    }
+    return n;
+}
+
+fn rowBand(m: Metrics, row: usize, from: f32, to: f32, cols: usize) [4]usize {
+    const top: f32 = m.cell_h * @as(f32, @floatFromInt(row));
+    return .{ 0, @intFromFloat(top + from), @intFromFloat(m.cell_w * @as(f32, @floatFromInt(cols))), @intFromFloat(top + to) };
+}
+
+test "foreground and background colors" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 2, 20, "\x1b[?25l\x1b[38;2;200;10;10;48;2;10;10;200mA\x1b[0mB");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const m = p.metrics();
+    const a = cellBox(m, 0, 0);
+    try std.testing.expect(near(s.cv.px(a[0] + 1, a[1] + 1), 10, 10, 200, 2)); // background
+    try std.testing.expect(anyNear(s.cv, a, 200, 10, 10, 30)); // the letter
+    try std.testing.expect(s.cv.isBg(cellBox(m, 5, 0)[0] + 1, 1)); // untouched cells keep the theme
+    const pal = try testScreen(p, 20, 2, 20, "\x1b[?25l\x1b[31;44mA\x1b[38;5;196mB");
+    defer pal.t.deinit();
+    defer pal.cv.deinit();
+    const c4 = pal.t.paletteColor(4);
+    try std.testing.expect(near(pal.cv.px(a[0] + 1, a[1] + 1), c4.r, c4.g, c4.b, 2));
+    try std.testing.expect(anyNear(pal.cv, cellBox(m, 1, 0), 255, 0, 0, 30));
+}
+
+test "erased cells keep their background" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 2, 20, "\x1b[?25l\x1b[41m\x1b[2K");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const m = p.metrics();
+    const red = s.t.paletteColor(1);
+    const last = cellBox(m, 19, 0);
+    try std.testing.expect(near(s.cv.px(last[0] + 1, last[1] + 1), red.r, red.g, red.b, 2));
+    try std.testing.expect(s.cv.isBg(1, cellBox(m, 0, 1)[1] + 1)); // the next row is not
+}
+
+test "wide cell background" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 2, 20, "\x1b[?25l\x1b[42m\u{65E5}\x1b[0m");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const m = p.metrics();
+    const green = s.t.paletteColor(2);
+    for ([_]usize{ 0, 1 }) |col| {
+        const b = cellBox(m, col, 0);
+        try std.testing.expect(near(s.cv.px(b[2] - 1, b[1] + 1), green.r, green.g, green.b, 2));
+    }
+    try std.testing.expect(s.cv.isBg(cellBox(m, 2, 0)[0] + 1, 1));
+}
+
+test "inverse swaps" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 2, 20, "\x1b[?25l\x1b[7mH");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const b = cellBox(p.metrics(), 0, 0);
+    try std.testing.expect(s.cv.px(b[0] + 1, b[1] + 1)[0] > 200); // a foreground-colored cell
+    try std.testing.expect(anyDarkIn(s.cv, b[0], b[1], b[2], b[3])); // with background-colored ink
+}
+
+test "faint and invisible" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 2, 20, "\x1b[?25lH\x1b[2mH\x1b[0m\x1b[8mH");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const m = p.metrics();
+    var normal_max: u8 = 0;
+    var faint_max: u8 = 0;
+    const n = cellBox(m, 0, 0);
+    const f = cellBox(m, 1, 0);
+    var y = n[1];
+    while (y < n[3]) : (y += 1) {
+        var x: usize = 0;
+        while (x < n[2] - n[0]) : (x += 1) {
+            normal_max = @max(normal_max, s.cv.px(n[0] + x, y)[0]);
+            faint_max = @max(faint_max, s.cv.px(f[0] + x, y)[0]);
+        }
+    }
+    try std.testing.expect(faint_max < normal_max and faint_max > 40);
+    const inv = cellBox(m, 2, 0);
+    try std.testing.expect(!s.cv.inkIn(inv[0], inv[1], inv[2], inv[3]));
+}
+
+test "bold and italic draw differently" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 2, 20, "\x1b[?25lH\x1b[1mH\x1b[0m\x1b[3mH\x1b[0m");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const m = p.metrics();
+    const regular = inkCount(s.cv, cellBox(m, 0, 0));
+    try std.testing.expect(inkCount(s.cv, cellBox(m, 1, 0)) > regular); // bold has more ink
+    var differs = false;
+    const a = cellBox(m, 0, 0);
+    const c = cellBox(m, 2, 0);
+    for (0..a[2] - a[0]) |dx| {
+        for (a[1]..a[3]) |y| {
+            if (!std.mem.eql(u8, &s.cv.px(a[0] + dx, y), &s.cv.px(c[0] + dx, y))) differs = true;
+        }
+    }
+    try std.testing.expect(differs); // italic is not the regular face
+}
+
+test "underline and strike" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    // one underline style per row, three blank cells each; row 5 is strikethrough
+    const s = try testScreen(p, 6, 6, 6, "\x1b[?25l\x1b[4m   \x1b[0m\r\n\x1b[21m   \x1b[0m\r\n\x1b[4:3m   \x1b[0m\r\n\x1b[4:4m   \x1b[0m\r\n\x1b[4:5m   \x1b[0m\r\n\x1b[9m   \x1b[0m");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const m = p.metrics();
+    for (0..5) |row| {
+        try std.testing.expect(inkCount(s.cv, rowBand(m, row, m.ascent, m.cell_h, 3)) > 0); // below the baseline
+        try std.testing.expect(inkCount(s.cv, rowBand(m, row, 0, m.ascent - 1, 3)) == 0); // nothing above it
+    }
+    try std.testing.expect(inkCount(s.cv, rowBand(m, 5, m.ascent * 0.2, m.ascent * 0.9, 3)) > 0); // strike through the middle
+    try std.testing.expect(inkCount(s.cv, rowBand(m, 5, m.ascent + 2, m.cell_h, 3)) == 0);
+    // underline color
+    const c = try testScreen(p, 6, 2, 6, "\x1b[?25l\x1b[4m\x1b[58;2;0;200;0m   ");
+    defer c.t.deinit();
+    defer c.cv.deinit();
+    try std.testing.expect(anyNear(c.cv, rowBand(m, 0, m.ascent, m.cell_h, 3), 0, 200, 0, 20));
+}
+
+test "shaped row colors" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const word = "\u{645}\u{631}\u{62D}\u{628}\u{627}";
+    const s = try testScreen(p, 20, 2, 20, "\x1b[?25l\x1b[38;2;220;10;10;48;2;10;10;200m" ++ word ++ "\x1b[0m");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const m = p.metrics();
+    try std.testing.expectEqual(@as(u32, 1), p.stats.shaped_rows);
+    const b = cellBox(m, 0, 0);
+    try std.testing.expect(near(s.cv.px(b[0] + 1, b[1] + 1), 10, 10, 200, 2));
+    try std.testing.expect(anyNear(s.cv, rowBand(m, 0, 0, m.cell_h, 5), 220, 10, 10, 30));
+    try std.testing.expect(s.cv.isBg(cellBox(m, 6, 0)[0] + 1, 1)); // the span ends with the word
+    // bold is ignored on a shaped row (Decision 3): the same pixels as regular
+    const plain = try testScreen(p, 20, 2, 20, "\x1b[?25l" ++ word);
+    defer plain.t.deinit();
+    defer plain.cv.deinit();
+    const bold = try testScreen(p, 20, 2, 20, "\x1b[?25l\x1b[1m" ++ word);
+    defer bold.t.deinit();
+    defer bold.cv.deinit();
+    try std.testing.expectEqualSlices(u8, plain.cv.data, bold.cv.data);
+}
+
+test "cursor shapes and focus" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const m = p.metrics();
+    const w: usize = @intFromFloat(m.cell_w);
+    // steady bar: 2 px at the left of the cell, nothing at its right
+    const bar = try testScreen(p, 10, 2, 10, "\x1b[6 q");
+    defer bar.t.deinit();
+    defer bar.cv.deinit();
+    try std.testing.expect(bar.cv.px(0, 3)[0] > 200 and bar.cv.px(1, 3)[0] > 200);
+    try std.testing.expect(bar.cv.isBg(w - 2, 3));
+    // steady underline: the bottom rows only
+    const ul = try testScreen(p, 10, 2, 10, "\x1b[4 q");
+    defer ul.t.deinit();
+    defer ul.cv.deinit();
+    try std.testing.expect(ul.cv.px(w / 2, @as(usize, @intFromFloat(m.cell_h)) - 1)[0] > 200);
+    try std.testing.expect(ul.cv.isBg(w / 2, 2));
+    // unfocused: a hollow block (edge solid, interior background)
+    p.focused = false;
+    const hollow = try testScreen(p, 10, 2, 10, "\x1b[2 q");
+    defer hollow.t.deinit();
+    defer hollow.cv.deinit();
+    try std.testing.expect(hollow.cv.px(0, 3)[0] > 200);
+    try std.testing.expect(hollow.cv.isBg(w / 2, @as(usize, @intFromFloat(m.cell_h)) / 2));
+    p.focused = true;
+    const block = try testScreen(p, 10, 2, 10, "\x1b[2 q");
+    defer block.t.deinit();
+    defer block.cv.deinit();
+    try std.testing.expect(block.cv.px(w / 2, @as(usize, @intFromFloat(m.cell_h)) / 2)[0] > 200);
+}
+
+test "cursor on an inverse cell stays legible" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 10, 2, 10, "\x1b[7mH\x1b[0m\x1b[1D");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const b = cellBox(p.metrics(), 0, 0);
+    // the glyph must still be visible against the cursor block
+    var lo: u8 = 255;
+    var hi: u8 = 0;
+    for (b[1]..b[3]) |y| for (b[0]..b[2]) |x| {
+        const v = s.cv.px(x, y)[0];
+        lo = @min(lo, v);
+        hi = @max(hi, v);
+    };
+    try std.testing.expect(hi - lo > 100);
 }

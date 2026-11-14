@@ -202,7 +202,8 @@ pub const Terminal = struct {
         return self.readCell(buf);
     }
 
-    pub const Cursor = struct { col: u16, row: u16, visible: bool };
+    pub const CursorShape = enum { bar, block, underline, block_hollow };
+    pub const Cursor = struct { col: u16, row: u16, visible: bool, shape: CursorShape = .block, color: ?Rgb = null };
 
     /// The cursor of the last `update`; null when it is outside the viewport.
     pub fn cursor(self: *Terminal) ?Cursor {
@@ -215,7 +216,15 @@ pub const Terminal = struct {
         _ = c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X, &x);
         _ = c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &y);
         _ = c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE, &vis);
-        return .{ .col = x, .row = y, .visible = vis };
+        var style: c.GhosttyCursorStyle = c.GHOSTTY_CURSOR_STYLE_BLOCK;
+        _ = c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_CURSOR_VISUAL_STYLE, &style);
+        const shape: CursorShape = switch (style) {
+            c.GHOSTTY_CURSOR_STYLE_BAR => .bar,
+            c.GHOSTTY_CURSOR_STYLE_UNDERLINE => .underline,
+            c.GHOSTTY_CURSOR_STYLE_BLOCK_HOLLOW => .block_hollow,
+            else => .block,
+        };
+        return .{ .col = x, .row = y, .visible = vis, .shape = shape, .color = self.default_colors.cursor };
     }
 
     /// The bytes a key press sends to the child, for the terminal's current modes (application
