@@ -19,6 +19,9 @@ const max_cached: usize = 4096;
 const max_fallback_fonts: usize = 64;
 
 pub const Painter = struct {
+    /// Shaped rows kept between draws. Full means clear-all (a ponytail: per-row LRU if the numbers ask).
+    pub const max_cached_rows: usize = 128;
+
     gpa: std.mem.Allocator,
     primary: *ct.CTFont,
     size_px: f32,
@@ -31,6 +34,9 @@ pub const Painter = struct {
     /// Counters that make the fast path and the cache testable.
     stats: struct { shaped_rows: u32 = 0, plain_rows: u32 = 0, cache_hits: u32 = 0 } = .{},
     shaper: rowlayout.Shaper,
+    /// Shaped rows by key: one byte of base direction, then the row text. The map compares whole keys,
+    /// so a hash collision can never return another row's layout.
+    rows: std.StringHashMapUnmanaged(rowlayout.RowLayout) = .empty,
     // Per-row scratch, reused so a draw does not allocate once warm.
     cell_store: std.ArrayList(u21) = .empty,
     cells: std.ArrayList(vt.Cell) = .empty,
@@ -66,6 +72,8 @@ pub const Painter = struct {
     }
 
     pub fn deinit(self: *Painter) void {
+        self.clearRows();
+        self.rows.deinit(self.gpa);
         self.shaper.deinit();
         self.cell_store.deinit(self.gpa);
         self.cells.deinit(self.gpa);
@@ -166,9 +174,18 @@ pub const Painter = struct {
         return self.cells.items;
     }
 
+    fn clearRows(self: *Painter) void {
+        var it = self.rows.iterator();
+        while (it.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            e.value_ptr.deinit(self.gpa);
+        }
+        self.rows.clearRetainingCapacity();
+    }
+
     /// The shaped layout for a gathered row, or null if the row draws plain (no RTL text, or it cannot
-    /// be mapped one cell per character). The caller owns the result.
-    fn shapedRow(self: *Painter, cells: []const vt.Cell) !?rowlayout.RowLayout {
+    /// be mapped one cell per character). The cache owns the result; it stays valid until the next call.
+    fn shapedRow(self: *Painter, cells: []const vt.Cell) !?*const rowlayout.RowLayout {
         self.flat.clearRetainingCapacity();
         for (cells) |cell| {
             if (cell.wide == .spacer_tail or cell.wide == .spacer_head) continue;
@@ -177,8 +194,20 @@ pub const Painter = struct {
         const facts = rowfacts.analyze(self.flat.items, self.policy);
         if (!facts.needs_layout) return null;
         self.text.clearRetainingCapacity();
+        try self.text.append(self.gpa, @intFromBool(facts.rtl_base)); // the key's first byte
         const n = (try rowlayout.rowText(cells, &self.text, self.gpa)) orelse return null;
-        return try self.shaper.shape(self.text.items, n, facts.rtl_base);
+        if (self.rows.getPtr(self.text.items)) |hit| {
+            self.stats.cache_hits += 1;
+            return hit;
+        }
+        var rl = (try self.shaper.shape(self.text.items[1..], n, facts.rtl_base)) orelse return null;
+        errdefer rl.deinit(self.gpa);
+        if (self.rows.count() >= max_cached_rows) self.clearRows();
+        const key = try self.gpa.dupe(u8, self.text.items);
+        errdefer self.gpa.free(key);
+        try self.rows.put(self.gpa, key, rl);
+        self.stats.shaped_rows += 1;
+        return self.rows.getPtr(key);
     }
 
     /// Draws a shaped row's glyphs (each horizontally scaled by its `sx`) with the pen at `baseline`.
@@ -212,22 +241,27 @@ pub const Painter = struct {
         // Wide fallback glyphs must not spill past the grid.
         ct.CGContextClipToRect(ctx, .{ .origin = .{ .x = 0, .y = 0 }, .size = .{ .width = grid_w, .height = ch * @as(f64, @floatFromInt(size.rows)) } });
         const cur = term.cursor();
-        // The cursor row's layout is kept until the cursor is drawn.
-        var cursor_rl: ?rowlayout.RowLayout = null;
-        defer if (cursor_rl) |*rl| rl.deinit(self.gpa);
+        var cursor_drawn = false;
         var row: u16 = first_row;
         while (row <= last) : (row += 1) {
             const top = ch * @as(f64, @floatFromInt(row));
             fill(ctx, 0, top, grid_w, ch, bg);
             if (!term.selectRow(row)) continue;
             const cells = self.gather(term, size.cols) catch continue;
-            var shaped: ?rowlayout.RowLayout = self.shapedRow(cells) catch null;
-            if (shaped) |*rl| {
-                self.stats.shaped_rows += 1;
+            if ((self.shapedRow(cells) catch null)) |rl| {
                 self.drawShaped(ctx, rl, top + m.ascent, fg);
-                if (cur != null and cur.?.row == row) {
-                    cursor_rl = rl.*;
-                } else rl.deinit(self.gpa);
+                if (cur) |c| if (c.visible and c.row == row and c.col < size.cols) {
+                    // The block covers the column's box; the row's glyphs are redrawn inverted inside it.
+                    const sp = rl.span(c.col, m.cell_w);
+                    const x0: f64 = sp.x0;
+                    const bw: f64 = sp.x1 - sp.x0;
+                    fill(ctx, x0, top, bw, ch, fg);
+                    ct.CGContextSaveGState(ctx);
+                    ct.CGContextClipToRect(ctx, .{ .origin = .{ .x = x0, .y = top }, .size = .{ .width = bw, .height = ch } });
+                    self.drawShaped(ctx, rl, top + m.ascent, bg);
+                    ct.CGContextRestoreGState(ctx);
+                    cursor_drawn = true;
+                };
                 continue;
             }
             self.stats.plain_rows += 1;
@@ -237,20 +271,8 @@ pub const Painter = struct {
             }
         }
         const c = cur orelse return;
-        if (!c.visible or c.row < first_row or c.row > last or c.col >= size.cols) return;
+        if (cursor_drawn or !c.visible or c.row < first_row or c.row > last or c.col >= size.cols) return;
         const top = ch * @as(f64, @floatFromInt(c.row));
-        if (cursor_rl) |*rl| {
-            // A shaped row: the block covers the column's box and the row's glyphs are redrawn inverted inside it.
-            const sp = rl.span(c.col, m.cell_w);
-            const x0: f64 = sp.x0;
-            const bw: f64 = sp.x1 - sp.x0;
-            fill(ctx, x0, top, bw, ch, fg);
-            ct.CGContextSaveGState(ctx);
-            ct.CGContextClipToRect(ctx, .{ .origin = .{ .x = x0, .y = top }, .size = .{ .width = bw, .height = ch } });
-            self.drawShaped(ctx, rl, top + m.ascent, bg);
-            ct.CGContextRestoreGState(ctx);
-            return;
-        }
         var buf: [16]u21 = undefined;
         const x = cw * @as(f64, @floatFromInt(c.col));
         fill(ctx, x, top, cw, ch, fg);
@@ -464,7 +486,7 @@ fn testScreen(p: *Painter, cols: u16, rows: u16, canvas_cols: usize, text: []con
 }
 
 /// The layout the painter would use for visible row `row` (null if the row draws plain).
-fn testLayout(p: *Painter, t: *vt.Terminal, row: u16) !?rowlayout.RowLayout {
+fn testLayout(p: *Painter, t: *vt.Terminal, row: u16) !?*const rowlayout.RowLayout {
     _ = t.update();
     _ = t.selectRow(row);
     const cells = try p.gather(t, t.size().cols);
@@ -520,8 +542,7 @@ test "rtl row is right to left" {
     const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 2 });
     defer t.deinit();
     t.write("\u{645}\u{631}\u{62D}\u{628}\u{627}");
-    var rl = (try testLayout(p, t, 0)).?;
-    defer rl.deinit(std.testing.allocator);
+    const rl = (try testLayout(p, t, 0)).?;
     try std.testing.expect(rl.rtl_base);
     try std.testing.expect(rl.span(0, p.metrics().cell_w).x0 > rl.span(4, p.metrics().cell_w).x0);
 }
@@ -532,8 +553,7 @@ test "cursor box on a shaped row" {
     const s = try testScreen(p, 30, 2, 30, "\u{645}\u{631}\u{62D}\u{628}\u{627}\x1b[1;3H");
     defer s.t.deinit();
     defer s.cv.deinit();
-    var rl = (try testLayout(p, s.t, 0)).?;
-    defer rl.deinit(std.testing.allocator);
+    const rl = (try testLayout(p, s.t, 0)).?;
     const m = p.metrics();
     const sp = rl.span(2, m.cell_w);
     const x0: usize = @intFromFloat(@ceil(sp.x0));
@@ -585,4 +605,58 @@ test "tiny grids" {
         const gw: usize = @intFromFloat(m.cell_w * cols);
         try std.testing.expect(untouched(s.cv, gw, 0, s.cv.w, s.cv.h));
     }
+}
+
+test "same row twice shapes once" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 2, 20, "\u{645}\u{631}\u{62D}\u{628}\u{627}");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    p.drawRows(s.t, s.cv.ctx, 0, 1);
+    try std.testing.expectEqual(@as(u32, 1), p.stats.shaped_rows);
+    try std.testing.expectEqual(@as(u32, 1), p.stats.cache_hits);
+}
+
+test "changed row is reshaped" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 2, 20, "\u{645}\u{631}\u{62D}\u{628}\u{627}\x1b[?25l");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const before = try std.testing.allocator.dupe(u8, s.cv.data);
+    defer std.testing.allocator.free(before);
+    s.t.write("\x1b[1;1H\x1b[2K\u{645}\u{631}\u{62D}\u{628}\u{64A}");
+    p.drawRows(s.t, s.cv.ctx, 0, 1);
+    try std.testing.expect(!std.mem.eql(u8, before, s.cv.data));
+    try std.testing.expectEqual(@as(u32, 2), p.stats.shaped_rows);
+}
+
+test "cached and fresh draws match" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 2, 20, "\u{645}\u{64F}\u{62D}\u{645}\u{651}\u{62F} \u{644}\u{627} ab");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const cold = try std.testing.allocator.dupe(u8, s.cv.data);
+    defer std.testing.allocator.free(cold);
+    p.drawRows(s.t, s.cv.ctx, 0, 1);
+    try std.testing.expectEqual(@as(u32, 1), p.stats.cache_hits);
+    try std.testing.expectEqualSlices(u8, cold, s.cv.data);
+}
+
+test "cache is capped" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 40, 2, 40, "");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    var buf: [64]u8 = undefined;
+    for (0..1000) |i| {
+        const line = try std.fmt.bufPrint(&buf, "\x1b[1;1H\x1b[2K\u{645}\u{631}\u{62D}\u{628}\u{627} {d}", .{i});
+        s.t.write(line);
+        p.drawRows(s.t, s.cv.ctx, 0, 1);
+        try std.testing.expect(p.rows.count() <= Painter.max_cached_rows);
+    }
+    try std.testing.expectEqual(@as(u32, 1000), p.stats.shaped_rows);
 }

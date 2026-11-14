@@ -71,3 +71,18 @@ What this says:
   the backing store is reduced further. Revisit with measured numbers once the real grid exists.
 - Idle CPU budget (~0%) was met by the Phase 0 baseline: 0.01% mean. Re-measure for the CPU renderer (it redraws on dirty rects only).
 - Throughput against GPU terminals (brief section 7) may drop with CPU drawing; measure with vtebench in Phase 3 and revisit.
+
+## Phase 4: shaped Arabic rows (2026-11-14)
+
+Method: `Harf --selftest` (section 1b). A child prints 40 distinct lines of Arabic text (about 80 columns each); the view then
+draws the whole 80x24 grid (700x420 pt, retina) twice with `cacheDisplay`: the first draw shapes every row, the second hits the
+row cache (`Painter.max_cached_rows` = 128). Times include AppKit's bitmap path, not only the painter. Three runs each.
+Build: `macos/build-app.sh` (Zig 0.17.1 ReleaseFast, Swift release). Apple M1, macOS 27.0.1.
+
+| Draw | ms (3 runs) |
+|---|---|
+| Cold, 24 shaped rows | 15.3, 14.9, 14.1 |
+| Cached, same rows | 2.1, 2.1, 2.1 |
+
+Rows without RTL text never reach CoreText shaping (counted by `Painter.stats.plain_rows` in tests). Not measured: typing latency,
+a screen where every wake changes every row, memory with the cache full (128 rows; the footprint measurement is slice 4).

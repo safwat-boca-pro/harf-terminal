@@ -46,6 +46,21 @@ func selfTest() -> Never {
     if c.gridSize.cols < 40 || c.gridSize.rows < 10 { fail("grid at 600x400 pt is \(c.gridSize)") }
     c.close()
 
+    // 1b. Cost of a screen of shaped Arabic rows (Phase 4): first draw shapes every row, the second hits the cache.
+    let flood = "i=0; while [ $i -lt 40 ]; do printf 'بيتي مرحبا السلام عليكم ورحمة الله وبركاته %d بيتي مرحبا السلام عليكم ورحمة الله\\n' $i; i=$((i+1)); done; sleep 4"
+    guard let shaped = TerminalController(argv: ["/bin/sh", "-c", flood], frame: NSSize(width: 700, height: 420)) else { fail("cannot start shaped session") }
+    if !pump(5, until: { shaped.rowText(shaped.gridSize.rows - 2).contains("بيتي") }) { fail("shaped rows: row is '\(shaped.rowText(shaped.gridSize.rows - 2))'") }
+    guard let srep = shaped.view.bitmapImageRepForCachingDisplay(in: shaped.view.bounds) else { fail("no bitmap") }
+    func timed() -> Double {
+        let t0 = Date()
+        shaped.view.cacheDisplay(in: shaped.view.bounds, to: srep)
+        return Date().timeIntervalSince(t0) * 1000
+    }
+    let cold = timed()
+    let warm = timed()
+    print(String(format: "selftest: %dx%d screen of shaped Arabic rows: cold draw %.1f ms, cached draw %.1f ms", shaped.gridSize.cols, shaped.gridSize.rows, cold, warm))
+    shaped.close()
+
     // 2. Typing (a letter, an Arabic letter, Return) goes through the view's own key path.
     let echo = ["/bin/sh", "-c", "read x; echo got:$x"]
     func rows(_ c: TerminalController) -> String { (0..<6).map { c.rowText($0) }.joined(separator: "|") }
