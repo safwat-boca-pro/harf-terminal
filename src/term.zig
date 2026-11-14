@@ -572,6 +572,15 @@ pub const Session = struct {
         return moved;
     }
 
+    /// Selects the last finished command's output (OSC 133); false if there is none to select (see `vt.Terminal.selectLastOutput`).
+    pub fn selectOutput(self: *Session) bool {
+        const t = self.lock();
+        const ok = t.selectLastOutput();
+        self.unlock();
+        if (ok) self.requestWake();
+        return ok;
+    }
+
     pub fn findEnd(self: *Session) void {
         const t = self.lock();
         t.findEnd();

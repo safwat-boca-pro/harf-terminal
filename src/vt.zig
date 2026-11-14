@@ -674,6 +674,34 @@ pub const Terminal = struct {
         return c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_SELECTION, &sel) == c.GHOSTTY_SUCCESS;
     }
 
+    /// Whether the screen row `y` (0 = the oldest row kept) is part of a shell prompt, by its OSC 133 mark.
+    fn isPromptRow(self: *Terminal, y: u32) bool {
+        const ref = self.gridRef(c.GHOSTTY_POINT_TAG_SCREEN, 0, y) orelse return false;
+        var row: c.GhosttyRow = undefined;
+        if (c.ghostty_grid_ref_row(&ref, &row) != c.GHOSTTY_SUCCESS) return false;
+        var sp: c.GhosttyRowSemanticPrompt = c.GHOSTTY_ROW_SEMANTIC_NONE;
+        if (c.ghostty_row_get(row, c.GHOSTTY_ROW_DATA_SEMANTIC_PROMPT, &sp) != c.GHOSTTY_SUCCESS) return false;
+        return sp != c.GHOSTTY_ROW_SEMANTIC_NONE;
+    }
+
+    /// Selects the output of the last finished command, found through the shell's OSC 133 marks: the row above the prompt the
+    /// cursor is on (or the nearest one above it) is the end of that output. The selection is the terminal's own, so Cmd+C
+    /// copies it. False, and no selection, with no marks, no output above, or on the alternate screen.
+    pub fn selectLastOutput(self: *Terminal) bool {
+        if (self.onAlternateScreen()) return false;
+        var cursor_y: u16 = 0;
+        _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_CURSOR_Y, &cursor_y);
+        var y: u32 = @intCast(self.scrollbackRows() + cursor_y);
+        while (!self.isPromptRow(y)) : (y -= 1) if (y == 0) return false; // no prompt mark at or above the cursor
+        while (y > 0 and self.isPromptRow(y - 1)) y -= 1; // a prompt of several lines: its first row
+        if (y == 0) return false; // nothing above it
+        const ref = self.gridRef(c.GHOSTTY_POINT_TAG_SCREEN, 0, y - 1) orelse return false;
+        var sel = std.mem.zeroes(c.GhosttySelection);
+        if (c.ghostty_terminal_select_output(self.handle, &ref, &sel) != c.GHOSTTY_SUCCESS) return false;
+        self.setSelection(sel);
+        return true;
+    }
+
     /// The selected text as UTF-8 in logical order: soft-wrapped lines joined, trailing blanks trimmed.
     /// `error.NoSelection` if nothing is selected. The caller frees the result with `gpa`.
     pub fn selectionText(self: *Terminal, gpa: std.mem.Allocator) ![]u8 {
@@ -1367,6 +1395,38 @@ test "scrollPrompt does nothing without marks, on the alternate screen, or after
     const at = cleared.viewport().offset;
     try std.testing.expect(!cleared.scrollPrompt(-1));
     try std.testing.expectEqual(at, cleared.viewport().offset);
+}
+
+const two_commands = "\x1b]133;A\x07$ one\r\n\x1b]133;C\x07alpha\r\nbeta\r\n\x1b]133;D;0\x07" ++
+    "\x1b]133;A\x07$ two\r\n\x1b]133;C\x07gamma\r\ndelta\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ";
+
+test "selectLastOutput selects the output of the last finished command" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write(two_commands);
+    try std.testing.expect(t.selectLastOutput());
+    const txt = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(txt);
+    try std.testing.expectEqualStrings("gamma\ndelta", txt);
+}
+
+test "selectLastOutput does nothing without marks, on the alternate screen, or after the scrollback was cleared" {
+    const plain = try Terminal.init(std.testing.allocator, .{});
+    defer plain.deinit();
+    writeLines(plain, 30);
+    try std.testing.expect(!plain.selectLastOutput());
+    try std.testing.expectError(error.NoSelection, plain.selectionText(std.testing.allocator));
+
+    const alt = try Terminal.init(std.testing.allocator, .{});
+    defer alt.deinit();
+    alt.write(two_commands ++ "\x1b[?1049h");
+    try std.testing.expect(!alt.selectLastOutput());
+
+    const cleared = try Terminal.init(std.testing.allocator, .{});
+    defer cleared.deinit();
+    cleared.write(two_commands ++ "\x1b[H\x1b[2J\x1b[3J");
+    try std.testing.expect(!cleared.selectLastOutput());
+    try std.testing.expectError(error.NoSelection, cleared.selectionText(std.testing.allocator));
 }
 
 test "default scrollback keeps between 500 and 1200 rows at 80 columns" {

@@ -115,6 +115,9 @@ int harf_term_find_step(HarfTerm *t, int older, size_t *number, size_t *total);
 /* Scrolls to the prompt `delta` prompts away (negative: older) using the shell's OSC 133 marks. Returns 1 if the view moved, 0 if not
    (no marks that way, or the alternate screen: the key then belongs to the program). */
 int harf_term_scroll_prompt(HarfTerm *t, int delta);
+/* Selects the output of the last finished command (the shell's OSC 133 marks); Cmd+C then copies it. Returns 1 if something was
+   selected, 0 if not (no marks, or the alternate screen: the key then belongs to the program). */
+int harf_term_select_output(HarfTerm *t);
 /* Ends the find and clears its highlight. */
 void harf_term_find_end(HarfTerm *t);
 /* Clear the screen (and the scrollback if `scrollback` is not 0), then type Ctrl+L so a shell redraws its prompt. On the

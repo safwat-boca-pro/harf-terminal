@@ -137,6 +137,12 @@ export fn harf_term_scroll_prompt(t: *HarfTerm, delta: c_int) c_int {
     return @intFromBool(t.session.scrollPrompt(delta));
 }
 
+/// Selects the output of the last finished command (the shell's OSC 133 marks); Cmd+C then copies it. Returns 1 if something was
+/// selected, 0 if not (no marks, or the alternate screen: the key then belongs to the program).
+export fn harf_term_select_output(t: *HarfTerm) c_int {
+    return @intFromBool(t.session.selectOutput());
+}
+
 /// Ends the find and clears its selection.
 export fn harf_term_find_end(t: *HarfTerm) void {
     t.session.findEnd();
