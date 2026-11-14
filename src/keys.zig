@@ -73,6 +73,7 @@ pub fn fromMac(code: u16) ?c.GhosttyKey {
         50 => c.GHOSTTY_KEY_BACKQUOTE,
         // editing and navigation
         36 => c.GHOSTTY_KEY_ENTER,
+        76 => c.GHOSTTY_KEY_NUMPAD_ENTER,
         48 => c.GHOSTTY_KEY_TAB,
         49 => c.GHOSTTY_KEY_SPACE,
         51 => c.GHOSTTY_KEY_BACKSPACE,
@@ -199,6 +200,7 @@ pub fn layoutCodepoint(utf8: []const u8, unshifted: u21, key: c.GhosttyKey) u21 
 }
 
 test "known and unknown keycodes" {
+    try std.testing.expectEqual(@as(?c.GhosttyKey, c.GHOSTTY_KEY_NUMPAD_ENTER), fromMac(76));
     try std.testing.expectEqual(@as(?c.GhosttyKey, c.GHOSTTY_KEY_ARROW_UP), fromMac(126));
     try std.testing.expectEqual(@as(?c.GhosttyKey, c.GHOSTTY_KEY_ENTER), fromMac(36));
     try std.testing.expectEqual(@as(?c.GhosttyKey, c.GHOSTTY_KEY_C), fromMac(8));

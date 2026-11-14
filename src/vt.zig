@@ -201,15 +201,27 @@ pub const Terminal = struct {
     /// characters that could end a bracketed paste early.
     pub fn encodePaste(self: *Terminal, text: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Allocator) !void {
         if (text.len == 0) return;
-        const copy = try gpa.dupe(u8, text); // the encoder edits its input in place
+        const bracketed = self.bracketedPaste();
+        // The library turns every LF into CR, so a CRLF would become two Enters. Unbracketed, fold
+        // CRLF into LF first. (Bracketed text goes to the program as it is.)
+        var folded: std.ArrayList(u8) = .empty;
+        defer folded.deinit(gpa);
+        const src: []const u8 = if (bracketed) text else blk: {
+            try folded.ensureTotalCapacity(gpa, text.len);
+            for (text, 0..) |ch, i| {
+                if (ch == '\r' and i + 1 < text.len and text[i + 1] == '\n') continue;
+                folded.appendAssumeCapacity(ch);
+            }
+            break :blk folded.items;
+        };
+        const copy = try gpa.dupe(u8, src); // the encoder edits its input in place
         defer gpa.free(copy);
         var needed: usize = 0;
-        const bracketed = self.bracketedPaste();
         const first = c.ghostty_paste_encode(copy.ptr, copy.len, bracketed, null, 0, &needed);
         if (first != c.GHOSTTY_OUT_OF_SPACE and first != c.GHOSTTY_SUCCESS) return error.Ghostty;
         const start = out.items.len;
         try out.resize(gpa, start + needed);
-        const copy2 = try gpa.dupe(u8, text);
+        const copy2 = try gpa.dupe(u8, src);
         defer gpa.free(copy2);
         var written: usize = 0;
         if (c.ghostty_paste_encode(copy2.ptr, copy2.len, bracketed, out.items[start..].ptr, needed, &written) != c.GHOSTTY_SUCCESS) return error.Ghostty;
@@ -605,6 +617,26 @@ test "the layout's unshifted letter names the key under the kitty protocol" {
     try std.testing.expectEqualStrings("\x1b[97::113;5u", t.encodeKey(q, 2, "", 'a', .press, &buf));
     // AppKit's private-use "unshifted" character for an arrow is not a codepoint to send
     try std.testing.expectEqualStrings("\x1b[A", t.encodeKey(@import("keys.zig").fromMac(126).?, 0, "", 0xF700, .press, &buf));
+}
+
+test "keypad enter sends a carriage return, like Return" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("\r", encFor(t, 76, 0, "\r", &buf));
+}
+
+test "paste: CRLF is one Enter, a lone CR stays one" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try t.encodePaste("a\r\nb\r\n\r\nc\rd\ne", &out, std.testing.allocator);
+    try std.testing.expectEqualStrings("a\rb\r\rc\rd\re", out.items);
+    out.clearRetainingCapacity();
+    t.write("\x1b[?2004h"); // bracketed: the text goes through as it is
+    try t.encodePaste("a\r\nb", &out, std.testing.allocator);
+    try std.testing.expectEqualStrings("\x1b[200~a\r\nb\x1b[201~", out.items);
 }
 
 test "ctrl c, enter, backspace, shift tab" {
