@@ -101,3 +101,28 @@ the view draws the whole 80x24 grid twice with `cacheDisplay`. "Cold" draws ever
 
 Colors and styles did not change the cost of a draw beyond noise (well inside the 2x budget). Not measured: footprint with
 the four font faces and the larger glyph keys (slice 4), selection drag redraw, scrolling a large scrollback.
+
+## Follow-ups baseline (2026-11-14, before any follow-up change)
+
+Harness: `test "bench: painter-only frame costs (HARF_BENCH=1)"` in `src/draw.zig`. It is skipped unless `HARF_BENCH=1` is set.
+Reproduce: `HARF_BENCH=1 .tools/zig/zig build test -Dtest-filter=bench -Doptimize=ReleaseFast` (Zig caches test runs by inputs, so
+change the filter text, for example `bench:`, to force a re-run). Painter only: a 28 px `CGBitmapContext`, no AppKit layer or
+compositing, so these are not end-to-end numbers. Mean of 300 frames after 10 warm-up frames. 80x24, every cell inked (1920
+glyph calls on the plain screen). Apple M1, macOS 27.0.1, Zig 0.17.1, ReleaseFast, commit 716dfb9.
+
+| What | µs (3 runs) |
+|---|---|
+| Plain full frame (`drawRows` 0..23) | 1729, 1695, 1696 |
+| Plain one row (`drawRows` 5..5) | 74, 74, 73 |
+| Colored plain full frame (color change every row) | 1763, 1740, 1745 |
+| Arabic shaped, layouts cached, full frame | 1104, 1089, 1090 |
+| Arabic shaped, cold (cache cleared each frame) | 6139, 6157, 6169 |
+
+This matches the numbers in `docs/superpowers/plans/2026-11-14-slice3-review-and-perf-followups.md` (plain frame 1716, one row 71).
+
+### Measured and not worth doing (plan item P5)
+
+From the plan's earlier throwaway measurements on the same screen: `gather` for all 24 rows (about 8 C calls per cell) takes 44 µs,
+`selectRow` x24 and `update` under 1 µs each, and `rowfacts.analyze` x24 rows 17 µs, against a 1.7 ms frame. Per-cell FFI and
+row iteration and an ASCII fast exit in `rowfacts` therefore buy about 1 to 3 percent and are not implemented. If `gather` ever
+matters, `ghostty_render_state_row_cells_get_multi` is the tool. Do not change `bidi.classOf` (ASCII digits are class `EN`).

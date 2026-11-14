@@ -1197,3 +1197,92 @@ test "cursor on a selected inverse cell stays legible" {
     };
     try std.testing.expect(hi - lo > 100);
 }
+
+// ---- benchmark (HARF_BENCH=1) ----
+
+fn benchNowNs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+const bench_frames = 300;
+const bench_warmup = 10;
+
+/// Mean microseconds of `body` over `bench_frames` runs after `bench_warmup` untimed ones.
+fn benchMean(ctx: anytype, comptime body: fn (@TypeOf(ctx)) void) f64 {
+    for (0..bench_warmup) |_| body(ctx);
+    const t0 = benchNowNs();
+    for (0..bench_frames) |_| body(ctx);
+    return @as(f64, @floatFromInt(benchNowNs() - t0)) / 1000.0 / bench_frames;
+}
+
+const BenchCtx = struct {
+    p: *Painter,
+    t: *vt.Terminal,
+    cv: Canvas,
+    first: u16 = 0,
+    last: u16 = 23,
+    clear_cache: bool = false,
+};
+
+fn benchBody(b: *BenchCtx) void {
+    if (b.clear_cache) b.p.clearRows();
+    b.p.drawRows(b.t, b.cv.ctx, b.first, b.last);
+}
+
+fn benchScreen(comptime colored: bool, comptime arabic: bool) !struct { t: *vt.Terminal } {
+    const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = 80, .rows = 24 });
+    errdefer t.deinit();
+    t.write("\x1b[?25l");
+    var buf: [256]u8 = undefined;
+    for (0..24) |i| {
+        const color = if (colored) std.fmt.bufPrint(buf[200..], "\x1b[3{d};4{d}m", .{ i % 7 + 1, (i + 3) % 7 + 1 }) catch unreachable else "";
+        const line = if (arabic)
+            std.fmt.bufPrint(&buf, "{s}\u{628}\u{64A}\u{62A}\u{64A} \u{645}\u{631}\u{62D}\u{628}\u{627} \u{627}\u{644}\u{633}\u{644}\u{627}\u{645} \u{639}\u{644}\u{64A}\u{643}\u{645} \u{648}\u{631}\u{62D}\u{645}\u{629} \u{627}\u{644}\u{644}\u{647} {d} \u{628}\u{64A}\u{62A}\u{64A} \u{645}\u{631}\u{62D}\u{628}\u{627}\x1b[0m", .{ color, i }) catch unreachable
+        else blk: {
+            // 80 inked cells per row (1920 glyphs per screen), letters of both cases, no blanks.
+            var n = (std.fmt.bufPrint(&buf, "{s}", .{color}) catch unreachable).len;
+            for (0..80) |col| {
+                const k = (i * 7 + col * 3) % 52;
+                buf[n] = if (k < 26) 'a' + @as(u8, @intCast(k)) else 'A' + @as(u8, @intCast(k - 26));
+                n += 1;
+            }
+            const reset = "\x1b[0m";
+            @memcpy(buf[n..][0..reset.len], reset);
+            break :blk buf[0 .. n + reset.len];
+        };
+        t.write(line);
+        t.write("\r\n");
+    }
+    return .{ .t = t };
+}
+
+test "bench: painter-only frame costs (HARF_BENCH=1)" {
+    if (std.c.getenv("HARF_BENCH") == null) return error.SkipZigTest;
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const m = p.metrics();
+    const cv = try Canvas.init(@intFromFloat(m.cell_w * 80), @intFromFloat(m.cell_h * 24));
+    defer cv.deinit();
+
+    const plain = try benchScreen(false, false);
+    defer plain.t.deinit();
+    var ctx: BenchCtx = .{ .p = p, .t = plain.t, .cv = cv };
+    std.debug.print("\nBENCH plain 80x24 full frame:        {d:>8.1} us\n", .{benchMean(&ctx, benchBody)});
+    ctx.first = 5;
+    ctx.last = 5;
+    std.debug.print("BENCH plain one row (row 5):         {d:>8.1} us\n", .{benchMean(&ctx, benchBody)});
+
+    const colored = try benchScreen(true, false);
+    defer colored.t.deinit();
+    ctx = .{ .p = p, .t = colored.t, .cv = cv };
+    std.debug.print("BENCH colored plain full frame:      {d:>8.1} us\n", .{benchMean(&ctx, benchBody)});
+
+    const arabic = try benchScreen(false, true);
+    defer arabic.t.deinit();
+    ctx = .{ .p = p, .t = arabic.t, .cv = cv };
+    std.debug.print("BENCH arabic cached full frame:      {d:>8.1} us\n", .{benchMean(&ctx, benchBody)});
+    ctx.clear_cache = true;
+    std.debug.print("BENCH arabic cold full frame:        {d:>8.1} us\n", .{benchMean(&ctx, benchBody)});
+}
