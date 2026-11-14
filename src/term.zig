@@ -752,6 +752,77 @@ test "command callbacks: C starts, D ends with the exit code, repeated marks mak
     try std.testing.expect(spy.cmd_events[1].duration_ms >= 250);
 }
 
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+extern "c" fn system(cmd: [*:0]const u8) c_int;
+
+/// Sets (or, with null, removes) an environment variable for a test and puts it back when `restore` runs.
+const EnvVar = struct {
+    name: [:0]const u8,
+    old: ?[]const u8,
+    fn set(a: std.mem.Allocator, name: [:0]const u8, value: ?[:0]const u8) !EnvVar {
+        const old: ?[]const u8 = if (std.c.getenv(name.ptr)) |v| try a.dupe(u8, std.mem.span(v)) else null;
+        if (value) |v| _ = setenv(name.ptr, v.ptr, 1) else _ = unsetenv(name.ptr);
+        return .{ .name = name, .old = old };
+    }
+    fn restore(self: EnvVar, a: std.mem.Allocator) void {
+        if (self.old) |o| {
+            const z = std.mem.Allocator.dupeSentinel(a, u8, o, 0) catch return;
+            defer a.free(z);
+            _ = setenv(self.name.ptr, z.ptr, 1);
+            a.free(o);
+        } else _ = unsetenv(self.name.ptr);
+    }
+};
+
+test "zsh with the integration reports commands and keeps the user's ZDOTDIR" {
+    const a = std.testing.allocator;
+    const tmp = if (std.c.getenv("TMPDIR")) |d| std.mem.trimEnd(u8, std.mem.span(d), "/") else "/tmp";
+    var home_buf: [256]u8 = undefined;
+    const home = try std.fmt.bufPrintSentinel(&home_buf, "{s}/harf-zsh-test-{d}", .{ tmp, std.c.getpid() }, 0);
+    var cmd_buf: [600]u8 = undefined;
+    _ = system((try std.fmt.bufPrintSentinel(&cmd_buf, "mkdir -p '{s}' && touch '{s}/.zshrc'", .{ home, home }, 0)).ptr); // an empty .zshrc: no new-user prompt
+    defer _ = system((std.fmt.bufPrintSentinel(&cmd_buf, "rm -rf '{s}'", .{home}, 0) catch unreachable).ptr);
+    var cwd_buf: [512]u8 = undefined;
+    const cwd = std.mem.sliceTo(std.c.getcwd(&cwd_buf, cwd_buf.len).?[0..cwd_buf.len], 0);
+    var dir_buf: [600]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}/macos/shell-integration", .{cwd}, 0);
+
+    // a hermetic login zsh: its own HOME, no ZDOTDIR of ours to start with
+    const shell_var = try EnvVar.set(a, "SHELL", "/bin/zsh");
+    defer shell_var.restore(a);
+    const home_var = try EnvVar.set(a, "HOME", home);
+    defer home_var.restore(a);
+    const zdot_var = try EnvVar.set(a, "ZDOTDIR", home);
+    defer zdot_var.restore(a);
+    pty.default_shell_integration_dir = dir;
+    defer pty.default_shell_integration_dir = null;
+
+    var spy: Spy = .{};
+    const s = try Session.start(a, .{ .callbacks = spy.callbacks() });
+    defer s.deinit();
+    try s.typeText("false\n");
+    try std.testing.expect(waitFor(15_000, CmdCount{ .spy = &spy, .want = 2 }, CmdCount.ok));
+    try std.testing.expect(spy.cmd_events[0].running);
+    try std.testing.expect(!spy.cmd_events[1].running);
+    try std.testing.expectEqual(@as(?i32, 1), spy.cmd_events[1].exit_code);
+    try s.typeText("true\n");
+    try std.testing.expect(waitFor(15_000, CmdCount{ .spy = &spy, .want = 4 }, CmdCount.ok));
+    try std.testing.expectEqual(@as(?i32, 0), spy.cmd_events[3].exit_code);
+    try s.typeText("print -r -- \"Z=$ZDOTDIR\"\n");
+    var want_buf: [300]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "Z={s}", .{home});
+    try std.testing.expect(hexOf(s, want)); // the user's own ZDOTDIR is back inside the shell
+
+    // no ZDOTDIR at all: the shim leaves none behind
+    _ = unsetenv("ZDOTDIR");
+    var spy2: Spy = .{};
+    const s2 = try Session.start(a, .{ .callbacks = spy2.callbacks() });
+    defer s2.deinit();
+    try s2.typeText("print -r -- \"Z=$ZDOTDIR\"\n");
+    try std.testing.expect(waitFor(15_000, Row{ .s = s2, .want = "Z=", .exact = true }, Row.ok));
+}
+
 test "wake is coalesced until handled" {
     var spy: Spy = .{};
     const s = try Session.start(std.testing.allocator, .{ .argv = &.{"/bin/sh"}, .callbacks = spy.callbacks() });

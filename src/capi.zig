@@ -2,6 +2,7 @@
 const std = @import("std");
 const ct = @import("shape/ct.zig");
 const term = @import("term.zig");
+const pty = @import("pty.zig");
 const vt = @import("vt.zig");
 const draw = @import("draw.zig");
 const config = @import("config.zig");
@@ -838,6 +839,29 @@ export fn harf_config_clipboard_write(cfg: *config.Config) c_int {
 /// 0 unfocused, 1 always, 2 off.
 export fn harf_config_notifications(cfg: *config.Config) c_int {
     return @intFromEnum(cfg.notifications);
+}
+
+/// 0 auto, 1 off.
+export fn harf_config_shell_integration(cfg: *config.Config) c_int {
+    return @intFromEnum(cfg.shell_integration);
+}
+
+var shell_integration_buf: [1024:0]u8 = undefined;
+
+/// Where the shell integration shim lives (a directory holding `zsh/.zshenv`); a login zsh started afterwards gets it. NULL turns
+/// it off. The text is copied; one that does not fit is the same as NULL.
+export fn harf_set_shell_integration_dir(dir: ?[*:0]const u8) void {
+    const s = std.mem.span(dir orelse {
+        pty.default_shell_integration_dir = null;
+        return;
+    });
+    if (s.len >= shell_integration_buf.len) {
+        pty.default_shell_integration_dir = null;
+        return;
+    }
+    @memcpy(shell_integration_buf[0..s.len], s);
+    shell_integration_buf[s.len] = 0;
+    pty.default_shell_integration_dir = shell_integration_buf[0..s.len :0];
 }
 
 /// The theme for a dark (1) or light (0) system appearance.

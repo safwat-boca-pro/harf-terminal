@@ -85,6 +85,13 @@ final class Settings {
         scrollbackBytes = harf_config_scrollback_bytes(cfg)
         clipboardWrite = harf_config_clipboard_write(cfg) != 0
         notifications = harf_config_notifications(cfg)
+        // The zsh shim (OSC 133 marks) ships in the app bundle; shells started after this get it unless the config says off.
+        let shim = Bundle.main.resourceURL?.appendingPathComponent("shell-integration").path
+        if harf_config_shell_integration(cfg) == 0, let shim, FileManager.default.fileExists(atPath: shim + "/zsh/.zshenv") {
+            harf_set_shell_integration_dir(shim)
+        } else {
+            harf_set_shell_integration_dir(nil)
+        }
         bindings = [:]
         for i in 0..<harf_config_keybind_count(cfg) {
             var k = HarfKeybind()

@@ -169,6 +169,9 @@ float harf_config_font_size(HarfConfig *cfg); /* points */
 size_t harf_config_scrollback_bytes(HarfConfig *cfg);
 int harf_config_clipboard_write(HarfConfig *cfg); /* 1 allow, 0 deny */
 int harf_config_notifications(HarfConfig *cfg);   /* 0 unfocused, 1 always, 2 off */
+int harf_config_shell_integration(HarfConfig *cfg); /* 0 auto, 1 off */
+/* The directory holding the zsh shim (`zsh/.zshenv`): a login zsh started afterwards emits OSC 133 marks. NULL turns it off. */
+void harf_set_shell_integration_dir(const char *dir);
 /* The theme for a dark (1) or light (0) system appearance. */
 void harf_config_theme(HarfConfig *cfg, int dark, HarfTheme *out);
 /* One key binding: mods use HARF_MOD_*; key is a lowercase character or a name (left, return, f5); action is its name

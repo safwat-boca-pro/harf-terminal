@@ -98,6 +98,9 @@ pub const Keybind = struct { mods: u8, key: []const u8, action: Action, arg: []c
 
 pub const Notifications = enum { unfocused, always, off };
 
+/// `auto`: Harf starts zsh with its OSC 133 shim; `off`: the shell is left alone.
+pub const ShellIntegration = enum { auto, off };
+
 /// Where a theme named in the config comes from, other than the two built in. Returns the file's text (allocated with `a`), or
 /// null if there is no such theme.
 pub const ThemeSource = struct {
@@ -119,6 +122,7 @@ pub const Config = struct {
     /// May a program write the clipboard (OSC 52)? Reading is never allowed.
     clipboard_write: bool = true,
     notifications: Notifications = .unfocused,
+    shell_integration: ShellIntegration = .auto,
     /// The theme for a dark and for a light system appearance (index 0 and 1), with the file's own colors applied on top.
     themes: [2]Theme = .{ builtin_dark, builtin_dark },
     theme_names: [2][]const u8 = .{ "dark", "dark" },
@@ -165,6 +169,8 @@ pub const Config = struct {
             if (std.mem.eql(u8, value, "allow")) self.clipboard_write = true else if (std.mem.eql(u8, value, "deny")) self.clipboard_write = false else try self.warn("", line, "clipboard_write is allow or deny, not '{s}'", .{value});
         } else if (std.mem.eql(u8, key, "notifications")) {
             self.notifications = std.meta.stringToEnum(Notifications, value) orelse return self.warn("", line, "notifications is unfocused, always or off, not '{s}'", .{value});
+        } else if (std.mem.eql(u8, key, "shell_integration")) {
+            self.shell_integration = std.meta.stringToEnum(ShellIntegration, value) orelse return self.warn("", line, "shell_integration is auto or off, not '{s}'", .{value});
         } else if (std.mem.eql(u8, key, "theme")) {
             try self.themeSetting(line, value);
         } else if (std.mem.eql(u8, key, "keybind")) {
@@ -490,6 +496,10 @@ pub const template =
     \\# Notifications a program asks for (OSC 9, OSC 777): unfocused (only when you are not looking at the terminal), always, or off.
     \\# notifications = unfocused
     \\
+    \\# Shell integration: auto starts your zsh with marks for prompts and commands (OSC 133), which Cmd+Up/Down, Cmd+Shift+A and the
+    \\# running marker on a tab use; off leaves your shell alone. It applies to windows, tabs and panes you open afterwards.
+    \\# shell_integration = auto
+    \\
     \\# Key bindings: keybind = trigger = action. Triggers are modifiers (cmd, ctrl, option, shift) and a key, joined with +:
     \\# cmd+t, option+left, cmd+shift+d, f5, cmd+]. Your lines replace the default for the same trigger; `unbind` removes it.
     \\# Actions: new_window new_tab close split_right split_down focus_next focus_prev next_tab prev_tab goto_tab:N clear clear_view prev_prompt next_prompt select_output find
@@ -571,6 +581,7 @@ test "the defaults parse without a warning and bind the shell's shortcuts" {
     try testing.expectEqual(Action.prev_prompt, find(c, super, "up").?.action);
     try testing.expectEqual(Action.next_prompt, find(c, super, "down").?.action);
     try testing.expectEqual(Action.select_output, find(c, super | shift, "a").?.action);
+    try testing.expectEqual(ShellIntegration.auto, c.shell_integration);
     // nothing is bound to the editing keys the core already maps (Option+arrows, Cmd+arrows)
     try testing.expect(find(c, alt, "left") == null);
     try testing.expect(find(c, super, "left") == null);
@@ -584,8 +595,10 @@ test "settings" {
         \\scrollback_bytes = 2097152
         \\clipboard_write = deny
         \\notifications = always
+        \\shell_integration = off
     );
     defer c.deinit();
+    try testing.expectEqual(ShellIntegration.off, c.shell_integration);
     try testing.expectEqual(@as(usize, 0), c.warnings.items.len);
     try testing.expectEqualStrings("Monaco", c.font_family);
     try testing.expectEqual(@as(f32, 16.5), c.font_size);
@@ -737,7 +750,7 @@ test "every example line of the template is valid once uncommented" {
     while (lines.next()) |l| {
         if (!std.mem.startsWith(u8, l, "# ")) continue;
         const rest = l[2..];
-        for ([_][]const u8{ "font_family = ", "font_size = ", "theme = ", "foreground = ", "background = ", "cursor_color = ", "scrollback_bytes = ", "clipboard_write = ", "notifications = ", "keybind = " }) |k| {
+        for ([_][]const u8{ "font_family = ", "font_size = ", "theme = ", "foreground = ", "background = ", "cursor_color = ", "scrollback_bytes = ", "clipboard_write = ", "notifications = ", "shell_integration = ", "keybind = " }) |k| {
             if (std.mem.startsWith(u8, rest, k)) {
                 try live.appendSlice(testing.allocator, rest);
                 try live.append(testing.allocator, '\n');
