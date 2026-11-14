@@ -7,9 +7,9 @@ Build and open: `macos/build-app.sh && open macos/.build/Harf.app`. Everything b
 panes I saw earlier came from rendering the whole window offscreen with `cacheDisplay`, not from the app.
 
 ## Shell
-- [ ] Cmd+N opens a new window (offset from the first).
+- [x] Cmd+N opens a new window (offset from the first). *(owner, 2026-11-14)*
 - [x] Cmd+T opens a tab in the current window. *(owner, 2026-11-14)*
-- [ ] Cmd+Shift+[ and ] switch tabs, Cmd+1 to 9 jump to one.
+- [x] Cmd+Shift+[ and ] switch tabs, Cmd+1 to 9 jump to one. *(owner, 2026-11-14)*
 - [ ] Cmd+D splits side by side, Cmd+Shift+D splits below. The new shell starts in the directory of the one you split. Splits nest. Cmd+[ and Cmd+] move between panes; clicking a pane focuses it.
 - [x] Cmd+W closes a one-pane tab. *(owner, 2026-11-14)*
 - [ ] Cmd+W in a split closes only that pane (its neighbour takes the space); the last pane closes the window. `exit` in a pane closes it.
