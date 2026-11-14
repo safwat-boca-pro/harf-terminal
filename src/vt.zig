@@ -20,7 +20,12 @@ pub const Callbacks = struct {
     clipboard_write: ?*const fn (ctx: ?*anyopaque, text: []const u8) void = null,
     /// A program asked for a desktop notification (OSC 9, OSC 777). Both strings are untrusted program text.
     notify: ?*const fn (ctx: ?*anyopaque, title: []const u8, body: []const u8) void = null,
+    /// A shell integration step (OSC 133). `exit_code` is set for `command_end` when the shell sent one. The command line and
+    /// error text the sequence may carry are never passed on (untrusted). Runs inside `write` with the caller's lock held.
+    command: ?*const fn (ctx: ?*anyopaque, kind: CommandKind, exit_code: ?i32) void = null,
 };
+
+pub const CommandKind = enum { prompt_start, input_start, output_start, command_end };
 
 pub const Rgb = struct { r: u8, g: u8, b: u8 };
 
@@ -202,6 +207,19 @@ fn notificationTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, n: [*c]const c.
     f(self.callbacks.ctx, title, body);
 }
 
+fn semanticPromptTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, ev: [*c]const c.GhosttyTerminalSemanticPrompt) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(ud.?));
+    const f = self.callbacks.command orelse return;
+    const kind: CommandKind = switch (ev.*.kind) {
+        c.GHOSTTY_SEMANTIC_PROMPT_PROMPT_START => .prompt_start,
+        c.GHOSTTY_SEMANTIC_PROMPT_INPUT_START => .input_start,
+        c.GHOSTTY_SEMANTIC_PROMPT_OUTPUT_START => .output_start,
+        c.GHOSTTY_SEMANTIC_PROMPT_COMMAND_END => .command_end,
+        else => return, // a kind from a later library version
+    };
+    f(self.callbacks.ctx, kind, if (ev.*.has_exit_code) ev.*.exit_code else null);
+}
+
 fn colorSchemeTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, out: *c.GhosttyColorScheme) callconv(.c) bool {
     const self: *Terminal = @ptrCast(@alignCast(ud.?));
     out.* = if (self.dark_scheme) c.GHOSTTY_COLOR_SCHEME_DARK else c.GHOSTTY_COLOR_SCHEME_LIGHT;
@@ -276,6 +294,7 @@ pub const Terminal = struct {
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_RENDER_HOLD, @as(?*const anyopaque, @ptrCast(&renderHoldTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, @as(?*const anyopaque, @ptrCast(&clipboardWriteTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, @as(?*const anyopaque, @ptrCast(&notificationTrampoline))));
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT, @as(?*const anyopaque, @ptrCast(&semanticPromptTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_COLOR_SCHEME, @as(?*const anyopaque, @ptrCast(&colorSchemeTrampoline))));
         try check(c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT, &self.builtin_palette));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_XTVERSION, @as(?*const anyopaque, @ptrCast(&xtversionTrampoline))));

@@ -140,7 +140,7 @@ final class TerminalController {
         let cstrs: [UnsafeMutablePointer<CChar>?] = (argv ?? []).map { strdup($0) } + [nil]
         defer { cstrs.forEach { free($0) } }
         var cb = HarfTermCallbacks(ctx: nil, wake: wakeCallback, title: titleCallback, bell: bellCallback, exited: exitedCallback,
-                                 clipboard_write: clipboardCallback, notify: notifyCallback)
+                                 clipboard_write: clipboardCallback, notify: notifyCallback, command: nil)
         let cwdC = cwd.flatMap { strdup($0) }
         defer { free(cwdC) }
         let retained = Unmanaged.passRetained(target)

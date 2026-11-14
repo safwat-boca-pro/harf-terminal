@@ -23,6 +23,8 @@ pub const HarfTermCallbacks = extern struct {
     clipboard_write: ?*const fn (ctx: ?*anyopaque, text: [*]const u8, len: usize) callconv(.c) void,
     /// OSC 9 / 777: untrusted UTF-8 title (may be empty) and body, borrowed for the call.
     notify: ?*const fn (ctx: ?*anyopaque, title: [*]const u8, title_len: usize, body: [*]const u8, body_len: usize) callconv(.c) void,
+    /// OSC 133: a command started running or ended; only on that change (see `term.Callbacks.command`).
+    command: ?*const fn (ctx: ?*anyopaque, running: c_int, exit_code: c_int, has_exit_code: c_int, duration_ms: u32) callconv(.c) void,
 };
 
 /// Opaque to C. Holds the session and the caller's callbacks; the session's own callbacks are
@@ -58,6 +60,10 @@ const HarfTerm = struct {
         const self = from(ctx);
         if (self.cb.notify) |f| f(self.cb.ctx, heading.ptr, heading.len, body.ptr, body.len);
     }
+    fn command(ctx: ?*anyopaque, running: bool, exit_code: ?i32, duration_ms: u32) void {
+        const self = from(ctx);
+        if (self.cb.command) |f| f(self.cb.ctx, @intFromBool(running), exit_code orelse 0, @intFromBool(exit_code != null), duration_ms);
+    }
 };
 
 /// Starts a session. `argv` is a NULL-terminated program and arguments (`argv[0]` is the path),
@@ -86,7 +92,7 @@ export fn harf_term_new_in(
     const gpa = std.heap.smp_allocator;
     const self = gpa.create(HarfTerm) catch return null;
     errdefer gpa.destroy(self);
-    self.cb = if (cb) |p| p.* else .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null, .clipboard_write = null, .notify = null };
+    self.cb = if (cb) |p| p.* else .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null, .clipboard_write = null, .notify = null, .command = null };
 
     var list: std.ArrayList([:0]const u8) = .empty;
     defer list.deinit(gpa);
@@ -100,7 +106,7 @@ export fn harf_term_new_in(
         .scrollback_bytes = scrollback_bytes,
         .argv = if (argv != null and list.items.len > 0) list.items else null,
         .cwd = if (cwd) |d| std.mem.span(d) else null,
-        .callbacks = .{ .ctx = self, .wake = HarfTerm.wake, .title = HarfTerm.title, .bell = HarfTerm.bell, .exited = HarfTerm.exited, .clipboard_write = HarfTerm.clipboardWrite, .notify = HarfTerm.notify },
+        .callbacks = .{ .ctx = self, .wake = HarfTerm.wake, .title = HarfTerm.title, .bell = HarfTerm.bell, .exited = HarfTerm.exited, .clipboard_write = HarfTerm.clipboardWrite, .notify = HarfTerm.notify, .command = HarfTerm.command },
     }) catch return null;
     return self;
 }
@@ -380,7 +386,7 @@ const TestExit = struct {
 
 test "harf_term round trip through the C ABI" {
     var state: TestExit = .{};
-    const cb: HarfTermCallbacks = .{ .ctx = &state, .wake = null, .title = null, .bell = null, .exited = TestExit.onExited, .clipboard_write = null, .notify = null };
+    const cb: HarfTermCallbacks = .{ .ctx = &state, .wake = null, .title = null, .bell = null, .exited = TestExit.onExited, .clipboard_write = null, .notify = null, .command = null };
     const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "printf hi" };
     const t = harf_term_new(80, 24, 1 << 20, &argv, &cb) orelse return error.TermNotCreated;
     defer harf_term_free(t);
@@ -595,7 +601,7 @@ test "harf_term_grid reports the grid, including a program's 132-column switch" 
 }
 
 test "harf_term_new rejects zero size" {
-    const cb: HarfTermCallbacks = .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null, .clipboard_write = null, .notify = null };
+    const cb: HarfTermCallbacks = .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null, .clipboard_write = null, .notify = null, .command = null };
     try std.testing.expect(harf_term_new(0, 24, 1 << 20, null, &cb) == null);
     try std.testing.expect(harf_term_new(80, 0, 1 << 20, null, &cb) == null);
 }

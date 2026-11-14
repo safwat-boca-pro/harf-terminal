@@ -21,6 +21,9 @@ pub const Callbacks = struct {
     clipboard_write: ?*const fn (ctx: ?*anyopaque, text: []const u8) void = null,
     /// A program asked for a desktop notification (OSC 9, OSC 777). Untrusted text, borrowed for the call.
     notify: ?*const fn (ctx: ?*anyopaque, title: []const u8, body: []const u8) void = null,
+    /// A command started running (`running`, OSC 133 `C`) or ended (`D`, or the next prompt): only when that changes, never
+    /// per sequence. `exit_code` is set at an end the shell reported one for; `duration_ms` is the run time at an end.
+    command: ?*const fn (ctx: ?*anyopaque, running: bool, exit_code: ?i32, duration_ms: u32) void = null,
 };
 
 pub const Options = struct {
@@ -64,6 +67,9 @@ pub const Session = struct {
     /// True inside a render hold (synchronized output). Set by the parser callback (terminal lock held), and cleared
     /// by the I/O thread when `hold_deadline_ms` runs out.
     held: std.atomic.Value(bool) = .init(false),
+    /// A command is running (OSC 133 `C` seen, no `D` yet) and when it started; touched only by the parser callback.
+    cmd_running: bool = false,
+    cmd_started_ms: i64 = 0,
     hold_deadline_ms: u32 = 1000,
     /// Wheel rows carried toward the next wheel event (|rows| < 3); guarded by `term_lock`.
     wheel_rows: i32 = 0,
@@ -99,7 +105,7 @@ pub const Session = struct {
             .cols = opts.cols,
             .rows = opts.rows,
             .scrollback_bytes = opts.scrollback_bytes,
-            .callbacks = .{ .ctx = self, .write_pty = onWritePty, .bell = onBell, .title_changed = onTitle, .render_hold = onRenderHold, .clipboard_write = onClipboard, .notify = onNotify },
+            .callbacks = .{ .ctx = self, .write_pty = onWritePty, .bell = onBell, .title_changed = onTitle, .render_hold = onRenderHold, .clipboard_write = onClipboard, .notify = onNotify, .command = onCommand },
             .allow_clipboard_write = opts.allow_clipboard_write,
         });
         errdefer self.term.deinit();
@@ -514,6 +520,26 @@ pub const Session = struct {
         if (self.callbacks.clipboard_write) |f| f(self.callbacks.ctx, text);
     }
 
+    fn onCommand(ctx: ?*anyopaque, kind: vt.CommandKind, exit_code: ?i32) void {
+        const self: *Session = @ptrCast(@alignCast(ctx.?));
+        switch (kind) {
+            .output_start => {
+                if (self.cmd_running) return;
+                self.cmd_running = true;
+                self.cmd_started_ms = monotonicMs();
+                if (self.callbacks.command) |f| f(self.callbacks.ctx, true, null, 0);
+            },
+            // a prompt starting also ends a command whose shell never sent `D`
+            .command_end, .prompt_start => {
+                if (!self.cmd_running) return;
+                self.cmd_running = false;
+                const ran = @max(0, monotonicMs() - self.cmd_started_ms);
+                if (self.callbacks.command) |f| f(self.callbacks.ctx, false, if (kind == .command_end) exit_code else null, @intCast(@min(ran, std.math.maxInt(u32))));
+            },
+            .input_start => {},
+        }
+    }
+
     fn onNotify(ctx: ?*anyopaque, heading: []const u8, body: []const u8) void {
         const self: *Session = @ptrCast(@alignCast(ctx.?));
         if (self.callbacks.notify) |f| f(self.callbacks.ctx, heading, body);
@@ -594,6 +620,9 @@ pub const Session = struct {
 const Spy = struct {
     wakes: std.atomic.Value(u32) = .init(0),
     exits: std.atomic.Value(i32) = .init(-1),
+    /// The `command` events in order (the first eight), written by the I/O thread; `cmd_count` publishes them.
+    cmd_events: [8]CmdEvent = undefined,
+    cmd_count: std.atomic.Value(u32) = .init(0),
 
     fn from(ctx: ?*anyopaque) *Spy {
         return @ptrCast(@alignCast(ctx.?));
@@ -604,8 +633,15 @@ const Spy = struct {
     fn exited(ctx: ?*anyopaque, status: u8) void {
         from(ctx).exits.store(status, .release);
     }
+    const CmdEvent = struct { running: bool, exit_code: ?i32, duration_ms: u32 };
+    fn command(ctx: ?*anyopaque, running: bool, exit_code: ?i32, duration_ms: u32) void {
+        const self = from(ctx);
+        const n = self.cmd_count.load(.monotonic);
+        if (n < self.cmd_events.len) self.cmd_events[n] = .{ .running = running, .exit_code = exit_code, .duration_ms = duration_ms };
+        self.cmd_count.store(n + 1, .release);
+    }
     fn callbacks(self: *Spy) Callbacks {
-        return .{ .ctx = self, .wake = wake, .exited = exited };
+        return .{ .ctx = self, .wake = wake, .exited = exited, .command = command };
     }
 };
 
@@ -672,6 +708,30 @@ test "flood and fast exit" {
     }
     try std.testing.expectEqualStrings("200000", last);
     try std.testing.expect(t.scrollbackRows() <= 1200);
+}
+
+const CmdCount = struct {
+    spy: *Spy,
+    want: u32,
+    fn ok(self: CmdCount) bool {
+        return self.spy.cmd_count.load(.acquire) >= self.want;
+    }
+};
+
+test "command callbacks: C starts, D ends with the exit code, repeated marks make no event" {
+    var spy: Spy = .{};
+    const script = "printf '\\033]133;A\\007\\033]133;A\\007'; printf '\\033]133;C\\007'; sleep 0.3; printf '\\033]133;D;3\\007'; " ++
+        "i=0; while [ $i -lt 1000 ]; do printf '\\033]133;A\\007'; i=$((i+1)); done; echo flood-done; sleep 5";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script }, .callbacks = spy.callbacks() });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, CmdCount{ .spy = &spy, .want = 2 }, CmdCount.ok));
+    try std.testing.expect(hexOf(s, "flood-done")); // every mark has been parsed by now
+    try std.testing.expectEqual(@as(u32, 2), spy.cmd_count.load(.acquire)); // one start, one end: the 1002 other marks changed nothing
+    try std.testing.expect(spy.cmd_events[0].running);
+    try std.testing.expectEqual(@as(u32, 0), spy.cmd_events[0].duration_ms);
+    try std.testing.expect(!spy.cmd_events[1].running);
+    try std.testing.expectEqual(@as(?i32, 3), spy.cmd_events[1].exit_code);
+    try std.testing.expect(spy.cmd_events[1].duration_ms >= 250);
 }
 
 test "wake is coalesced until handled" {

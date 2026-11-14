@@ -31,6 +31,9 @@ typedef struct {
     void (*clipboard_write)(void *ctx, const uint8_t *text, size_t len);
     /* OSC 9 / 777: untrusted UTF-8 title (may be empty) and body, borrowed for the call. */
     void (*notify)(void *ctx, const uint8_t *title, size_t title_len, const uint8_t *body, size_t body_len);
+    /* OSC 133: a command started running (running = 1) or ended (running = 0; has_exit_code says whether exit_code is real;
+       duration_ms is how long it ran). Called only when that changes, never once per sequence. */
+    void (*command)(void *ctx, int running, int exit_code, int has_exit_code, uint32_t duration_ms);
 } HarfTermCallbacks;
 
 /* argv: NULL-terminated program and arguments (argv[0] is the path), or NULL for the login shell.
