@@ -59,6 +59,20 @@ func selfTest() -> Never {
     if !pump(5, until: { rows(typing).contains("got:aم") }) { fail("typing: rows are '\(rows(typing))'") }
     typing.close()
 
+    // 2b. A real arrow-key NSEvent reaches the child as an escape sequence, kitty protocol on or off.
+    for kitty in ["", "\\033[>1u"] {
+        let script = "stty raw -echo; printf '\(kitty)'; printf R; head -c 3 | od -An -c"
+        guard let arrows = TerminalController(argv: ["/bin/sh", "-c", script], frame: NSSize(width: 700, height: 420)) else { fail("cannot start arrow session") }
+        if !pump(5, until: { rows(arrows).contains("R") }) { fail("arrow child not ready: '\(rows(arrows))'") }
+        guard let ev = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.numericPad, .function], timestamp: 0,
+                                        windowNumber: 0, context: nil, characters: "\u{F700}", charactersIgnoringModifiers: "\u{F700}",
+                                        isARepeat: false, keyCode: 126) else { fail("cannot make key event") }
+        arrows.view.keyDown(with: ev)
+        if !pump(5, until: { rows(arrows).contains("033") }) { fail("arrow (kitty '\(kitty)'): rows are '\(rows(arrows))'") }
+        if !rows(arrows).contains("[   A") { fail("arrow (kitty '\(kitty)'): wrong bytes '\(rows(arrows))'") }
+        arrows.close()
+    }
+
     // 3. Paste, bracketed or not, arrives as typed text.
     guard let pasting = TerminalController(argv: echo, frame: NSSize(width: 700, height: 420)) else { fail("cannot start paste session") }
     pasting.paste("x y")
