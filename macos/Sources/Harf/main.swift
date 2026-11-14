@@ -658,6 +658,9 @@ func selfTest() -> Never {
     do {
         let url12 = URL(string: "vscode://file/tmp/my%20dir/a%20b.swift:12:5")!
         if editorLaunch(template: "vscode://file{path}:{line}:{col}", path: "/tmp/my dir/a b.swift", line: 12, col: 5) != .url(url12) { fail("editor: the URL template gave \(editorLaunch(template: "vscode://file{path}:{line}:{col}", path: "/tmp/my dir/a b.swift", line: 12, col: 5))") }
+        // a file name must not add parameters to a query-style template: & = ; + $ , @ are escaped along with the rest
+        let queryLaunch = editorLaunch(template: "idea://open?file={path}&line={line}", path: "/tmp/x&line=99;a=b+c,d@e$f.txt", line: 7, col: 1)
+        if queryLaunch != .url(URL(string: "idea://open?file=/tmp/x%26line%3D99%3Ba%3Db%2Bc%2Cd%40e%24f.txt&line=7")!) { fail("editor: a file name leaked into the query: \(queryLaunch)") }
         let hostile = "/tmp/x; rm -rf ~ $(id) 'q'.txt"
         if editorLaunch(template: "code --goto {path}:{line}:{col}", path: hostile, line: 0, col: 0) != .command(["code", "--goto", hostile + ":1:1"]) { fail("editor: a hostile file name must stay one argument") }
         if editorLaunch(template: "", path: "/tmp/a", line: 1, col: 1) != .textEditor { fail("editor: no template means the default text editor") }
@@ -704,6 +707,31 @@ func selfTest() -> Never {
         click(60, .command)
         if urls.count != 1 || paths.count != 1 { fail("a Command-click on ftp:// opened something") }
         pc.close()
+    }
+
+    // 3d. The editor picker: which template an app gets, and the config line it writes (rewritten in place, read back by a reload, and
+    // never able to carry a second setting in a line break).
+    do {
+        if editorTemplate(forBundleID: "com.microsoft.VSCode", appPath: "/Applications/Visual Studio Code.app") != "vscode://file{path}:{line}:{col}" { fail("picker: VS Code's template") }
+        if editorTemplate(forBundleID: "com.microsoft.VSCodeInsiders", appPath: "/x.app") != "vscode-insiders://file{path}:{line}:{col}" { fail("picker: VS Code Insiders' template") }
+        if editorTemplate(forBundleID: "com.vscodium", appPath: "/x.app") != "vscodium://file{path}:{line}:{col}" { fail("picker: VSCodium's template") }
+        if editorTemplate(forBundleID: "com.todesktop.230313mzl4w4u92", appPath: "/x.app") != "cursor://file{path}:{line}:{col}" { fail("picker: Cursor's template") }
+        if editorTemplate(forBundleID: "com.sublimetext.4", appPath: "/Applications/Sublime Text.app") != "app:/Applications/Sublime Text.app" { fail("picker: an unknown app is opened by app:") }
+        if editorTemplate(forBundleID: nil, appPath: "/Applications/Other.app") != "app:/Applications/Other.app" { fail("picker: an app with no bundle id") }
+
+        let dir = NSTemporaryDirectory() + "harf-selftest-editor-\(getpid())"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try? "font_size = 15\neditor = old\n".write(toFile: dir + "/config", atomically: false, encoding: .utf8)
+        Settings.shared.load(directory: dir)
+        defer { Settings.shared.load(directory: dir + "/none") }
+        if Settings.shared.editor != "old" { fail("picker: the config's editor is '\(Settings.shared.editor)'") }
+        if !Settings.shared.setEditor("vscode://file{path}:{line}:{col}") { fail("picker: setEditor failed") }
+        if Settings.shared.editor != "vscode://file{path}:{line}:{col}" { fail("picker: the reload read '\(Settings.shared.editor)'") }
+        let text = (try? String(contentsOfFile: dir + "/config", encoding: .utf8)) ?? ""
+        if text != "font_size = 15\neditor = vscode://file{path}:{line}:{col}\n" { fail("picker: the file is now '\(text)'") }
+        if Settings.shared.setEditor("a\nfont_size = 40") { fail("picker: a template with a line break was accepted") }
+        if Settings.shared.editor != "vscode://file{path}:{line}:{col}" { fail("picker: a refused template changed the editor") }
     }
 
     // 4. Title and bell reach the window; a clean exit closes it.

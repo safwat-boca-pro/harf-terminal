@@ -13,7 +13,7 @@ final class ActionBox: NSObject {
 
 /// The menus: title, then (item, action). Each item shows the shortcut the key bindings give its action.
 private let menuLayout: [(String, [(String, String)])] = [
-    ("Harf", [("Settings…", "open_config"), ("Reload Config", "reload_config"), ("Quit Harf", "quit")]),
+    ("Harf", [("Settings…", "open_config"), ("Choose Editor…", "choose_editor"), ("Reload Config", "reload_config"), ("Quit Harf", "quit")]),
     ("Shell", [("New Window", "new_window"), ("New Tab", "new_tab"), ("Close", "close"), ("Split Right", "split_right"), ("Split Down", "split_down"), ("Clear", "clear")]),
     ("Edit", [("Copy", "copy"), ("Paste", "paste"), ("Find…", "find"), ("Find Next", "find_next"), ("Find Previous", "find_prev")]),
     ("View", [("Larger", "font_larger"), ("Smaller", "font_smaller"), ("Actual Size", "font_reset")]),
@@ -55,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch action {
         case "quit": NSApp.terminate(nil)
         case "open_config": Settings.shared.openConfigFile()
+        case "choose_editor": chooseEditor()
         case "reload_config": Settings.shared.reload()
         case "font_larger": Settings.shared.fontLarger()
         case "font_smaller": Settings.shared.fontSmaller()

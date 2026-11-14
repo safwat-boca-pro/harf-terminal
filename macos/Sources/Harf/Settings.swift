@@ -161,6 +161,15 @@ final class Settings {
         return path
     }
 
+    /// Writes the `editor` setting into the config file (the line is rewritten in place, or added) and reloads. False if the template
+    /// holds a line break or the file cannot be written.
+    @discardableResult
+    func setEditor(_ template: String) -> Bool {
+        guard harf_config_set_key(ensureConfigFile(), "editor", template) == 0 else { return false }
+        load()   // the watcher would notice too, a moment later
+        return true
+    }
+
     /// Shows the config file in the user's text editor.
     func openConfigFile() {
         let url = URL(fileURLWithPath: ensureConfigFile())

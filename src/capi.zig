@@ -889,6 +889,13 @@ export fn harf_config_editor(cfg: *config.Config) [*:0]const u8 {
     return cfg.editor.ptr;
 }
 
+/// Sets `key = value` in the config file at `path` (created if missing; an existing uncommented line is rewritten in place, comments
+/// are kept). 0 on success, -1 if the value holds a line break or the file cannot be written.
+export fn harf_config_set_key(path: [*:0]const u8, key: [*:0]const u8, value: [*:0]const u8) c_int {
+    config.setKeyInFile(std.heap.smp_allocator, std.mem.span(path), std.mem.span(key), std.mem.span(value)) catch return -1;
+    return 0;
+}
+
 /// 1 on, 0 off.
 export fn harf_config_paste_guard(cfg: *config.Config) c_int {
     return @intFromBool(cfg.paste_guard);

@@ -40,12 +40,40 @@ func editorLaunch(template: String, path: String, line: Int, col: Int) -> Editor
         return out
     }
     if t.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*://"#, options: .regularExpression) != nil {
-        let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+        // Only letters, digits, `-._~` and `/` stay as they are: `&`, `=`, `;`, `+`, `,`, `@`, `$` in a file name must not be able to add
+        // parameters when the template puts {path} in a query (`idea://open?file={path}&line={line}`).
+        let encoded = path.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/")) ?? path
         return URL(string: fill(t, path: encoded)).map(EditorLaunch.url) ?? .textEditor
     }
     let words = t.split(whereSeparator: \.isWhitespace).map(String.init)
     guard let program = words.first, !program.contains("{") else { return .textEditor }
     return .command(words.map { fill($0, path: path) })
+}
+
+/// The `editor` template for an app picked from the system. The editors whose URL scheme takes a line and column get it; any other
+/// app is opened by `app:` (the file opens in it, with no line number).
+func editorTemplate(forBundleID id: String?, appPath: String) -> String {
+    switch id {
+    case "com.microsoft.VSCode": return "vscode://file{path}:{line}:{col}"
+    case "com.microsoft.VSCodeInsiders": return "vscode-insiders://file{path}:{line}:{col}"
+    case "com.vscodium": return "vscodium://file{path}:{line}:{col}"
+    case "com.todesktop.230313mzl4w4u92": return "cursor://file{path}:{line}:{col}"
+    default: return "app:" + appPath
+    }
+}
+
+/// Harf > Choose Editor…: the system's app picker (apps only, starting in /Applications); the choice is written to the config file.
+@MainActor
+func chooseEditor() {
+    let panel = NSOpenPanel()
+    panel.title = "Choose Editor"
+    panel.message = "Cmd-click on a file name in the terminal opens the file in this app."
+    panel.allowedContentTypes = [.application]
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = false
+    panel.directoryURL = URL(fileURLWithPath: "/Applications")
+    guard panel.runModal() == .OK, let app = panel.url else { return }
+    if !Settings.shared.setEditor(editorTemplate(forBundleID: Bundle(url: app)?.bundleIdentifier, appPath: app.path)) { warn("could not write the config file") }
 }
 
 private func warn(_ what: String) { FileHandle.standardError.write(Data("harf: editor: \(what)\n".utf8)) }

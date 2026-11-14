@@ -344,6 +344,57 @@ fn readFile(gpa: Allocator, path: [:0]const u8) ?[]u8 {
     return out.toOwnedSlice(gpa) catch null;
 }
 
+pub const SetKeyError = error{ InvalidValue, OutOfMemory };
+
+/// Whether `line` is an uncommented `key = ...` setting line (spacing around the key and `=` is free).
+fn isSettingLine(line: []const u8, key: []const u8) bool {
+    const t = std.mem.trimStart(u8, line, " \t");
+    if (!std.mem.startsWith(u8, t, key)) return false;
+    const rest = std.mem.trimStart(u8, t[key.len..], " \t");
+    return rest.len > 0 and rest[0] == '=';
+}
+
+/// `text` with the setting `key` set to `value`: every uncommented `key = ...` line is rewritten in place, and when there is none a
+/// `key = value` line is added at the end. Comments and every other line stay as they are. A value with a line break is refused
+/// (it would put a second setting in the file). The caller frees the result.
+pub fn setKey(gpa: Allocator, text: []const u8, key: []const u8, value: []const u8) SetKeyError![]u8 {
+    if (std.mem.indexOfAny(u8, value, "\r\n") != null) return error.InvalidValue;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var found = false;
+    var first = true;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!first) try out.append(gpa, '\n');
+        first = false;
+        if (isSettingLine(line, key)) {
+            found = true;
+            try out.print(gpa, "{s} = {s}", .{ key, value });
+        } else try out.appendSlice(gpa, line);
+    }
+    if (!found) {
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(gpa, '\n');
+        try out.print(gpa, "{s} = {s}\n", .{ key, value });
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// `setKey` on the config file at `path` (created if missing). The new text is written beside the file and renamed over it, so a
+/// reader (the config watcher) never sees half a file.
+pub fn setKeyInFile(gpa: Allocator, path: [:0]const u8, key: []const u8, value: []const u8) !void {
+    const old = readFile(gpa, path);
+    defer if (old) |o| gpa.free(o);
+    const text = try setKey(gpa, old orelse "", key, value);
+    defer gpa.free(text);
+    var tmp_buf: [1100]u8 = undefined;
+    const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}.harf-tmp", .{path}, 0);
+    try writeFile(tmp, text);
+    if (std.c.rename(tmp.ptr, path.ptr) != 0) {
+        _ = std.c.unlink(tmp.ptr);
+        return error.CannotWrite;
+    }
+}
+
 const ColorResult = enum { ok, bad, not_a_color };
 
 /// foreground, background, cursor_color or `palette = N=#rrggbb` (N from 0 to 15).
@@ -743,6 +794,42 @@ fn writeFile(path: [:0]const u8, text: []const u8) !void {
     if (fd < 0) return error.CannotWrite;
     defer _ = std.c.close(fd);
     if (std.c.write(fd, text.ptr, text.len) != text.len) return error.CannotWrite;
+}
+
+test "setKey rewrites the setting in place, keeps comments, and adds it when it is missing" {
+    const a = testing.allocator;
+    const one = try setKey(a, "font_size = 15\n# editor = old\neditor = x\n", "editor", "y");
+    defer a.free(one);
+    try testing.expectEqualStrings("font_size = 15\n# editor = old\neditor = y\n", one); // the comment is not the setting
+    const two = try setKey(a, "font_size = 15\n# editor = old\n", "editor", "y");
+    defer a.free(two);
+    try testing.expectEqualStrings("font_size = 15\n# editor = old\neditor = y\n", two);
+    const three = try setKey(a, "a = 1", "editor", "y"); // no trailing newline: one is added before the new line
+    defer a.free(three);
+    try testing.expectEqualStrings("a = 1\neditor = y\n", three);
+    const four = try setKey(a, "", "editor", "y");
+    defer a.free(four);
+    try testing.expectEqualStrings("editor = y\n", four);
+    const five = try setKey(a, "editor_x = 1\n  editor=  old  \n", "editor", "y"); // another key is not this one; spacing is free
+    defer a.free(five);
+    try testing.expectEqualStrings("editor_x = 1\neditor = y\n", five);
+    try testing.expectError(error.InvalidValue, setKey(a, "", "editor", "a\nb")); // a value must not smuggle in another setting
+    try testing.expectError(error.InvalidValue, setKey(a, "", "editor", "a\rb"));
+}
+
+test "setKeyInFile creates the file, then rewrites the line" {
+    const tmp = if (std.c.getenv("TMPDIR")) |d| std.mem.trimEnd(u8, std.mem.span(d), "/") else "/tmp";
+    var path_buf: [300]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/harf-setkey-test-{d}", .{ tmp, std.c.getpid() }, 0);
+    defer _ = std.c.unlink(path.ptr);
+    try setKeyInFile(testing.allocator, path, "editor", "first");
+    const a = readFile(testing.allocator, path).?;
+    defer testing.allocator.free(a);
+    try testing.expectEqualStrings("editor = first\n", a);
+    try setKeyInFile(testing.allocator, path, "editor", "second");
+    const b = readFile(testing.allocator, path).?;
+    defer testing.allocator.free(b);
+    try testing.expectEqualStrings("editor = second\n", b);
 }
 
 test "load reads config and themes from a directory, and a missing directory is an empty config" {
