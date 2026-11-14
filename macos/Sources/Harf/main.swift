@@ -801,11 +801,12 @@ func selfTest() -> Never {
         defer { try? fm.removeItem(atPath: tmp) }
         func write(_ name: String, _ text: String, atomically: Bool = false) { try? text.write(toFile: tmp + "/" + name, atomically: atomically, encoding: .utf8) }
         write("themes/mine", "background = #102030\nforeground = #a0b0c0\npalette = 1=#ff0000\n")
-        write("config", "font_size = 20\ntheme = mine\nclipboard_write = deny\nnotifications = off\nkeybind = option+left = send:X\nbogus line\n")
+        write("config", "font_size = 20\nwindow_width = 960\nwindow_height = 600\ntheme = mine\nclipboard_write = deny\nnotifications = off\nkeybind = option+left = send:X\nbogus line\n")
         let plainCell = TerminalController(argv: ["/bin/sh", "-c", "sleep 1"], frame: NSSize(width: 700, height: 420))?.cellSizePt
         Settings.shared.load(directory: tmp)
         if Settings.shared.fontPt != 20 { fail("config: font size is \(Settings.shared.fontPt)") }
-        if Settings.shared.warnings.count != 1 || !Settings.shared.warnings[0].contains("line 6") { fail("config: warnings are \(Settings.shared.warnings)") }
+        if Settings.shared.windowWidth != 960 || Settings.shared.windowHeight != 600 { fail("config: window size is \(Settings.shared.windowWidth)x\(Settings.shared.windowHeight)") }
+        if Settings.shared.warnings.count != 1 || !Settings.shared.warnings[0].contains("line 8") { fail("config: warnings are \(Settings.shared.warnings)") }
         if Settings.shared.notifications != 2 || Settings.shared.clipboardWrite { fail("config: notifications \(Settings.shared.notifications), clipboard \(Settings.shared.clipboardWrite)") }
         let script = "stty raw -echo; printf R; head -c 1 | od -An -c"
         guard let c = TerminalController(argv: ["/bin/sh", "-c", script], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the config session") }
@@ -829,7 +830,7 @@ func selfTest() -> Never {
         let empty = tmp + "/empty"
         try? fm.createDirectory(atPath: empty, withIntermediateDirectories: true)
         Settings.shared.load(directory: empty)
-        if Settings.shared.fontPt != 14 || !Settings.shared.clipboardWrite { fail("config: an empty directory did not give the defaults") }
+        if Settings.shared.fontPt != 14 || Settings.shared.windowWidth != 700 || Settings.shared.windowHeight != 420 || !Settings.shared.clipboardWrite { fail("config: an empty directory did not give the defaults") }
     }
 
     // 2j. Panes, through the window controller the app uses: a split shares the window and starts where its neighbour's shell is,

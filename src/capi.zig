@@ -899,6 +899,14 @@ export fn harf_config_font_size(cfg: *config.Config) f32 {
     return cfg.font_size;
 }
 
+export fn harf_config_window_width(cfg: *config.Config) f32 {
+    return cfg.window_width;
+}
+
+export fn harf_config_window_height(cfg: *config.Config) f32 {
+    return cfg.window_height;
+}
+
 export fn harf_config_scrollback_bytes(cfg: *config.Config) usize {
     return cfg.scrollback_bytes;
 }

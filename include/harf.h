@@ -180,6 +180,8 @@ const char *harf_config_dir(HarfConfig *cfg);
 const char *harf_config_template(void);
 const char *harf_config_font_family(HarfConfig *cfg);
 float harf_config_font_size(HarfConfig *cfg); /* points */
+float harf_config_window_width(HarfConfig *cfg); /* points */
+float harf_config_window_height(HarfConfig *cfg); /* points */
 size_t harf_config_scrollback_bytes(HarfConfig *cfg);
 int harf_config_clipboard_write(HarfConfig *cfg); /* 1 allow, 0 deny */
 int harf_config_notifications(HarfConfig *cfg);   /* 0 unfocused, 1 always, 2 off */

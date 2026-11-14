@@ -67,6 +67,10 @@ Example `~/.config/harf/config`:
 font_family = Menlo
 font_size = 14
 
+# Default content size for new windows, in points
+# window_width = 700
+# window_height = 420
+
 # Built-in themes: dark, light, or files in ~/.config/harf/themes/
 theme = dark:dark, light:light
 

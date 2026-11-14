@@ -54,6 +54,8 @@ final class Settings {
     private var configPt: CGFloat = 14
     /// Added to the configured size by Larger and Smaller; a reload resets it.
     private var fontDelta: CGFloat = 0
+    private(set) var windowWidth: CGFloat = 700
+    private(set) var windowHeight: CGFloat = 420
     private(set) var scrollbackBytes = 1 << 20
     private(set) var clipboardWrite = true
     /// 0 unfocused, 1 always, 2 off.
@@ -87,6 +89,8 @@ final class Settings {
         fontFamily = String(cString: harf_config_font_family(cfg))
         configPt = CGFloat(harf_config_font_size(cfg))
         fontDelta = 0
+        windowWidth = CGFloat(harf_config_window_width(cfg))
+        windowHeight = CGFloat(harf_config_window_height(cfg))
         scrollbackBytes = harf_config_scrollback_bytes(cfg)
         clipboardWrite = harf_config_clipboard_write(cfg) != 0
         notifications = harf_config_notifications(cfg)

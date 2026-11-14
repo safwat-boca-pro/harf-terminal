@@ -35,7 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @discardableResult
     func openWindow(tab: Bool, argv: [String]? = nil, content: NSSize? = nil) -> WindowController? {
         let key = NSApp.keyWindow
-        let size = content ?? key?.contentView?.bounds.size ?? NSSize(width: 700, height: 420)
+        let defaultSize = NSSize(width: Settings.shared.windowWidth, height: Settings.shared.windowHeight)
+        let size = content ?? (tab ? key?.contentView?.bounds.size : nil) ?? defaultSize
         guard let wc = WindowController(argv: argv, content: size, cwd: focusedController()?.currentDirectory()) else { return nil }
         wc.onClose = { [weak self] closing in self?.windows.removeAll { $0 === closing } }
         windows.append(wc)
@@ -125,7 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Settings.shared.load()   // before the first terminal exists, so its font, theme and scrollback are the configured ones; it builds the menu
         traceStep("main menu installed, configuration loaded")
         // Measurement hook (docs/perf.md): HARF_CONTENT_SIZE=WxH pins the window, e.g. 700x420 for the 80x24 class.
-        var content = NSSize(width: 700, height: 420)
+        var content = NSSize(width: Settings.shared.windowWidth, height: Settings.shared.windowHeight)
         if let s = ProcessInfo.processInfo.environment["HARF_CONTENT_SIZE"] {
             let p = s.split(separator: "x").compactMap { Double($0) }
             if p.count == 2 { content = NSSize(width: p[0], height: p[1]) }

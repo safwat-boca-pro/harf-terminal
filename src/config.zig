@@ -118,6 +118,9 @@ pub const Config = struct {
     font_family: [:0]const u8 = "Menlo",
     /// In points.
     font_size: f32 = 14,
+    /// Default content size for new windows, in points.
+    window_width: f32 = 1000,
+    window_height: f32 = 720,
     scrollback_bytes: usize = 1 << 20,
     /// May a program write the clipboard (OSC 52)? Reading is never allowed.
     clipboard_write: bool = true,
@@ -167,6 +170,14 @@ pub const Config = struct {
             const v = std.fmt.parseFloat(f32, value) catch 0;
             if (!(v >= 6 and v <= 72)) return self.warn("", line, "font_size must be a number of points from 6 to 72, not '{s}'", .{value});
             self.font_size = v;
+        } else if (std.mem.eql(u8, key, "window_width")) {
+            const v = std.fmt.parseFloat(f32, value) catch 0;
+            if (!(v >= 100 and v <= 16384)) return self.warn("", line, "window_width must be a number of points from 100 to 16384, not '{s}'", .{value});
+            self.window_width = v;
+        } else if (std.mem.eql(u8, key, "window_height")) {
+            const v = std.fmt.parseFloat(f32, value) catch 0;
+            if (!(v >= 100 and v <= 16384)) return self.warn("", line, "window_height must be a number of points from 100 to 16384, not '{s}'", .{value});
+            self.window_height = v;
         } else if (std.mem.eql(u8, key, "scrollback_bytes")) {
             self.scrollback_bytes = std.fmt.parseInt(usize, value, 10) catch return self.warn("", line, "scrollback_bytes must be a whole number, not '{s}'", .{value});
         } else if (std.mem.eql(u8, key, "clipboard_write")) {
@@ -548,6 +559,10 @@ pub const template =
     \\# font_family = Menlo
     \\# font_size = 14
     \\
+    \\# Default content size for new windows, in points.
+    \\# window_width = 700
+    \\# window_height = 420
+    \\
     \\# dark, light, or the name of a file in ~/.config/harf/themes/ (it holds foreground, background, cursor_color and palette lines).
     \\# `dark:NAME, light:NAME` follows the system appearance.
     \\# theme = dark
@@ -674,6 +689,8 @@ test "settings" {
         \\# a comment
         \\font_family = Monaco
         \\font_size = 16.5
+        \\window_width = 1000
+        \\window_height = 650
         \\scrollback_bytes = 2097152
         \\clipboard_write = deny
         \\notifications = always
@@ -688,12 +705,16 @@ test "settings" {
     try testing.expectEqual(@as(usize, 0), c.warnings.items.len);
     try testing.expectEqualStrings("Monaco", c.font_family);
     try testing.expectEqual(@as(f32, 16.5), c.font_size);
+    try testing.expectEqual(@as(f32, 1000), c.window_width);
+    try testing.expectEqual(@as(f32, 650), c.window_height);
     try testing.expectEqual(@as(usize, 2097152), c.scrollback_bytes);
     try testing.expect(!c.clipboard_write);
     try testing.expectEqual(Notifications.always, c.notifications);
     const d = try parseOwned("");
     defer d.deinit();
     try testing.expectEqualStrings("Menlo", d.font_family);
+    try testing.expectEqual(@as(f32, 700), d.window_width);
+    try testing.expectEqual(@as(f32, 420), d.window_height);
     try testing.expect(d.clipboard_write);
     try testing.expectEqual(Notifications.unfocused, d.notifications);
     try testing.expect(d.paste_guard);
@@ -719,6 +740,14 @@ test "a bad line is a warning with its line number, and the rest still applies" 
     try testing.expect(std.mem.startsWith(u8, c.warnings.items[2], "line 3: unknown setting 'unknown_key'"));
     try testing.expectEqual(@as(f32, 15), c.font_size);
     try testing.expectEqual(Rgb{ .r = 0x10, .g = 0x20, .b = 0x30 }, c.theme(true).bg);
+}
+
+test "window_width and window_height reject out-of-range or non-numeric values" {
+    const c = try parseOwned("window_width = 50\nwindow_height = 20000\nwindow_width = nope\nwindow_height = NaN");
+    defer c.deinit();
+    try testing.expectEqual(@as(usize, 4), c.warnings.items.len);
+    try testing.expectEqual(@as(f32, 700), c.window_width);
+    try testing.expectEqual(@as(f32, 420), c.window_height);
 }
 
 const FakeThemes = struct {
@@ -906,7 +935,7 @@ test "every example line of the template is valid once uncommented" {
     while (lines.next()) |l| {
         if (!std.mem.startsWith(u8, l, "# ")) continue;
         const rest = l[2..];
-        for ([_][]const u8{ "font_family = ", "font_size = ", "theme = ", "foreground = ", "background = ", "cursor_color = ", "scrollback_bytes = ", "clipboard_write = ", "notifications = ", "shell_integration = ", "paste_guard = ", "editor = ", "keybind = " }) |k| {
+        for ([_][]const u8{ "font_family = ", "font_size = ", "window_width = ", "window_height = ", "theme = ", "foreground = ", "background = ", "cursor_color = ", "scrollback_bytes = ", "clipboard_write = ", "notifications = ", "shell_integration = ", "paste_guard = ", "editor = ", "keybind = " }) |k| {
             if (std.mem.startsWith(u8, rest, k)) {
                 try live.appendSlice(testing.allocator, rest);
                 try live.append(testing.allocator, '\n');
