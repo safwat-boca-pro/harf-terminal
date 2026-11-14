@@ -55,6 +55,12 @@ void harf_painter_metrics(HarfPainter *p, HarfCellMetrics *out);
 /* Draws rows first_row..last_row (inclusive, clamped to the grid) and the cursor into a y-down
  * CGContextRef in device pixels; the grid's top-left is the context's origin. Locks the session. */
 void harf_term_draw(HarfTerm *t, HarfPainter *p, void *cg_context, uint16_t first_row, uint16_t last_row);
+/* Which visible rows differ from what harf_term_draw last drew: out[i] is 1 for a row to redraw (the row above each changed
+ * row is included, because glyphs reach into it). Returns the grid's row count; cap is the size of out, and a count larger
+ * than cap means the caller must redraw everything. Every row is reported before the first draw and after a change of the
+ * grid size or the default colors. harf_term_draw also draws the row below last_row (its glyphs reach up into last_row), but
+ * does not count it as drawn, so the context must be clipped to the rows' rectangle. */
+size_t harf_term_dirty_rows(HarfTerm *t, HarfPainter *p, uint8_t *out, size_t cap);
 
 /* Modifier bits for harf_term_key. */
 #define HARF_MOD_SHIFT 1

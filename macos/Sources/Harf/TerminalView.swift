@@ -34,7 +34,13 @@ private let exitedCallback: @convention(c) (UnsafeMutableRawPointer?, Int32) -> 
 // lookup at launch and nothing per frame when off.
 nonisolated(unsafe) var measureFrameEnd: Double = 0
 nonisolated(unsafe) var measureDirtyMarks = 0   // how many times the wake path has marked the view dirty (HARF_MEASURE only)
+nonisolated(unsafe) var measureDirtyRect = NSRect.null   // the union of the rectangles the wake path invalidated since the last reset
+nonisolated(unsafe) var trackDirty = false   // the self-test sets it to record the two values above; HARF_MEASURE=1 sets it for the whole run
+/// HARF_FULL_REDRAW=1 draws the whole view on every change, as before dirty rows: an escape hatch for telling whether a
+/// drawing oddity comes from partial redraws.
+private let forceFullRedraw = ProcessInfo.processInfo.environment["HARF_FULL_REDRAW"] == "1"
 private let measureFrames = ProcessInfo.processInfo.environment["HARF_MEASURE"] == "1"
+private var recordDirty: Bool { measureFrames || trackDirty }
 private let traceStartup = ProcessInfo.processInfo.environment["HARF_TRACE"] == "startup"
 nonisolated(unsafe) private var startupReported = false
 
@@ -256,7 +262,33 @@ final class TerminalController {
         guard let t = term else { return }
         harf_term_wake_handled(t)   // re-arm before reading, so output arriving during the draw wakes us again
         followProgramGrid()
-        markDirty()
+        invalidateChangedRows()
+    }
+
+    private var dirtyRows = [UInt8](repeating: 0, count: 256)
+
+    /// Asks AppKit to redraw only the rows that differ from what was last drawn (`harf_term_dirty_rows`), one rectangle per
+    /// run of rows. Everything that changes the picture without output (focus, selection, scrolling the viewport, colors)
+    /// changes a row's cells or the frame key, so it shows up here too; a resize or a new backing scale goes through
+    /// `layoutChanged`, which invalidates the whole view.
+    private func invalidateChangedRows() {
+        guard let t = term, let p = painter else { return }
+        let n = harf_term_dirty_rows(t, p, &dirtyRows, dirtyRows.count)
+        let chPt = cellPx.h / scale
+        // A partial rectangle is exact only if its edges fall on whole device pixels; otherwise AppKit rounds it outward and a
+        // row could be painted in part. The usual scales (1, 2, 3) are exact; the others redraw the whole view.
+        let exact = (inset * scale).truncatingRemainder(dividingBy: 1) == 0 && cellPx.h.truncatingRemainder(dividingBy: 1) == 0
+        guard exact, !forceFullRedraw, n <= dirtyRows.count, n == gridSize.rows else { return markDirty() }
+        var row = 0
+        while row < n {
+            if dirtyRows[row] == 0 { row += 1; continue }
+            var end = row
+            while end + 1 < n && dirtyRows[end + 1] != 0 { end += 1 }
+            let rect = NSRect(x: 0, y: inset + CGFloat(row) * chPt, width: view.bounds.width, height: CGFloat(end - row + 1) * chPt)
+            view.setNeedsDisplay(rect)
+            if recordDirty { measureDirtyMarks += 1; measureDirtyRect = measureDirtyRect.union(rect) }
+            row = end + 1
+        }
     }
 
     /// A program can change the grid itself (DECCOLM switches 80 and 132 columns). The window follows: it is resized so the
@@ -276,7 +308,7 @@ final class TerminalController {
     /// Asks AppKit to draw the view. The one place the wake path does it, so the latency check can see it happen.
     private func markDirty() {
         view.needsDisplay = true
-        if measureFrames { measureDirtyMarks += 1 }
+        if recordDirty { measureDirtyMarks += 1; measureDirtyRect = view.bounds }
     }
 
     fileprivate func titleOnMain() {
@@ -297,8 +329,9 @@ final class TerminalController {
         defer { noteFrameEnd() }
         guard let t = term, let p = painter else { return }
         let chPt = cellPx.h / scale
+        // The rows that touch the rectangle. The core also draws the row below `last`, whose glyphs can reach up into it.
         let first = max(0, Int(((dirty.minY - inset) / chPt).rounded(.down)))
-        let last = max(first, Int(((dirty.maxY - inset) / chPt).rounded(.up)))
+        let last = max(first, Int(((dirty.maxY - inset) / chPt).rounded(.up)) - 1)
         ctx.saveGState()
         ctx.translateBy(x: inset, y: inset)
         ctx.scaleBy(x: 1 / scale, y: 1 / scale)   // the painter works in device pixels
@@ -417,9 +450,17 @@ final class TerminalView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        (controller?.defaultBackground() ?? terminalBackground).setFill()
-        dirtyRect.fill()
-        controller?.draw(in: ctx, dirty: dirtyRect)
+        // One rectangle at a time, exactly what AppKit is repainting: the painter records the rows it draws as up to date,
+        // so it must not be asked for rows that fall between two separate rectangles.
+        var rects: UnsafePointer<NSRect>?
+        var count = 0
+        getRectsBeingDrawn(&rects, count: &count)
+        let list = rects.map { Array(UnsafeBufferPointer(start: $0, count: count)) } ?? [dirtyRect]
+        for r in list {
+            (controller?.defaultBackground() ?? terminalBackground).setFill()
+            r.fill()
+            controller?.draw(in: ctx, dirty: r)
+        }
     }
 
     override func setFrameSize(_ newSize: NSSize) {

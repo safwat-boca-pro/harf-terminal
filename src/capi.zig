@@ -163,7 +163,20 @@ export fn harf_term_draw(t: *HarfTerm, p: *draw.Painter, ctx: *ct.CGContext, fir
     const g = t.session.lock();
     defer t.session.unlock();
     p.focused = t.session.focused();
-    p.drawRows(g, ctx, first_row, last_row);
+    p.drawRegion(g, ctx, first_row, last_row);
+}
+
+/// Which visible rows differ from what `harf_term_draw` last drew: `out[i]` is 1 for a row to redraw (it includes the row
+/// above each changed row). Returns the grid's row count; `cap` is the size of `out`, and if it is smaller than the row count
+/// the caller must redraw everything. All rows are reported before the first draw and after a change of grid size or colors.
+export fn harf_term_dirty_rows(t: *HarfTerm, p: *draw.Painter, out: [*]u8, cap: usize) usize {
+    const g = t.session.lock();
+    defer t.session.unlock();
+    p.focused = t.session.focused();
+    var flags: [256]bool = undefined;
+    const n = p.dirtyRows(g, flags[0..@min(cap, flags.len)]);
+    for (0..@min(cap, flags.len, n)) |i| out[i] = @intFromBool(flags[i]);
+    return if (n > flags.len) 0xFFFF else n; // a grid taller than the buffer: say "too many" so the caller redraws everything
 }
 
 /// A mouse event at the pixel (`x_px`, `y_px`) of the grid (device pixels, origin at its top-left).
@@ -621,4 +634,40 @@ test "bench: which loads are slow (HARF_BENCH=1)" {
         const r = try floodCommand(false, cs.cmd);
         std.debug.print("BENCH {s}: {d:.2} s = {d:.1} MB/s\n", .{ cs.name, r.secs, cs.mb / r.secs });
     }
+}
+
+test "harf_term_dirty_rows reports changed rows, and a focus change dirties the cursor's row" {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "printf 'one\\r\\ntwo\\r\\nthree'; sleep 5", null };
+    const t = harf_term_new(20, 6, 1 << 20, &argv, null) orelse return error.TermNotCreated;
+    defer harf_term_free(t);
+    const p = harf_painter_new(28) orelse return error.NoPainter;
+    defer harf_painter_free(p);
+    var m: HarfCellMetrics = undefined;
+    harf_painter_metrics(p, &m);
+    const w: usize = @intFromFloat(m.cell_w * 20);
+    const h: usize = @intFromFloat(m.cell_h * 6);
+    const data = try std.testing.allocator.alloc(u8, w * h * 4);
+    defer std.testing.allocator.free(data);
+    const space = ct.CGColorSpaceCreateDeviceRGB() orelse return error.NoColorSpace;
+    defer ct.CGColorSpaceRelease(space);
+    const ctx = ct.CGBitmapContextCreate(data.ptr, w, h, 8, w * 4, space, 2 | (2 << 12)) orelse return error.NoContext;
+    defer ct.CGContextRelease(ctx);
+    var buf: [200]u8 = undefined;
+    var waited: u32 = 0;
+    while (harf_term_row_text(t, 2, &buf, buf.len) < 5 and waited < 10_000) : (waited += 5) {
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    var out: [6]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 6), harf_term_dirty_rows(t, p, &out, out.len));
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 1, 1, 1, 1 }, &out); // nothing drawn yet
+    harf_term_draw(t, p, ctx, 0, 5);
+    _ = harf_term_dirty_rows(t, p, &out, out.len);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0 }, &out); // everything is as drawn
+    _ = harf_term_focus(t, 0);
+    _ = harf_term_dirty_rows(t, p, &out, out.len);
+    try std.testing.expectEqual(@as(u8, 1), out[2]); // the cursor sits at the end of row 2: its look changed with focus
+    try std.testing.expectEqual(@as(u8, 0), out[5]);
+    var tiny: [2]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 6), harf_term_dirty_rows(t, p, &tiny, tiny.len)); // a buffer too small to answer: the caller sees 6 > 2
 }

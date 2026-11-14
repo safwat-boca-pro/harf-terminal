@@ -23,6 +23,6 @@ what is not met. Numbers are in `docs/perf.md` (sections "Slice 4 ...").
 - **Footprint is state-dependent** (see the memory row): the 30 MB target holds in one machine state and not in another.
 - **F1, the 132-column switch,** is fixed: the window (or, in the conformance run, the view) is resized to fit the grid when a program switches it, and back (self-test 1j). The conformance pictures in `docs/conformance/` were captured before this and show those screens clipped at 80 columns.
 - **Flood latency** (typing during heavy output) and **cold-cache startup** were not measured.
-- Decisions carried over from the follow-ups plan are closed (ARCHITECTURE.md, 2026-11-14 "Open decisions closed"): P2 1 s deadline, P3 not built (measured), R7 mode 1007 honored, R8 word and line drag built.
+- Decisions carried over from the follow-ups plan are closed (ARCHITECTURE.md, 2026-11-14 "Open decisions closed"): P2 1 s deadline, P3 dirty rows (built after being measured as small; see perf.md), R7 mode 1007 honored, R8 word and line drag built.
 - Changes made in this slice because a measurement said so: the window's color space is sRGB (one backing surface instead of
   two); `build-app.sh` always relinks; `bench/idle.sh` tracks its own pid; new `bench/footprint.sh` and `bench/startup.sh`.

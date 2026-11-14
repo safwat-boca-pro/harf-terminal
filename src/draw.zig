@@ -94,6 +94,12 @@ pub const Painter = struct {
     cells: std.ArrayList(vt.Cell) = .empty,
     flat: std.ArrayList(u21) = .empty,
     text: std.ArrayList(u8) = .empty,
+    /// What each visible row looked like when it was last drawn: a hash of everything its drawing depends on (its cells,
+    /// their styles and selection, the cursor if it is on the row). `row_drawn[r]` is false before the first draw.
+    row_hash: std.ArrayList(u64) = .empty,
+    row_drawn: std.ArrayList(bool) = .empty,
+    /// Hash of what every row shares: the grid size and the default colors. A change redraws everything.
+    frame_key: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, size_px: f32) !*Painter {
         const name = ct.cfString("Menlo") orelse return error.FontUnavailable;
@@ -139,6 +145,8 @@ pub const Painter = struct {
         self.cells.deinit(self.gpa);
         self.flat.deinit(self.gpa);
         self.text.deinit(self.gpa);
+        self.row_hash.deinit(self.gpa);
+        self.row_drawn.deinit(self.gpa);
         for (self.fallbacks.items) |f| ct.CFRelease(f);
         self.fallbacks.deinit(self.gpa);
         self.cache.deinit(self.gpa);
@@ -257,6 +265,86 @@ pub const Painter = struct {
             if (d == 0) break;
         }
         return .{ .col = best, .row = row };
+    }
+
+    fn frameKey(cols: u16, rows: u16, d: vt.Colors, m: Metrics) u64 {
+        var h = std.hash.Wyhash.init(1);
+        h.update(std.mem.asBytes(&cols));
+        h.update(std.mem.asBytes(&rows));
+        h.update(std.mem.asBytes(&d.fg));
+        h.update(std.mem.asBytes(&d.bg));
+        hashOptional(&h, d.cursor);
+        h.update(std.mem.asBytes(&m.cell_w));
+        h.update(std.mem.asBytes(&m.cell_h));
+        return h.final();
+    }
+
+    fn hashOptional(h: *std.hash.Wyhash, v: ?vt.Rgb) void {
+        if (v) |c| h.update(&.{ 1, c.r, c.g, c.b }) else h.update(&.{0});
+    }
+
+    /// Everything that decides how row `row` is drawn, in one number.
+    fn rowHash(cells: []const vt.Cell, row: u16, cur: ?vt.Terminal.Cursor, focused: bool) u64 {
+        var h = std.hash.Wyhash.init(2);
+        for (cells) |cell| {
+            h.update(&.{ @intCast(cell.cps.len), @intFromEnum(cell.wide), @intFromBool(cell.selected) });
+            h.update(std.mem.sliceAsBytes(cell.cps));
+            hashOptional(&h, cell.style.fg);
+            hashOptional(&h, cell.style.bg);
+            hashOptional(&h, cell.style.underline_color);
+            h.update(std.mem.asBytes(&cell.style.flags));
+        }
+        if (cur) |c| if (c.row == row and c.visible) { // a hidden cursor draws nothing, so it is not part of the row
+            h.update(&.{ 0xC5, @intFromEnum(c.shape), @intFromBool(focused) });
+            h.update(std.mem.asBytes(&c.col));
+            hashOptional(&h, c.color);
+        };
+        return h.final();
+    }
+
+    /// Makes the record cover `rows` rows and forgets every row if the frame key changed.
+    fn syncFrame(self: *Painter, cols: u16, rows: u16, d: vt.Colors) void {
+        const key = frameKey(cols, rows, d, self.metrics_);
+        if (key != self.frame_key) {
+            @memset(self.row_drawn.items, false);
+            self.frame_key = key;
+        }
+        if (self.row_drawn.items.len != rows) {
+            self.row_drawn.resize(self.gpa, rows) catch return;
+            self.row_hash.resize(self.gpa, rows) catch return;
+            @memset(self.row_drawn.items, false);
+        }
+    }
+
+    fn recordRow(self: *Painter, row: u16, hash: u64) void {
+        if (row >= self.row_drawn.items.len) return;
+        self.row_hash.items[row] = hash;
+        self.row_drawn.items[row] = true;
+    }
+
+    /// Marks in `out` the rows that must be redrawn: those that differ from what was last drawn, and the row above each of
+    /// them (its glyphs can be covered by the changed row's background, or reach into it). Returns the grid's row count; if
+    /// `out` is shorter than that, the caller must redraw everything. Everything is dirty before the first draw and after a
+    /// change of grid size or default colors. The caller holds the session lock.
+    pub fn dirtyRows(self: *Painter, term: *vt.Terminal, out: []bool) usize {
+        const size = term.size();
+        @memset(out, true);
+        if (size.rows == 0 or !term.update()) return size.rows;
+        const key = frameKey(size.cols, size.rows, term.colors(), self.metrics_);
+        if (key != self.frame_key or self.row_drawn.items.len != size.rows) return size.rows;
+        const cur = term.cursor();
+        const n = @min(out.len, size.rows);
+        for (0..n) |r| {
+            out[r] = blk: {
+                if (!self.row_drawn.items[r] or !term.selectRow(@intCast(r))) break :blk true;
+                const cells = self.gather(term, size.cols) catch break :blk true;
+                break :blk rowHash(cells, @intCast(r), cur, self.focused) != self.row_hash.items[r];
+            };
+        }
+        if (n > 1) for (0..n - 1) |r| {
+            if (out[r + 1]) out[r] = true; // `out[r + 1]` is still the row's own result: only `out[r]` is written, ascending
+        };
+        return size.rows;
     }
 
     /// Reads the cells of the selected row (`term.selectRow` first). The slice is valid until the next call.
@@ -489,9 +577,22 @@ pub const Painter = struct {
     /// session lock. Refreshes the render state once. Rows with RTL text are shaped (Phase 4); all
     /// others are drawn one cell at a time. Colors and styles come from the terminal (slice 3).
     pub fn drawRows(self: *Painter, term: *vt.Terminal, ctx: *ct.CGContext, first_row: u16, last_row: u16) void {
+        self.drawRowRange(term, ctx, first_row, last_row, 0);
+    }
+
+    /// Like `drawRows`, for a context clipped to the region of rows `first_row` to `last_row`: it also draws the row below
+    /// the region, because that row's glyphs can reach up into it (the clip keeps the rest of that row off the bitmap). Only the
+    /// rows of the region count as drawn for `dirtyRows`.
+    pub fn drawRegion(self: *Painter, term: *vt.Terminal, ctx: *ct.CGContext, first_row: u16, last_row: u16) void {
+        self.drawRowRange(term, ctx, first_row, last_row, 1);
+    }
+
+    fn drawRowRange(self: *Painter, term: *vt.Terminal, ctx: *ct.CGContext, first_row: u16, last_row: u16, extra: u16) void {
         const size = term.size();
         if (size.rows == 0 or first_row >= size.rows or !term.update()) return;
-        const last = @min(last_row, size.rows - 1);
+        const last_recorded = @min(last_row, size.rows - 1);
+        const last = @min(last_row +| extra, size.rows - 1);
+        self.syncFrame(size.cols, size.rows, term.colors());
         const m = self.metrics_;
         const cw: f64 = m.cell_w;
         const ch: f64 = m.cell_h;
@@ -510,6 +611,7 @@ pub const Painter = struct {
             fill(ctx, 0, top, grid_w, ch, default_bg);
             if (!term.selectRow(row)) continue;
             const cells = self.gather(term, size.cols) catch continue;
+            if (row <= last_recorded) self.recordRow(row, rowHash(cells, row, cur, self.focused));
             if ((self.shapedRow(cells) catch null)) |rl| {
                 // Backgrounds by the grid cell each column occupies (columns past the text are plain cells): the glyph
                 // spans can be narrower than their cells, and fractional edges leave seams; cell boxes do neither.
@@ -1356,6 +1458,26 @@ fn benchScreen(comptime colored: bool, comptime arabic: bool) !struct { t: *vt.T
     return .{ .t = t };
 }
 
+fn benchDirtyBody(b: *BenchCtx) void {
+    var out: [24]bool = undefined;
+    _ = b.p.dirtyRows(b.t, &out);
+}
+
+/// One typed character: row 12 changed. Finds what changed and draws that region (the row, the row above, and the row below
+/// for overhang), the way the view does.
+fn benchEchoBody(b: *BenchCtx) void {
+    b.p.row_drawn.items[12] = false;
+    var out: [24]bool = undefined;
+    _ = b.p.dirtyRows(b.t, &out);
+    var first: u16 = 24;
+    var last: u16 = 0;
+    for (out, 0..) |d, i| if (d) {
+        first = @min(first, @as(u16, @intCast(i)));
+        last = @max(last, @as(u16, @intCast(i)));
+    };
+    b.p.drawRegion(b.t, b.cv.ctx, first, last);
+}
+
 test "bench: painter-only frame costs (HARF_BENCH=1)" {
     if (std.c.getenv("HARF_BENCH") == null) return error.SkipZigTest;
     const p = try Painter.init(std.testing.allocator, test_px);
@@ -1371,6 +1493,10 @@ test "bench: painter-only frame costs (HARF_BENCH=1)" {
     ctx.first = 5;
     ctx.last = 5;
     std.debug.print("BENCH plain one row (row 5):         {d:>8.1} us\n", .{benchMean(&ctx, benchBody)});
+    ctx.first = 0;
+    ctx.last = 23;
+    std.debug.print("BENCH plain dirtyRows, nothing new:  {d:>8.1} us\n", .{benchMean(&ctx, benchDirtyBody)});
+    std.debug.print("BENCH plain one typed char (P3):     {d:>8.1} us\n", .{benchMean(&ctx, benchEchoBody)});
 
     const colored = try benchScreen(true, false);
     defer colored.t.deinit();
@@ -1544,4 +1670,297 @@ test "a shaped row's uniform background has no seams" {
         }
     }
     try std.testing.expectEqual(@as(usize, 0), bad); // every pixel inside the span is exactly the background
+}
+
+// ---- P3: dirty rows ----
+//
+// The view redraws only the rows `dirtyRows` reports, into a bitmap that keeps the earlier frames. These tests run that
+// protocol (clip to the rows' region, fill it, `drawRegion`) against a second painter that draws the whole screen every
+// time, and require the two bitmaps to be identical after every step of a script.
+
+const Incremental = struct {
+    p: *Painter,
+    full: *Painter,
+    t: *vt.Terminal,
+    inc: Canvas,
+    ref: Canvas,
+    rows: u16,
+    cols: u16,
+    last_dirty: [64]bool = @splat(false),
+    last_count: usize = 0,
+
+    fn init(cols: u16, rows: u16, text: []const u8) !Incremental {
+        const p = try Painter.init(std.testing.allocator, test_px);
+        errdefer p.deinit();
+        const full = try Painter.init(std.testing.allocator, test_px);
+        errdefer full.deinit();
+        const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = cols, .rows = rows });
+        errdefer t.deinit();
+        t.write(text);
+        var self: Incremental = .{ .p = p, .full = full, .t = t, .inc = undefined, .ref = undefined, .rows = rows, .cols = cols };
+        try self.canvases();
+        return self;
+    }
+
+    fn canvases(self: *Incremental) !void {
+        const m = self.p.metrics();
+        const w: usize = @intFromFloat(m.cell_w * @as(f32, @floatFromInt(self.cols)));
+        const h: usize = @intFromFloat(m.cell_h * @as(f32, @floatFromInt(self.rows)));
+        self.inc = try Canvas.init(w, h);
+        errdefer self.inc.deinit();
+        self.ref = try Canvas.init(w, h);
+    }
+
+    fn deinit(self: *Incremental) void {
+        self.inc.deinit();
+        self.ref.deinit();
+        self.t.deinit();
+        self.full.deinit();
+        self.p.deinit();
+    }
+
+    fn resize(self: *Incremental, cols: u16, rows: u16) !void {
+        self.inc.deinit();
+        self.ref.deinit();
+        self.cols = cols;
+        self.rows = rows;
+        self.t.resize(cols, rows, 0, 0);
+        try self.canvases();
+    }
+
+    fn rowDirty(self: *const Incremental, row: usize) bool {
+        return self.last_dirty[row];
+    }
+
+    /// Redraws what `dirtyRows` says changed, then checks the bitmap against a full redraw. Returns how many rows were redrawn.
+    fn step(self: *Incremental, label: []const u8) !usize {
+        self.p.focused = self.full.focused;
+        self.last_dirty = @splat(false);
+        const n = self.p.dirtyRows(self.t, self.last_dirty[0..self.rows]);
+        try std.testing.expectEqual(@as(usize, self.rows), n); // it reports the grid's row count
+        const m = self.p.metrics();
+        const ch: f64 = m.cell_h;
+        const w: f64 = m.cell_w * @as(f32, @floatFromInt(self.cols));
+        var count: usize = 0;
+        var r: usize = 0;
+        while (r < self.rows) {
+            if (!self.last_dirty[r]) {
+                r += 1;
+                continue;
+            }
+            var b = r;
+            while (b + 1 < self.rows and self.last_dirty[b + 1]) b += 1;
+            count += b - r + 1;
+            // what the view does for one invalidated rectangle: AppKit clips to it, the view fills it, the painter draws it
+            ct.CGContextSaveGState(self.inc.ctx);
+            ct.CGContextClipToRect(self.inc.ctx, .{ .origin = .{ .x = 0, .y = ch * @as(f64, @floatFromInt(r)) }, .size = .{ .width = w, .height = ch * @as(f64, @floatFromInt(b - r + 1)) } });
+            const d = self.t.colors();
+            ct.CGContextSetRGBFillColor(self.inc.ctx, @as(f64, @floatFromInt(d.bg.r)) / 255, @as(f64, @floatFromInt(d.bg.g)) / 255, @as(f64, @floatFromInt(d.bg.b)) / 255, 1);
+            ct.CGContextFillRect(self.inc.ctx, .{ .origin = .{ .x = 0, .y = ch * @as(f64, @floatFromInt(r)) }, .size = .{ .width = w, .height = ch * @as(f64, @floatFromInt(b - r + 1)) } });
+            self.p.drawRegion(self.t, self.inc.ctx, @intCast(r), @intCast(b));
+            ct.CGContextRestoreGState(self.inc.ctx);
+            r = b + 1;
+        }
+        self.last_count = count;
+        self.full.drawRows(self.t, self.ref.ctx, 0, self.rows - 1);
+        if (!std.mem.eql(u8, self.inc.data, self.ref.data)) {
+            var first: usize = 0;
+            while (self.inc.data[first] == self.ref.data[first]) first += 1;
+            const y = first / 4 / self.inc.w;
+            std.debug.print("dirty rows: '{s}': the incremental bitmap differs from a full redraw first at row {d} (y {d}); redrawn rows:", .{ label, y / @as(usize, @intFromFloat(m.cell_h)), y });
+            for (0..self.rows) |i| if (self.last_dirty[i]) std.debug.print(" {d}", .{i});
+            std.debug.print("\n", .{});
+            return error.IncrementalDiffers;
+        }
+        return count;
+    }
+};
+
+test "dirty rows: the first frame redraws everything and an unchanged screen redraws nothing" {
+    var s = try Incremental.init(30, 8, "\x1b[?25lhello\r\nworld");
+    defer s.deinit();
+    try std.testing.expectEqual(@as(usize, 8), try s.step("first frame"));
+    try std.testing.expectEqual(@as(usize, 0), try s.step("nothing changed"));
+}
+
+test "dirty rows: typing redraws the changed row and the row above it, not the rest" {
+    var s = try Incremental.init(30, 10, "\x1b[?25lone\r\ntwo\r\nthree\r\nfour");
+    defer s.deinit();
+    _ = try s.step("first");
+    s.t.write("\x1b[6;1Hnew text");
+    const n = try s.step("a change in row 5");
+    try std.testing.expect(n <= 2); // the row, and the row above (its glyphs can reach into it)
+    try std.testing.expect(s.rowDirty(5));
+    try std.testing.expect(!s.rowDirty(0) and !s.rowDirty(9));
+    s.t.write("\x1b[1;1HONE");
+    try std.testing.expect(try s.step("a change in row 0") <= 2);
+}
+
+test "dirty rows: the cursor's old and new rows, and hiding it" {
+    var s = try Incremental.init(30, 8, "abc\r\ndef\r\nghi");
+    defer s.deinit();
+    _ = try s.step("first");
+    s.t.write("\x1b[2;2H"); // the cursor moves from row 2 to row 1 and writes nothing
+    try std.testing.expect(s.rowDirty(2) or s.rowDirty(1));
+    _ = try s.step("cursor moved up");
+    try std.testing.expect(s.rowDirty(1) and s.rowDirty(2));
+    s.t.write("\x1b[6;4H");
+    _ = try s.step("cursor moved far");
+    try std.testing.expect(s.rowDirty(1) and s.rowDirty(5));
+    s.t.write("\x1b[?25l");
+    _ = try s.step("cursor hidden");
+    try std.testing.expect(s.rowDirty(5));
+    s.t.write("\x1b[?25h\x1b[4 q"); // shown again, as an underline
+    _ = try s.step("cursor shown as an underline");
+    try std.testing.expect(s.rowDirty(5));
+}
+
+test "dirty rows: focus changes the cursor's row" {
+    var s = try Incremental.init(30, 8, "abc\r\ndef\x1b[3;5H");
+    defer s.deinit();
+    _ = try s.step("first");
+    s.full.focused = false;
+    const n = try s.step("window lost focus");
+    try std.testing.expect(n >= 1 and s.rowDirty(2));
+    s.full.focused = true;
+    try std.testing.expect(try s.step("window got focus") >= 1);
+}
+
+test "dirty rows: selection, extending it, clearing it" {
+    var s = try Incremental.init(30, 8, "\x1b[?25lhello world\r\n\u{645}\u{631}\u{62D}\u{628}\u{627} line\r\nplain third");
+    defer s.deinit();
+    _ = try s.step("first");
+    s.t.selectionPress(2, 0, 1);
+    s.t.selectionDrag(8, 0);
+    s.t.selectionRelease();
+    try std.testing.expect(try s.step("a selection on row 0") >= 1);
+    s.t.selectionPress(1, 0, 2); // double click then drag over three rows
+    s.t.selectionDrag(3, 2);
+    s.t.selectionRelease();
+    _ = try s.step("a selection over three rows");
+    s.t.clearSelection();
+    try std.testing.expect(try s.step("selection cleared") >= 1);
+    try std.testing.expectEqual(@as(usize, 0), try s.step("nothing left to do"));
+}
+
+test "dirty rows: output that scrolls the screen, and scrolling back through history" {
+    var s = try Incremental.init(30, 6, "\x1b[?25l");
+    defer s.deinit();
+    _ = try s.step("first");
+    for (0..40) |i| {
+        var line: [32]u8 = undefined;
+        s.t.write(std.fmt.bufPrint(&line, "line {d}\r\n", .{i}) catch unreachable);
+    }
+    try std.testing.expectEqual(@as(usize, 5), try s.step("40 lines of output")); // every row's text moved up; the last row was blank and still is
+    try std.testing.expect(!s.rowDirty(5));
+    s.t.scrollViewport(-3);
+    _ = try s.step("viewport up into history");
+    s.t.scrollViewport(100);
+    _ = try s.step("viewport back to the bottom");
+}
+
+test "dirty rows: a row whose only change is its style, and a color change" {
+    var s = try Incremental.init(30, 6, "\x1b[?25labc def\r\nghi jkl");
+    defer s.deinit();
+    _ = try s.step("first");
+    s.t.write("\x1b[1;1H\x1b[31mabc def\x1b[0m"); // the same text, now red
+    try std.testing.expect(s.rowDirty(0));
+    _ = try s.step("same text, new color");
+    try std.testing.expect(s.rowDirty(0) and !s.rowDirty(4));
+    s.t.write("\x1b[2;1H\x1b[4mghi jkl\x1b[0m");
+    _ = try s.step("same text, now underlined");
+    try std.testing.expect(s.rowDirty(1));
+}
+
+test "dirty rows: a new default color or palette entry redraws the whole screen" {
+    var s = try Incremental.init(30, 6, "\x1b[?25l\x1b[31mred\x1b[0m plain\r\n\x1b[41mon red\x1b[0m");
+    defer s.deinit();
+    _ = try s.step("first");
+    s.t.write("\x1b]11;rgb:20/20/50\x07"); // background
+    try std.testing.expectEqual(@as(usize, 6), try s.step("OSC 11"));
+    s.t.write("\x1b]10;rgb:f0/f0/a0\x07"); // foreground
+    try std.testing.expectEqual(@as(usize, 6), try s.step("OSC 10"));
+    s.t.write("\x1b]4;1;rgb:00/ff/00\x07"); // palette entry 1 (what "red" is)
+    try std.testing.expect(try s.step("OSC 4") >= 1);
+    try std.testing.expect(s.rowDirty(0) and s.rowDirty(1));
+}
+
+test "dirty rows: the alternate screen and back" {
+    var s = try Incremental.init(30, 6, "\x1b[?25lprimary one\r\nprimary two");
+    defer s.deinit();
+    _ = try s.step("first");
+    s.t.write("\x1b[?1049h\x1b[2Jalternate\x1b[3;1Hfull screen app");
+    _ = try s.step("alternate screen");
+    s.t.write("\x1b[?1049l");
+    try std.testing.expect(try s.step("back to the primary screen") >= 2);
+    try std.testing.expect(s.rowDirty(0) and s.rowDirty(1));
+}
+
+test "dirty rows: a resize redraws everything" {
+    var s = try Incremental.init(30, 6, "\x1b[?25lalpha\r\nbeta");
+    defer s.deinit();
+    _ = try s.step("first");
+    try s.resize(40, 8);
+    try std.testing.expectEqual(@as(usize, 8), try s.step("40x8"));
+    try s.resize(20, 4);
+    try std.testing.expectEqual(@as(usize, 4), try s.step("20x4"));
+}
+
+test "dirty rows: shaped Arabic rows, with marks that reach into the neighbors" {
+    // tall marks (tashkeel, shadda) above and below, a plain row between, edited one at a time
+    const screen = "\x1b[?25l\u{645}\u{64F}\u{62D}\u{64E}\u{645}\u{64E}\u{651}\u{62F}\u{64C}\r\nplain row\r\n\u{628}\u{64F}\u{64A}\u{64F}\u{648}\u{652}\u{62A}\u{64C}\r\nlast";
+    var s = try Incremental.init(24, 6, screen);
+    defer s.deinit();
+    _ = try s.step("first");
+    s.t.write("\x1b[2;1Hxxxxxxxxx"); // edit the plain row between two shaped rows
+    _ = try s.step("the row between");
+    s.t.write("\x1b[1;1H\x1b[2K\u{643}\u{650}\u{62A}\u{64E}\u{627}\u{628}\u{64C}"); // edit the shaped row above
+    _ = try s.step("the shaped row above");
+    s.t.write("\x1b[3;1H\x1b[2Kplain again"); // the shaped row below becomes plain
+    _ = try s.step("the shaped row below");
+    s.t.write("\x1b[4;1H\u{651}\u{64E}\u{651}\u{64E}\u{651}\u{64E}\u{651}\u{64E}"); // marks with no base letters
+    _ = try s.step("stacked marks");
+}
+
+test "dirty rows: wide and combining cells, and the cursor on a shaped row" {
+    var s = try Incremental.init(24, 6, "\u{65E5}\u{672C}\u{8A9E} x\u{301}\u{302}y\r\n\u{645}\u{631}\u{62D}\u{628}\u{627}\x1b[2;3H");
+    defer s.deinit();
+    _ = try s.step("first");
+    s.t.write("\x1b[1;1H\u{8A9E}");
+    _ = try s.step("a wide cell replaced");
+    s.t.write("\x1b[2;1H");
+    _ = try s.step("cursor at the start of a shaped row");
+    s.t.write("\x1b[2;5H");
+    _ = try s.step("cursor in the middle of a shaped row");
+}
+
+// The seed is fixed. Mutation-checked: without the row-above expansion, or without the overhang row in `drawRegion`, this is the test that
+// fails (a glyph of one row reaches into its upper neighbor), so it is kept long enough to reach those cases.
+test "dirty rows: a long random script stays identical to full redraws" {
+    var s = try Incremental.init(26, 9, "\x1b[?25l");
+    defer s.deinit();
+    var prng = std.Random.DefaultPrng.init(0x9e3779b9);
+    const rnd = prng.random();
+    const words = [_][]const u8{ "alpha", "\u{645}\u{631}\u{62D}\u{628}\u{627}", "\u{65E5}\u{672C}", "x\u{301}", "\x1b[31m", "\x1b[0m", "\x1b[7m", "\x1b[1m", "bold", "\r\n", "\x1b[2K", "\u{64E}\u{651}", "\u{2502}" };
+    _ = try s.step("first");
+    for (0..150) |i| {
+        switch (rnd.uintLessThan(u8, 10)) {
+            0 => {
+                var pos: [16]u8 = undefined;
+                s.t.write(std.fmt.bufPrint(&pos, "\x1b[{d};{d}H", .{ rnd.uintLessThan(u8, 9) + 1, rnd.uintLessThan(u8, 26) + 1 }) catch unreachable);
+            },
+            1 => s.t.write(if (rnd.boolean()) "\x1b[?25h" else "\x1b[?25l"),
+            2 => {
+                const a = rnd.uintLessThan(u16, 26);
+                s.t.selectionPress(a, rnd.uintLessThan(u16, 9), 1 + rnd.uintLessThan(u8, 2));
+                s.t.selectionDrag(rnd.uintLessThan(u16, 26), rnd.uintLessThan(u16, 9));
+                s.t.selectionRelease();
+            },
+            3 => if (rnd.boolean()) s.t.clearSelection() else s.t.scrollViewport(rnd.intRangeAtMost(i32, -4, 4)),
+            4 => s.full.focused = rnd.boolean(),
+            else => for (0..1 + rnd.uintLessThan(u8, 4)) |_| s.t.write(words[rnd.uintLessThan(usize, words.len)]),
+        }
+        var label: [24]u8 = undefined;
+        _ = try s.step(std.fmt.bufPrint(&label, "random step {d}", .{i}) catch "random step");
+    }
 }

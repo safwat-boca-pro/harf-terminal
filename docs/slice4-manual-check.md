@@ -25,3 +25,7 @@ Build and open: `macos/build-app.sh && open macos/.build/Harf.app`. Only you can
 - [ ] Wheel in `less` or `man` still scrolls. In a program that resets mode 1007 (`printf '\e[?1049h\e[?1007l'; sleep 30`) the wheel does nothing.
 - [ ] A program that never ends a synchronized update (`printf '\e[?2026h'; echo stuck; sleep 30`) shows `stuck` after about a second.
 - [ ] Run `vttest`, menu 1, the 132-column screens: the window widens to fit 132 columns and returns to 80 when vttest switches back. (`printf '\e[?40h\e[?3h'` does it by hand.)
+
+**Dirty rows (P3)** (the one thing no test here can see: that AppKit keeps the untouched rows between partial redraws)
+- [ ] Use the app for a few minutes: type, run `ls --color`, `vim`, scroll the wheel through output, select with the mouse, switch windows and back, switch the cursor with `printf '\e[5 q'`. Nothing should ever look stale, torn or half-drawn (a row of old text, a ghost cursor, a missing selection edge).
+- [ ] If something does, start the app with `HARF_FULL_REDRAW=1` and see whether it goes away; tell me what you did.

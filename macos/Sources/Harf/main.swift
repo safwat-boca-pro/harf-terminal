@@ -284,6 +284,7 @@ func selfTest() -> Never {
             let ch = String(letters[i % 26])
             let before = typed()
             let marks = measureDirtyMarks
+            measureDirtyRect = .null
             let t0 = ProcessInfo.processInfo.systemUptime
             c.view.handleKey(code: 0, mods: 0, characters: ch, isRepeat: false) { c.sendText(ch) }
             // The product path: key -> core -> PTY echo -> parse -> wake -> hop to the main thread -> wakeOnMain marks the
@@ -291,8 +292,12 @@ func selfTest() -> Never {
             let deadline = t0 + 2
             while measureDirtyMarks == marks && ProcessInfo.processInfo.systemUptime < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.0002)) }
             if measureDirtyMarks == marks { fail("keystroke \(i): the product's wake path never marked the view dirty within 2 s") }
-            // An off-screen window gets no display-link tick, so this stands in for it: draw once, now.
-            c.view.cacheDisplay(in: c.view.bounds, to: rep)
+            // An off-screen window gets no display-link tick, so this stands in for it: draw once, now, what the wake
+            // invalidated (the changed row and the one above it, not the whole view).
+            let dirty = measureDirtyRect.intersection(c.view.bounds)
+            if dirty.isNull || dirty.height > 3 * c.cellSizePt.height { fail("keystroke \(i): the wake invalidated \(measureDirtyRect) of a \(c.view.bounds.size) view; one echoed letter should touch at most two rows") }
+            guard let part = c.view.bitmapImageRepForCachingDisplay(in: dirty) else { fail("no bitmap") }
+            c.view.cacheDisplay(in: dirty, to: part)
             if typed() != before + 1 { fail("keystroke \(i): the frame drawn after the wake does not show the echo") }
             samples.append((measureFrameEnd - t0) * 1000)
             _ = pump(0.01) { false }
@@ -331,6 +336,52 @@ func selfTest() -> Never {
         if !pump(5, until: { fits(80) && c.rowText(0).contains("narrow") }) { fail("DECCOLM: back to 80 columns, the window is \(c.view.bounds.width) pt wide, grid \(c.gridSize), core \(c.coreGrid())") }
         c.close()
         _ = w
+    }
+
+    // 1k. Dirty rows, through the view: a bitmap that is updated only with the rectangles the wake path invalidates, each drawn by the
+    // view's own `draw`, must equal a full redraw after every step (typing Latin and Arabic, Return, so the screen scrolls).
+    do {
+        trackDirty = true
+        defer { trackDirty = false }
+        guard let c = TerminalController(argv: ["/bin/sh", "-c", "exec cat"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the dirty-rows session") }
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
+        win.contentView = c.view
+        _ = pump(1.0) { false }
+        guard let kept = c.view.bitmapImageRepForCachingDisplay(in: c.view.bounds), let full = c.view.bitmapImageRepForCachingDisplay(in: c.view.bounds) else { fail("no bitmap") }
+        c.view.cacheDisplay(in: c.view.bounds, to: kept)
+        let px = Double(kept.pixelsWide) / Double(c.view.bounds.width)
+        let alphabet = ["a", "b", "g", "م", "ر", "ح", "ب", "ا", " ", " ", "\r", "é", "日", "ل"]
+        var seed: UInt32 = 12345
+        var partial = 0
+        for i in 0..<120 {
+            seed = seed &* 1664525 &+ 1013904223
+            let ch = alphabet[Int(seed >> 16) % alphabet.count]
+            let marks = measureDirtyMarks
+            measureDirtyRect = .null
+            c.sendText(ch)
+            let deadline = Date().addingTimeInterval(2)
+            while measureDirtyMarks == marks && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.002)) }
+            _ = pump(0.03) { false }   // let any second wake (cat's own output) arrive
+            let dirty = measureDirtyRect.intersection(c.view.bounds)
+            if !dirty.isNull {
+                if dirty.height < c.view.bounds.height { partial += 1 }
+                guard let part = c.view.bitmapImageRepForCachingDisplay(in: dirty) else { fail("no bitmap") }
+                c.view.cacheDisplay(in: dirty, to: part)
+                guard let src = part.bitmapData, let dst = kept.bitmapData else { fail("no bitmap data") }
+                let x0 = Int((dirty.minX * px).rounded()), y0 = Int((dirty.minY * px).rounded())
+                let bytes = min(part.bytesPerRow, kept.bytesPerRow - x0 * 4)
+                for y in 0..<part.pixelsHigh where y0 + y < kept.pixelsHigh { memcpy(dst + (y0 + y) * kept.bytesPerRow + x0 * 4, src + y * part.bytesPerRow, bytes) }
+            }
+            c.view.cacheDisplay(in: c.view.bounds, to: full)
+            guard let a = kept.bitmapData, let b = full.bitmapData else { fail("no bitmap data") }
+            for y in 0..<kept.pixelsHigh where memcmp(a + y * kept.bytesPerRow, b + y * full.bytesPerRow, kept.pixelsWide * 4) != 0 {
+                fail("dirty rows: after step \(i) ('\(ch)') the partially redrawn view differs from a full redraw at pixel row \(y) (row \(Int(Double(y) / px / c.cellSizePt.height)), invalidated \(dirty))")
+            }
+        }
+        if partial < 60 { fail("dirty rows: only \(partial) of 120 steps invalidated less than the whole view") }
+        print("selftest: dirty rows: 120 typed steps, \(partial) redrawn as rows, every one identical to a full redraw")
+        c.close()
+        _ = win
     }
 
     // 2. Typing (a letter, an Arabic letter, Return) goes through the view's own key path.

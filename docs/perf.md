@@ -176,16 +176,44 @@ Mutation-checked: removing the line that clears the flag fails the deadline test
 having reset it, after a timeout, is not held for that frame (the library treats a second set as a no-op and reports no new hold);
 a program that resets and sets it again is held again (tested).
 
-### P3: dirty rows, closed as not worth it (2026-11-14)
+### P3: dirty rows (2026-11-14)
 
-The gate in the plan: after P1 a full frame should be about 0.5 ms; if so, dirty rows are an energy optimization only, and the owner
-decides. Measured after P1: plain full frame 0.5 ms painter-only, 0.6 ms with AppKit's bitmap path (the colored plain screen's
-second draw in the self-test); one row 20 µs. A frame is drawn once per wake and redraws coalesce to one per display refresh, so
-the most it costs is 60 frames x 0.6 ms = 36 ms per second (3.6 percent of one core) during a flood that dirties nearly every row
-anyway, and typing at 10 keys per second costs 6 ms per second (0.6 percent) against about 0.2 percent with dirty rows. The
-saving is about 0.4 percent of one core while typing and none during output. Against that, the plan lists eight invalidation
-hazards (cursor rows, focus, selection, scroll, resize, alternate screen, palette, style-only rows), and a missed one shows
-as a stale row on screen. Not implemented. Reopen if a display-link frame budget or a battery measurement says otherwise.
+I first closed this as not worth building (a full frame was 0.5 ms, the saving about 0.4 percent of a core); the owner asked for it
+anyway, so it is built. **Design.** The painter keeps a hash per visible row of everything that row's drawing depends on (its
+cells with styles and selection flags, and the cursor with the focus flag if it sits on the row), plus a frame key (grid size,
+default colors, cell size). `dirtyRows` (C: `harf_term_dirty_rows`) compares the current hashes with those of the last draw
+and answers which rows to redraw, adding the row above each changed row, because a glyph can reach up into its neighbor. The view
+invalidates one rectangle per run of rows; `draw` repaints exactly the rectangles AppKit hands it, and the core also draws the
+row below the region (clipped away by the context, not recorded as drawn) for the same reason. Hazards from the plan are
+covered by the hash, not enumerated in code: focus, selection, viewport scroll, alternate screen and style-only changes change
+a row's cells or the cursor entry; colors change the frame key; a resize or a new backing scale invalidates the whole view
+(`layoutChanged`) and changes the key. A hidden cursor is not part of the row. Where the scale makes row edges fall off whole
+device pixels the view falls back to full invalidation; `HARF_FULL_REDRAW=1` forces it everywhere.
+
+**Proof.** `src/draw.zig` runs the view's protocol (clip to the region, fill, `drawRegion`) into a bitmap that keeps earlier frames and
+compares it with a second painter's full redraw after every step of: first frame, no change, typing, cursor moves and
+hiding and shapes, focus, selections (single, double-click, cleared), 40 lines of scrolling and scrolling through history, style-only
+changes, OSC 4/10/11, alternate screen in and out, resizes, shaped Arabic rows with marks, wide and combining cells, and a
+150-step seeded random script. Mutation-checked (each makes a named test fail): hash ignoring selection, focus, fg, style flags or
+the cursor; frame key ignoring the default background; no row-above expansion and no overhang row (both caught by the random
+script, which shows that glyphs of one row really do reach into the row above). Self-test 1k does the same through the view
+(real `draw`, real wake path, 120 typed steps with Latin, Arabic, wide, accents and Return); it fails if the rows are
+computed off by one or the rectangle starts a row late.
+
+**Numbers** (painter only, ReleaseFast, M1, `HARF_BENCH=1`, three runs):
+
+| What | Before | After |
+|---|---|---|
+| One typed character: find what changed and draw it | 487 to 540 µs (full frame) | 132, 132, 132 µs (73 µs finding, the rest drawing 3 rows) |
+| A wake with nothing changed | a full frame | 73 µs, and nothing is invalidated |
+| Keypress to draw, in process (self-test 1h, 200 keys) | median 3.94, 3.92, 3.95 ms | median 1.87, 2.23, 2.32 ms |
+| Idle CPU (30 s) | 0.02 percent mean | 0.02 percent mean |
+
+The finding cost (gather and hash of 24 rows) is the part to cut if it ever matters: the library's own per-row dirty flags could
+skip rows, at the price of tracking the cursor, focus and selection ourselves. **Not verified by a machine:** that AppKit keeps the
+pixels of the rows it did not ask for between partial draws. The spike on this machine shows it asks for exactly the invalidated
+rectangle (`getRectsBeingDrawn` returned one rect, the rows' own); the view is layer-backed (`NSViewBackingLayer`); a screenshot
+cannot be taken from this session (screen capture is not permitted). It is on the owner's checklist.
 
 ### P4 gate: does drawing slow the parsing of a flood? (2026-11-14)
 
