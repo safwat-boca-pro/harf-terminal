@@ -253,6 +253,16 @@ export fn harf_term_clear_selection(t: *HarfTerm) void {
     t.session.clearSelection();
 }
 
+/// The terminal's current default background (a program's OSC 11 changes it), as red, green, blue bytes.
+/// The view fills the margins around the grid with it.
+export fn harf_term_default_bg(t: *HarfTerm, rgb: *[3]u8) void {
+    const g = t.session.lock();
+    defer t.session.unlock();
+    _ = g.update(); // pick up a color set since the last draw
+    const bg = g.colors().bg;
+    rgb.* = .{ bg.r, bg.g, bg.b };
+}
+
 /// Re-arms the `wake` callback; call before reading the grid for a redraw.
 export fn harf_term_wake_handled(t: *HarfTerm) void {
     t.session.wakeHandled();
@@ -419,6 +429,23 @@ test "selection through the C ABI: the second cell of lam-alef is its own target
     const text = harf_term_selection_text(t, &len) orelse return error.NoSelection;
     defer harf_free(text);
     try std.testing.expectEqualStrings("\u{627}", text[0..len]); // the alef, from its own cell
+}
+
+test "harf_term_default_bg follows a program's OSC 11" {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "printf '\\033]11;rgb:10/20/30\\007'; echo done; sleep 5", null };
+    const t = harf_term_new(20, 3, 1 << 20, &argv, null) orelse return error.TermNotCreated;
+    defer harf_term_free(t);
+    var rgb: [3]u8 = undefined;
+    harf_term_default_bg(t, &rgb);
+    try std.testing.expectEqual([3]u8{ 15, 15, 18 }, rgb); // Harf's theme until the program changes it
+    var buf: [64]u8 = undefined;
+    var waited: u32 = 0;
+    while (harf_term_row_text(t, 0, &buf, buf.len) < 4 and waited < 10_000) : (waited += 5) {
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    harf_term_default_bg(t, &rgb);
+    try std.testing.expectEqual([3]u8{ 0x10, 0x20, 0x30 }, rgb);
 }
 
 test "harf_term_new rejects zero size" {

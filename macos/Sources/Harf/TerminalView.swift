@@ -166,6 +166,14 @@ final class TerminalController {
         pasteboard.setString(s, forType: .string)
     }
 
+    /// The terminal's default background right now (a program's OSC 11 changes it).
+    func defaultBackground() -> NSColor? {
+        guard let t = term else { return nil }
+        var rgb: [UInt8] = [0, 0, 0]
+        harf_term_default_bg(t, &rgb)
+        return NSColor(srgbRed: CGFloat(rgb[0]) / 255, green: CGFloat(rgb[1]) / 255, blue: CGFloat(rgb[2]) / 255, alpha: 1)
+    }
+
     /// The window became key (true) or resigned (false).
     func setFocus(_ on: Bool) {
         guard let t = term else { return }
@@ -338,7 +346,7 @@ final class TerminalView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        terminalBackground.setFill()
+        (controller?.defaultBackground() ?? terminalBackground).setFill()
         dirtyRect.fill()
         controller?.draw(in: ctx, dirty: dirtyRect)
     }

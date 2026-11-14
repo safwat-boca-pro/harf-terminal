@@ -196,6 +196,21 @@ func selfTest() -> Never {
     timedScreen("plain", "colored latin text line %d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
     timedScreen("arabic", "بيتي مرحبا السلام عليكم ورحمة الله وبركاته %d بيتي مرحبا السلام عليكم ورحمة الله")
 
+    // 1e. A program's OSC 11 (default background) also changes the margins around the grid, not just the cells.
+    do {
+        guard let b = TerminalController(argv: ["/bin/sh", "-c", #"printf '\033]11;rgb:ff/ff/ff\007'; echo done; sleep 4"#], frame: NSSize(width: 700, height: 420)) else { fail("cannot start background session") }
+        if !pump(5, until: { (0..<3).contains { b.rowText($0).contains("done") } }) { fail("background: child not done") }
+        guard let r = b.view.bitmapImageRepForCachingDisplay(in: b.view.bounds) else { fail("no bitmap") }
+        b.view.cacheDisplay(in: b.view.bounds, to: r)
+        let px = Double(r.pixelsWide) / Double(b.view.bounds.width)
+        // 2 points from the left and top edges: inside the 6-point inset, outside every cell
+        guard let margin = r.colorAt(x: Int(2 * px), y: Int(2 * px))?.usingColorSpace(.sRGB) else { fail("no margin pixel") }
+        if margin.redComponent < 0.95 || margin.greenComponent < 0.95 || margin.blueComponent < 0.95 {
+            fail("background: after OSC 11 white the margin is (\(margin.redComponent), \(margin.greenComponent), \(margin.blueComponent))")
+        }
+        b.close()
+    }
+
     // 2. Typing (a letter, an Arabic letter, Return) goes through the view's own key path.
     let echo = ["/bin/sh", "-c", "read x; echo got:$x"]
     func rows(_ c: TerminalController) -> String { (0..<6).map { c.rowText($0) }.joined(separator: "|") }

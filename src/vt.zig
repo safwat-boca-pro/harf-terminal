@@ -1095,6 +1095,15 @@ test "viewport clamps" {
     const t = try Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
     defer t.deinit();
     fillHistory(t, 60);
+    // the live screen before the flood: every row's text and the cursor
+    _ = t.update();
+    var before: [10][32]u8 = undefined;
+    var before_len: [10]usize = undefined;
+    for (0..10) |r| {
+        const text = t.rowText(@intCast(r), &before[r]);
+        before_len[r] = text.len;
+    }
+    const cursor_before = t.cursor().?;
     t.scrollViewport(-100000);
     _ = t.update();
     try std.testing.expectEqual(@as(usize, 0), t.viewport().offset);
@@ -1106,6 +1115,17 @@ test "viewport clamps" {
     try std.testing.expect(v.offset + v.rows <= v.total);
     t.scrollToBottom();
     try std.testing.expectEqual(t.viewport().total, t.viewport().offset + t.viewport().rows);
+    // after the flood the live screen and the cursor are exactly as they were
+    _ = t.update();
+    var after: [32]u8 = undefined;
+    for (0..10) |r| {
+        const text = t.rowText(@intCast(r), &after);
+        try std.testing.expectEqualStrings(before[r][0..before_len[r]], text);
+    }
+    const cursor_after = t.cursor().?;
+    try std.testing.expectEqual(cursor_before.col, cursor_after.col);
+    try std.testing.expectEqual(cursor_before.row, cursor_after.row);
+    try std.testing.expect(cursor_after.visible);
 }
 
 test "cursor hidden while scrolled" {
