@@ -126,3 +126,29 @@ From the plan's earlier throwaway measurements on the same screen: `gather` for 
 `selectRow` x24 and `update` under 1 µs each, and `rowfacts.analyze` x24 rows 17 µs, against a 1.7 ms frame. Per-cell FFI and
 row iteration and an ASCII fast exit in `rowfacts` therefore buy about 1 to 3 percent and are not implemented. If `gather` ever
 matters, `ghostty_render_state_row_cells_get_multi` is the tool. Do not change `bidi.classOf` (ASCII digits are class `EN`).
+
+### P1: batched glyph draws (2026-11-14)
+
+Change: a row's glyphs go out in one `CTFontDrawGlyphs` call per run of the same font and color (plain path), and the same
+for unscaled shaped-row glyphs that sit on a whole pixel. Same harness and machine as the baseline above (mean of 300 frames,
+ReleaseFast, three runs after the change). The old per-glyph routines stay as `Painter.reference_draw`, which the parity tests
+use; they check that the two outputs are identical byte for byte on a screen mixing Latin, fallback-font glyphs, a wide cell,
+bold, italic, faint, invisible cells, color changes, combining marks, underline, strike, a shaped Arabic row (including a
+colored and a bold one) and a box row.
+
+| What | Before (µs) | After (µs) |
+|---|---|---|
+| Plain full frame | 1729, 1695, 1696 | 507, 500, 505 |
+| Plain one row | 74, 74, 73 | 19.8, 19.9, 19.9 |
+| Colored plain full frame | 1763, 1740, 1745 | 510, 509, 510 |
+| Arabic shaped, cached | 1104, 1089, 1090 | 968, 968, 966 |
+| Arabic shaped, cold | 6139, 6157, 6169 | 6037, 6045, 6023 |
+
+Plain full frame is about 3.4 times faster (target: at most 700). The Arabic cached frame improves about 11 percent and the
+cold frame about 2 percent: most glyphs of a justified Arabic word sit on fractional pixel positions and are not batched.
+
+**Why fractional positions are not batched.** Drawing every shaped glyph through a batch produced 93 to 155 differing bytes
+per small screen. Drawing the same glyphs one at a time through a translation was exact, and so was the plain path (its
+glyphs sit at `col * cell_w`, whole pixels). CoreGraphics snaps the positions of a batched call to whole pixels but honors a
+translation. So the rule is exact: batch only glyphs at whole-pixel positions, draw the rest as before. Pictures: the four
+`docs/slice3` pictures and the three `docs/phase4` pictures regenerate byte-identical. `Harf --selftest` prints `selftest ok`.

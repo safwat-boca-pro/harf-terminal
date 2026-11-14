@@ -71,6 +71,12 @@ pub const Painter = struct {
     cache: std.AutoHashMapUnmanaged(u32, ?Glyph) = .empty,
     /// Regular, bold, italic, bold italic. `faces[0]` is `primary`; the others fall back to it if CoreText has no such face.
     faces: [4]*ct.CTFont,
+    /// Test-only: draw glyphs one at a time, the way slice 3 did, so the batched path can be compared to it.
+    reference_draw: bool = false,
+    // One run of glyphs (same font, same color) waiting for its single draw call.
+    run_gids: std.ArrayList(ct.CGGlyph) = .empty,
+    run_pos: std.ArrayList(ct.CGPoint) = .empty,
+    run_baseline: f64 = 0,
     /// False draws the cursor as a hollow block (the window is not key).
     focused: bool = true,
     /// Thickness in pixels of underlines and cursor edges.
@@ -127,6 +133,8 @@ pub const Painter = struct {
         self.clearRows();
         self.rows.deinit(self.gpa);
         self.shaper.deinit();
+        self.run_gids.deinit(self.gpa);
+        self.run_pos.deinit(self.gpa);
         self.cell_store.deinit(self.gpa);
         self.cells.deinit(self.gpa);
         self.flat.deinit(self.gpa);
@@ -302,7 +310,7 @@ pub const Painter = struct {
     /// With `flat` every glyph takes that color (the cursor's inverted pass); otherwise each glyph
     /// takes its cell's colors, and invisible cells draw nothing. Bold and italic are not applied:
     /// the layouter shapes a row with one font (Decision 3).
-    fn drawShaped(self: *Painter, ctx: *ct.CGContext, rl: *const rowlayout.RowLayout, cells: []const vt.Cell, d: vt.Colors, baseline: f64, flat: ?Rgb3) void {
+    fn drawShapedRef(self: *Painter, ctx: *ct.CGContext, rl: *const rowlayout.RowLayout, cells: []const vt.Cell, d: vt.Colors, baseline: f64, flat: ?Rgb3) void {
         for (rl.placed) |pl| {
             const color = if (flat) |f| f else blk: {
                 if (pl.lcol >= cells.len) break :blk cellColors(.{}, false, d).fg;
@@ -318,6 +326,91 @@ pub const Painter = struct {
             ct.CTFontDrawGlyphs(self.shaper.layouter.font(pl.font_id), &gid, &pos, 1, ctx);
             ct.CGContextRestoreGState(ctx);
         }
+    }
+
+    /// Draws the pending run of glyphs (all one font and one color) in a single call. The context is already
+    /// flipped (y-down to glyph-up) with its origin on the row's baseline, so positions are `x, 0`.
+    fn flushRun(self: *Painter, ctx: *ct.CGContext, font: ?*const ct.CTFont, color: Rgb3) void {
+        const f = font orelse return;
+        if (self.run_gids.items.len == 0) return;
+        ct.CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], 1);
+        ct.CGContextSaveGState(ctx);
+        ct.CGContextTranslateCTM(ctx, 0, self.run_baseline);
+        ct.CGContextScaleCTM(ctx, 1, -1);
+        ct.CTFontDrawGlyphs(f, self.run_gids.items.ptr, self.run_pos.items.ptr, self.run_gids.items.len, ctx);
+        ct.CGContextRestoreGState(ctx);
+        self.run_gids.clearRetainingCapacity();
+        self.run_pos.clearRetainingCapacity();
+    }
+
+    /// Adds one glyph to the pending run, first drawing the run if this glyph's font or color differs.
+    fn addToRun(self: *Painter, ctx: *ct.CGContext, cur_font: *?*const ct.CTFont, cur_color: *Rgb3, font: *const ct.CTFont, color: Rgb3, gid: ct.CGGlyph, x: f64) void {
+        if (cur_font.* != font or !std.mem.eql(f64, &cur_color.*, &color)) {
+            self.flushRun(ctx, cur_font.*, cur_color.*);
+            cur_font.* = font;
+            cur_color.* = color;
+        }
+        self.run_gids.append(self.gpa, gid) catch return;
+        self.run_pos.append(self.gpa, .{ .x = x, .y = 0 }) catch {
+            _ = self.run_gids.pop();
+        };
+    }
+
+    /// The glyphs of a plain row: one draw call per run of glyphs with the same font and color, in cell
+    /// order, with the context flipped once for the row. Positions are `col * cell_w`, so the grid cannot drift.
+    fn drawRowGlyphs(self: *Painter, ctx: *ct.CGContext, cells: []const vt.Cell, d: vt.Colors, baseline: f64) void {
+        const cw: f64 = self.metrics_.cell_w;
+        self.run_baseline = baseline;
+        var cur_font: ?*const ct.CTFont = null;
+        var cur_color: Rgb3 = .{ 0, 0, 0 };
+        for (cells, 0..) |cell, ci| {
+            if (cell.wide == .spacer_tail or cell.wide == .spacer_head or cell.cps.len == 0) continue;
+            if (cell.style.flags & vt.Style.Flag.invisible != 0) continue;
+            const color = colorsAt(cells, ci, d).fg;
+            const face = faceOf(cell.style);
+            const x = cw * @as(f64, @floatFromInt(ci));
+            for (cell.cps) |cp| {
+                if (cp == ' ') continue;
+                const g = self.lookupFace(cp, face) orelse continue;
+                self.addToRun(ctx, &cur_font, &cur_color, g.font, color, g.gid, x);
+            }
+        }
+        self.flushRun(ctx, cur_font, cur_color);
+    }
+
+    /// A shaped row's glyphs in placed order. Consecutive glyphs of one font and color that are not scaled
+    /// (`sx == 1`) and sit on a whole pixel go out in one call. Any other glyph is drawn alone, so the order
+    /// of drawing never changes. Fractional positions must not be batched: CoreGraphics snaps the positions
+    /// of a batched call to whole pixels but honors a translation, so batching them changes pixels (measured:
+    /// 93 to 155 bytes per screen of shaped Arabic).
+    fn drawShaped(self: *Painter, ctx: *ct.CGContext, rl: *const rowlayout.RowLayout, cells: []const vt.Cell, d: vt.Colors, baseline: f64, flat: ?Rgb3) void {
+        if (self.reference_draw) return self.drawShapedRef(ctx, rl, cells, d, baseline, flat);
+        self.run_baseline = baseline;
+        var cur_font: ?*const ct.CTFont = null;
+        var cur_color: Rgb3 = .{ 0, 0, 0 };
+        for (rl.placed) |pl| {
+            const color = if (flat) |f| f else blk: {
+                if (pl.lcol >= cells.len) break :blk cellColors(.{}, false, d).fg;
+                if (cells[pl.lcol].style.flags & vt.Style.Flag.invisible != 0) continue;
+                break :blk colorsAt(cells, pl.lcol, d).fg;
+            };
+            const font = self.shaper.layouter.font(pl.font_id);
+            if (pl.sx == 1 and pl.x == @round(pl.x)) {
+                self.addToRun(ctx, &cur_font, &cur_color, font, color, pl.gid, pl.x);
+            } else {
+                self.flushRun(ctx, cur_font, cur_color);
+                cur_font = null;
+                ct.CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], 1);
+                ct.CGContextSaveGState(ctx);
+                ct.CGContextTranslateCTM(ctx, pl.x, baseline);
+                ct.CGContextScaleCTM(ctx, pl.sx, -1);
+                const gid = [1]ct.CGGlyph{pl.gid};
+                const pos = [1]ct.CGPoint{.{ .x = 0, .y = 0 }};
+                ct.CTFontDrawGlyphs(font, &gid, &pos, 1, ctx);
+                ct.CGContextRestoreGState(ctx);
+            }
+        }
+        self.flushRun(ctx, cur_font, cur_color);
     }
 
     /// Underline (any style) and strikethrough for one cell box `x .. x + w`.
@@ -461,10 +554,14 @@ pub const Painter = struct {
                 col = end;
             }
             // Glyphs, then lines.
-            for (cells, 0..) |cell, ci| {
-                if (cell.wide == .spacer_tail or cell.wide == .spacer_head or cell.cps.len == 0) continue;
-                if (cell.style.flags & vt.Style.Flag.invisible != 0) continue;
-                self.drawCell(ctx, cell.cps, faceOf(cell.style), cw * @as(f64, @floatFromInt(ci)), top + m.ascent, colorsAt(cells, ci, d).fg);
+            if (self.reference_draw) {
+                for (cells, 0..) |cell, ci| {
+                    if (cell.wide == .spacer_tail or cell.wide == .spacer_head or cell.cps.len == 0) continue;
+                    if (cell.style.flags & vt.Style.Flag.invisible != 0) continue;
+                    self.drawCell(ctx, cell.cps, faceOf(cell.style), cw * @as(f64, @floatFromInt(ci)), top + m.ascent, colorsAt(cells, ci, d).fg);
+                }
+            } else {
+                self.drawRowGlyphs(ctx, cells, d, top + m.ascent);
             }
             for (0..cells.len) |ci| {
                 const st = styleAt(cells, ci);
@@ -1367,3 +1464,52 @@ test "hit test: blank cells after the text are plain columns" {
         try std.testing.expectEqual(@as(u16, @intCast(col)), p.cellAt(t, x, m.cell_h * 0.5).col);
     }
 }
+
+// ---- P1: batched glyph draws must equal the per-glyph reference ----
+
+/// Draws the screen twice, once with the per-glyph reference routines and once batched, and returns whether
+/// the two bitmaps are identical.
+fn parityOf(text: []const u8, cols: u16, rows: u16) !bool {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const m = p.metrics();
+    const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = cols, .rows = rows });
+    defer t.deinit();
+    t.write(text);
+    const w: usize = @intFromFloat(m.cell_w * @as(f32, @floatFromInt(cols)));
+    const h: usize = @intFromFloat(m.cell_h * @as(f32, @floatFromInt(rows)));
+    const a = try Canvas.init(w, h);
+    defer a.deinit();
+    const b = try Canvas.init(w, h);
+    defer b.deinit();
+    p.reference_draw = true;
+    p.drawRows(t, a.ctx, 0, rows - 1);
+    p.reference_draw = false;
+    p.drawRows(t, b.ctx, 0, rows - 1);
+    if (!std.mem.eql(u8, a.data, b.data)) {
+        var diff: usize = 0;
+        for (a.data, b.data) |x, y| diff += @intFromBool(x != y);
+        std.debug.print("parity: {d} of {d} bytes differ\n", .{ diff, a.data.len });
+        return false;
+    }
+    return true;
+}
+
+test "batched glyph draws equal the per-glyph reference" {
+    const screen =
+        "\x1b[?25lplain latin text and digits 0123456789\r\n" ++
+        "fallback: \u{65E5}\u{672C}\u{8A9E} \u{2713} \u{2605} \u{2192} done\r\n" ++ // a wide cell and fallback-font glyphs
+        "\x1b[1mbold\x1b[0m \x1b[3mitalic\x1b[0m \x1b[1;3mboth\x1b[0m \x1b[2mfaint\x1b[0m \x1b[8minvisible\x1b[0m visible\r\n" ++
+        "\x1b[31mred\x1b[32m green\x1b[38;2;10;20;240m blue\x1b[0m default \x1b[7minverse\x1b[0m\r\n" ++
+        "combining: a\u{301} e\u{308} o\u{302} end\r\n" ++
+        "\x1b[4munderlined\x1b[0m \x1b[9mstruck\x1b[0m \x1b[48;5;22mon green\x1b[0m\r\n" ++
+        "\u{645}\u{64F}\u{62D}\u{64E}\u{645}\u{64E}\u{651}\u{62F} \u{644}\u{627} \u{628}\u{64A}\u{62A}\u{64A}\r\n" ++ // a shaped Arabic row
+        "\x1b[31m\u{645}\u{631}\u{62D}\u{628}\u{627}\x1b[0m \x1b[1;34m\u{628}\u{64A}\u{62A}\u{64A}\x1b[0m latin \x1b[2m\u{633}\x1b[0m\r\n" ++ // colored, bold and faint on a shaped row
+        "\u{2502} \u{645}\u{631}\u{62D}\u{628}\u{627}    \u{2502} box row\r\n";
+    try std.testing.expect(try parityOf(screen, 40, 10));
+}
+
+test "batched glyph draws equal the reference with a visible cursor" {
+    try std.testing.expect(try parityOf("hello \u{65E5}\u{672C} world\r\nsecond \u{645}\u{631}\u{62D}\u{628}\u{627} line\x1b[2;3H", 30, 4));
+}
+
