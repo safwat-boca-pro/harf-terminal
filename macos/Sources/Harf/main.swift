@@ -706,6 +706,29 @@ func selfTest() -> Never {
         if urls.map(\.absoluteString) != ["https://example.com/a"] || paths.count != 1 { fail("url click: a Command-click gave paths \(paths), urls \(urls)") }
         click(60, .command)
         if urls.count != 1 || paths.count != 1 { fail("a Command-click on ftp:// opened something") }
+
+        // The Command-hover highlight: the columns of what a Command-click would open (nothing for ftp://, a missing file, a directory
+        // or a space), shown as a tint on exactly those cells and gone when cleared.
+        if let h = pc.hoverLink(at: at(40)), (h.row, h.lo, h.hi) == (0, 33, 53) {} else { fail("hover: the URL's span is \(String(describing: pc.hoverLink(at: at(40))))") }
+        if let h = pc.hoverLink(at: at(5)), (h.row, h.lo, h.hi) == (0, 4, 12) {} else { fail("hover: the file's span is \(String(describing: pc.hoverLink(at: at(5))))") }
+        for col in [3.0, 20.0, 30.0, 60.0] where pc.hoverLink(at: at(col)) != nil { fail("hover: column \(col) has nothing to open but got a highlight") }
+        func bottomEdge(_ col: Double) -> [Int] {
+            guard let rep = pc.view.bitmapImageRepForCachingDisplay(in: pc.view.bounds) else { fail("cannot make a bitmap") }
+            pc.view.cacheDisplay(in: pc.view.bounds, to: rep)
+            let ratio = Double(rep.pixelsWide) / Double(pc.view.bounds.width)
+            let x = Int((pc.insetPt + cell.width * (col + 0.5)) * ratio)
+            let y = Int((pc.insetPt + cell.height) * ratio) - 1   // the last pixel row of row 0: where the highlight's line is
+            guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { fail("cannot read a pixel") }
+            return [Int(color.redComponent * 255), Int(color.greenComponent * 255), Int(color.blueComponent * 255)]
+        }
+        let before = bottomEdge(8), other = bottomEdge(20)
+        pc.setHover(pc.hoverLink(at: at(5)))
+        let lit = bottomEdge(8)
+        if zip(before, lit).allSatisfy({ abs($0 - $1) < 40 }) { fail("hover: the file's cells did not change (\(before) then \(lit))") }
+        if bottomEdge(20) != other { fail("hover: a cell outside the span changed") }
+        if bottomEdge(8) != lit { fail("hover: drawing again changed the highlight") }
+        pc.setHover(nil)
+        if bottomEdge(8) != before { fail("hover: the highlight stayed after it was cleared") }
         pc.close()
     }
 

@@ -453,6 +453,9 @@ final class TerminalController {
         harf_term_wake_handled(t)   // re-arm before reading, so output arriving during the draw wakes us again
         followProgramGrid()
         invalidateChangedRows()
+        if hover != nil, let window = view.window {   // the text under a tinted link may have changed or scrolled
+            updateHover(command: NSEvent.modifierFlags.contains(.command), at: view.convert(window.mouseLocationOutsideOfEventStream, from: nil))
+        }
     }
 
     private var dirtyRows = [UInt8](repeating: 0, count: 256)
@@ -556,6 +559,61 @@ final class TerminalController {
         return PathTarget(url: url, line: Int(line), col: Int(col))
     }
 
+    /// The cells (row and first and last column) of the link under the pointer while Command is held; nil when there is none.
+    private(set) var hover: (row: Int, lo: Int, hi: Int)?
+
+    /// The cells of what a Command-click on `p` would open: an OSC 8 link of an allowed scheme, a plain http(s) URL, or a file that
+    /// exists. Nil for anything else, so nothing is tinted that a click would not open.
+    func hoverLink(at p: NSPoint) -> (row: Int, lo: Int, hi: Int)? {
+        guard let t = term, let painter else { return nil }
+        var row: UInt16 = 0, lo: UInt16 = 0, hi: UInt16 = 0
+        let kind = harf_term_link_span_at(t, painter, Double((p.x - inset) * scale), Double((p.y - inset) * scale), &row, &lo, &hi)
+        let openable: Bool
+        switch kind {
+        case 1: openable = hyperlink(at: p) != nil
+        case 2: openable = urlTarget(at: p) != nil
+        case 3: openable = pathTarget(at: p) != nil
+        default: openable = false
+        }
+        return openable ? (Int(row), Int(lo), Int(hi)) : nil
+    }
+
+    /// Tints the link under the pointer (or clears it): the painter draws the tint with its row, so the old and new rows are redrawn
+    /// and the pointing hand follows.
+    func setHover(_ new: (row: Int, lo: Int, hi: Int)?) {
+        guard let painter else { return }
+        let old = hover
+        if old?.row == new?.row && old?.lo == new?.lo && old?.hi == new?.hi { return }
+        hover = new
+        if let new {
+            let c = NSColor.linkColor.usingColorSpace(.sRGB) ?? .systemBlue
+            func byte(_ v: CGFloat) -> UInt8 { UInt8(max(0, min(255, (v * 255).rounded()))) }
+            harf_painter_set_highlight(painter, UInt16(new.row), UInt16(new.lo), UInt16(new.hi), byte(c.redComponent), byte(c.greenComponent), byte(c.blueComponent))
+        } else {
+            harf_painter_clear_highlight(painter)
+        }
+        for row in [old?.row, new?.row].compactMap({ $0 }) { invalidateRow(row) }
+        view.window?.invalidateCursorRects(for: view)
+    }
+
+    /// Command held (or let go) with the pointer at `p`: the link under it is tinted only while Command is down.
+    func updateHover(command: Bool, at p: NSPoint) {
+        setHover(command ? hoverLink(at: p) : nil)
+    }
+
+    /// Where the pointing hand shows, in view points.
+    var hoverRect: NSRect? {
+        guard let h = hover else { return nil }
+        let w = cellPx.w / scale, ch = cellPx.h / scale
+        return NSRect(x: inset + CGFloat(h.lo) * w, y: inset + CGFloat(h.row) * ch, width: CGFloat(h.hi - h.lo + 1) * w, height: ch)
+    }
+
+    private func invalidateRow(_ row: Int) {
+        let chPt = cellPx.h / scale
+        let exact = (inset * scale).truncatingRemainder(dividingBy: 1) == 0 && cellPx.h.truncatingRemainder(dividingBy: 1) == 0
+        if exact { view.setNeedsDisplay(NSRect(x: 0, y: inset + CGFloat(row) * chPt, width: view.bounds.width, height: chPt)) } else { view.needsDisplay = true }
+    }
+
     /// What a Command-click on a path or URL does; the self-test replaces them.
     lazy var openPath: (PathTarget) -> Void = { launchEditor($0) }
     lazy var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
@@ -648,6 +706,11 @@ final class TerminalView: NSView {
         return super.becomeFirstResponder()
     }
 
+    override func resignFirstResponder() -> Bool {
+        controller?.setHover(nil)   // Command may be released while another view has the keyboard
+        return super.resignFirstResponder()
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         event.type == .keyDown && runBinding(event) ? true : super.performKeyEquivalent(with: event)
     }
@@ -721,11 +784,23 @@ final class TerminalView: NSView {
     override func otherMouseDown(with event: NSEvent) { sendMouse(0, 3, event) }
     override func otherMouseUp(with event: NSEvent) { sendMouse(1, 3, event) }
     override func otherMouseDragged(with event: NSEvent) { sendMouse(2, 3, event) }
-    override func mouseMoved(with event: NSEvent) { sendMouse(2, 0, event) }
+    override func mouseMoved(with event: NSEvent) {
+        controller?.updateHover(command: event.modifierFlags.contains(.command), at: convert(event.locationInWindow, from: nil))
+        sendMouse(2, 0, event)
+    }
+    override func mouseExited(with event: NSEvent) { controller?.setHover(nil) }
+    override func flagsChanged(with event: NSEvent) {
+        if let window { controller?.updateHover(command: event.modifierFlags.contains(.command), at: convert(window.mouseLocationOutsideOfEventStream, from: nil)) }
+        super.flagsChanged(with: event)
+    }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if let r = controller?.hoverRect { addCursorRect(r, cursor: .pointingHand) }
+    }
 
     override func updateTrackingAreas() {
         trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self))
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
         super.updateTrackingAreas()
     }
 

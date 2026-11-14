@@ -66,6 +66,9 @@ fn styleAt(cells: []const vt.Cell, col: usize) vt.Style {
 const max_cached: usize = 4096;
 const max_fallback_fonts: usize = 64;
 
+/// A tint over the cells `lo` to `hi` (inclusive) of visible row `row`: the link under the pointer while Cmd is held.
+pub const Highlight = struct { row: u16, lo: u16, hi: u16, color: vt.Rgb };
+
 pub const Painter = struct {
     /// Shaped rows kept between draws. Full means clear-all (a ponytail: per-row LRU if the numbers ask).
     pub const max_cached_rows: usize = 128;
@@ -88,6 +91,9 @@ pub const Painter = struct {
     run_baseline: f64 = 0,
     /// False draws the cursor as a hollow block (the window is not key).
     focused: bool = true,
+    /// Drawn over its cells whenever its row is drawn, so a row drawn twice looks the same. The caller invalidates the rows it
+    /// sets and clears (it is not part of `dirtyRows`).
+    highlight: ?Highlight = null,
     /// Thickness in pixels of underlines and cursor edges.
     line_px: f32,
     /// Base-direction policy for rows with Arabic (brief 4.4). No config UI before Phase 6.
@@ -236,6 +242,18 @@ pub const Painter = struct {
     fn fill(ctx: *ct.CGContext, x: f64, y: f64, w: f64, h: f64, color: [3]f64) void {
         ct.CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], 1);
         ct.CGContextFillRect(ctx, .{ .origin = .{ .x = x, .y = y }, .size = .{ .width = w, .height = h } });
+    }
+
+    /// The highlight, if it is on `row`: a translucent tint of its color over the cells and a solid line along their bottom.
+    fn drawHighlight(self: *Painter, ctx: *ct.CGContext, row: u16, top: f64, cw: f64, ch: f64) void {
+        const h = self.highlight orelse return;
+        if (h.row != row) return;
+        const x = cw * @as(f64, @floatFromInt(h.lo));
+        const w = cw * @as(f64, @floatFromInt(h.hi - h.lo + 1));
+        const color = rgb(h.color);
+        ct.CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], 0.30);
+        ct.CGContextFillRect(ctx, .{ .origin = .{ .x = x, .y = top }, .size = .{ .width = w, .height = ch } });
+        fill(ctx, x, top + ch - @as(f64, self.line_px), w, @as(f64, self.line_px), color);
     }
 
     fn drawCell(self: *Painter, ctx: *ct.CGContext, cps: []const u21, face: u2, x: f64, baseline: f64, color: [3]f64) void {
@@ -644,6 +662,7 @@ pub const Painter = struct {
                     const bx = rl.cellBox(@intCast(col), m.cell_w);
                     self.drawLines(ctx, st, colorsAt(cells, col, d), bx.x0, bx.x1 - bx.x0, top);
                 }
+                self.drawHighlight(ctx, row, top, cw, ch);
                 if (cur) |c| if (c.visible and c.row == row and c.col < size.cols) {
                     const sp = rl.span(c.col, m.cell_w);
                     const bw: f64 = sp.x1 - sp.x0;
@@ -688,6 +707,7 @@ pub const Painter = struct {
                 if (st.underline() == .none and st.flags & vt.Style.Flag.strikethrough == 0) continue;
                 self.drawLines(ctx, st, colorsAt(cells, ci, d), cw * @as(f64, @floatFromInt(ci)), cw, top);
             }
+            self.drawHighlight(ctx, row, top, cw, ch);
         }
         const c = cur orelse return;
         if (cursor_drawn or !c.visible or c.row < first_row or c.row > last or c.col >= size.cols) return;
@@ -962,6 +982,29 @@ test "a plain URL is drawn in the link color and the text around it is not" {
     try std.testing.expect(!blue(s.cv, 0, 0, 4 * cw, ch)); // "see "
     try std.testing.expect(!blue(s.cv, 24 * cw, 0, 28 * cw, ch)); // "ok"
     try std.testing.expect(!blue(s.cv, 0, ch, 30 * cw, 2 * ch)); // a row with no URL
+}
+
+test "a highlight tints its cells once, however many times the row is drawn" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 2, 20, "plain text here\r\nsecond");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const m = p.metrics();
+    const cw: usize = @intFromFloat(m.cell_w);
+    const ch: usize = @intFromFloat(m.cell_h);
+    try std.testing.expect(s.cv.isBg(3 * cw, 0)); // nothing highlighted yet: the corner of a cell is background
+    p.highlight = .{ .row = 0, .lo = 2, .hi = 4, .color = .{ .r = 0, .g = 0, .b = 255 } };
+    p.drawRows(s.t, s.cv.ctx, 0, 1);
+    const once = s.cv.px(3 * cw, 0);
+    try std.testing.expect(!s.cv.isBg(3 * cw, 0)); // inside the span: tinted
+    try std.testing.expect(s.cv.isBg(6 * cw, 0)); // outside it: not
+    try std.testing.expect(s.cv.isBg(3 * cw, ch)); // another row: not
+    p.drawRows(s.t, s.cv.ctx, 0, 1);
+    try std.testing.expectEqual(once, s.cv.px(3 * cw, 0)); // drawn again: the same, not darker
+    p.highlight = null;
+    p.drawRows(s.t, s.cv.ctx, 0, 1);
+    try std.testing.expect(s.cv.isBg(3 * cw, 0)); // and gone when cleared
 }
 
 test "arabic word is joined" {

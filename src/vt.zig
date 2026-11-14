@@ -28,6 +28,36 @@ pub const Callbacks = struct {
 /// The most columns `pathAt` and `urlAt` look at in a row.
 const max_link_cols = 512;
 
+pub const LinkKind = enum { hyperlink, url, path };
+
+/// A link under a cell and the columns (inclusive) it covers on its row.
+pub const LinkSpan = struct { kind: LinkKind, row: u16, lo: u16, hi: u16 };
+
+/// The cells of a run `tokenAt` found, as UTF-8 text, and where in the text each column's cell starts.
+const Token = struct {
+    text: []const u8,
+    click: usize,
+    lo: usize,
+    hi: usize,
+    offs: [max_link_cols]u16,
+    spacer: [max_link_cols]bool,
+
+    /// The first and last column that hold bytes `start` to `end` (exclusive) of `text`; a wide character counts both its columns.
+    fn columns(self: *const Token, start: usize, end: usize) struct { lo: u16, hi: u16 } {
+        var first = self.lo;
+        var last = self.lo;
+        var i = self.lo;
+        while (i <= self.hi) : (i += 1) {
+            const off = self.offs[i - self.lo];
+            if (off <= start) first = i;
+            if (off <= end - 1) last = i;
+            if (off > end - 1) break;
+        }
+        while (last + 1 <= self.hi and self.spacer[last + 1 - self.lo]) last += 1;
+        return .{ .lo = @intCast(first), .hi = @intCast(last) };
+    }
+};
+
 /// Where a file path is: the line and column a `:12:5` suffix names (0 when absent) and how many bytes of the caller's buffer it fills.
 pub const PathRef = struct { len: usize, line: u32, col: u32 };
 
@@ -128,6 +158,17 @@ pub fn markUrls(cells: []Cell, color: Rgb) void {
         }
         from = end;
     }
+}
+
+/// The URL a click at byte `click` of `text` is on: from the last `http://` or `https://` at or before the click to `urlEndFrom`.
+fn urlExtent(text: []const u8, click: usize) ?struct { start: usize, end: usize } {
+    var start: ?usize = null;
+    var i: usize = 0;
+    while (i <= click and i < text.len) : (i += 1) {
+        if (startsWithNoCase(text[i..], "https://") or startsWithNoCase(text[i..], "http://")) start = i;
+    }
+    const s = start orelse return null;
+    return .{ .start = s, .end = urlEndFrom(text, s) orelse return null };
 }
 
 fn startsWithNoCase(s: []const u8, prefix: []const u8) bool {
@@ -634,9 +675,9 @@ pub const Terminal = struct {
     }
 
     /// The run of cells around viewport cell (`col`, `row`) that `boundary` (on a cell's first codepoint) does not end, as UTF-8 in
-    /// `buf`, and the byte offset in it where the clicked cell's text starts. The second half of a wide character is the character.
-    /// Null if the cell is blank or a boundary, or the run does not fit `buf`.
-    fn tokenAt(self: *Terminal, col: u16, row: u16, comptime boundary: fn (u21) bool, buf: []u8) ?struct { text: []const u8, click: usize } {
+    /// `buf`, with where the clicked cell's text starts in it and the column each cell's text starts at. The second half of a wide
+    /// character is the character. Null if the cell is blank or a boundary, or the run does not fit `buf`.
+    fn tokenAt(self: *Terminal, col: u16, row: u16, comptime boundary: fn (u21) bool, buf: []u8) ?Token {
         const at = self.clampCell(col, row);
         if (!self.update() or !self.selectRow(at.row)) return null;
         var in_run: [max_link_cols]bool = @splat(false);
@@ -658,14 +699,16 @@ pub const Terminal = struct {
         var hi = click;
         while (hi + 1 < width and in_run[hi + 1]) hi += 1;
         if (!self.selectRow(at.row)) return null;
+        var tok: Token = .{ .text = buf[0..0], .click = 0, .lo = lo, .hi = hi, .offs = undefined, .spacer = undefined };
         var n: usize = 0;
-        var click_at: usize = 0;
         var idx: usize = 0;
         while (idx <= hi and c.ghostty_render_state_row_cells_next(self.row_cells)) : (idx += 1) {
             if (idx < lo) continue;
             const cl = self.readCell(&cps);
-            if (cl.wide == .spacer_tail or cl.wide == .spacer_head) continue;
-            if (idx == click) click_at = n;
+            tok.offs[idx - lo] = @intCast(n);
+            tok.spacer[idx - lo] = cl.wide == .spacer_tail or cl.wide == .spacer_head;
+            if (tok.spacer[idx - lo]) continue;
+            if (idx == click) tok.click = n;
             for (cl.cps) |cp| {
                 const len = std.unicode.utf8CodepointSequenceLength(cp) catch continue;
                 if (n + len > buf.len) return null;
@@ -673,7 +716,42 @@ pub const Terminal = struct {
                 n += len;
             }
         }
-        return .{ .text = buf[0..n], .click = click_at };
+        tok.text = buf[0..n];
+        return tok;
+    }
+
+    /// The link under viewport cell (`col`, `row`) and the columns it covers: an OSC 8 link (the cells with the same URI), else a
+    /// plain http(s) URL, else a file path with its `:line:col` (what `pathAt` would return, plus the suffix). Whether the link may
+    /// be opened, or the file exists, is the caller's to check.
+    pub fn linkSpanAt(self: *Terminal, col: u16, row: u16) ?LinkSpan {
+        const at = self.clampCell(col, row);
+        var uri_buf: [2048]u8 = undefined;
+        var other: [2048]u8 = undefined;
+        const uri = self.hyperlinkAt(at.col, at.row, &uri_buf);
+        if (uri.len > 0) {
+            const cols = self.size().cols;
+            var lo = at.col;
+            while (lo > 0 and std.mem.eql(u8, self.hyperlinkAt(lo - 1, at.row, &other), uri)) lo -= 1;
+            var hi = at.col;
+            while (hi + 1 < cols and std.mem.eql(u8, self.hyperlinkAt(hi + 1, at.row, &other), uri)) hi += 1;
+            return .{ .kind = .hyperlink, .row = at.row, .lo = lo, .hi = hi };
+        }
+        var url_buf: [2048]u8 = undefined;
+        if (self.tokenAt(at.col, at.row, urlBoundary, &url_buf)) |tok| {
+            if (urlExtent(tok.text, tok.click)) |e| {
+                const cols = tok.columns(e.start, e.end);
+                return .{ .kind = .url, .row = at.row, .lo = cols.lo, .hi = cols.hi };
+            }
+        }
+        var path_buf: [1024]u8 = undefined;
+        if (self.tokenAt(at.col, at.row, pathBoundary, &path_buf)) |tok| {
+            const len = std.mem.trimEnd(u8, tok.text, ".:!?").len;
+            if (len > 0) {
+                const cols = tok.columns(0, len);
+                return .{ .kind = .path, .row = at.row, .lo = cols.lo, .hi = cols.hi };
+            }
+        }
+        return null;
     }
 
     /// The file path under a viewport cell and its `:line` and `:col` (0 when the text has none), copied into `out`: the run of cells
@@ -707,14 +785,8 @@ pub const Terminal = struct {
     pub fn urlAt(self: *Terminal, col: u16, row: u16, out: []u8) ?usize {
         var buf: [2048]u8 = undefined;
         const tok = self.tokenAt(col, row, urlBoundary, &buf) orelse return null;
-        var start: ?usize = null;
-        var i: usize = 0;
-        while (i <= tok.click and i < tok.text.len) : (i += 1) {
-            if (startsWithNoCase(tok.text[i..], "https://") or startsWithNoCase(tok.text[i..], "http://")) start = i;
-        }
-        const s0 = start orelse return null;
-        const e0 = urlEndFrom(tok.text, s0) orelse return null;
-        const url = tok.text[s0..e0];
+        const e = urlExtent(tok.text, tok.click) orelse return null;
+        const url = tok.text[e.start..e.end];
         if (url.len > out.len) return null;
         @memcpy(out[0..url.len], url);
         return url.len;
@@ -1519,6 +1591,42 @@ fn testCells(text: []const u8, cells: []Cell, store: []u21) []Cell {
         }
     }
     return cells[0..n];
+}
+
+fn spanProbe(text: []const u8, col: u16) !?LinkSpan {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write(text);
+    return t.linkSpanAt(col, 0);
+}
+
+test "linkSpanAt gives the columns of the link under a cell" {
+    // a plain URL: "https://example.com/a" is 21 cells from column 4; the full stop after it is not part of it
+    const url = (try spanProbe("see https://example.com/a. ok", 10)).?;
+    try std.testing.expectEqual(LinkKind.url, url.kind);
+    try std.testing.expectEqual(@as(u16, 0), url.row);
+    try std.testing.expectEqual(@as(u16, 4), url.lo);
+    try std.testing.expectEqual(@as(u16, 24), url.hi);
+    // a file path with its line and column: "src/main.zig:12:5" is 17 cells from column 3, without the colon after it
+    const path = (try spanProbe("at src/main.zig:12:5: error", 5)).?;
+    try std.testing.expectEqual(LinkKind.path, path.kind);
+    try std.testing.expectEqual(@as(u16, 3), path.lo);
+    try std.testing.expectEqual(@as(u16, 19), path.hi);
+    // an OSC 8 link: the cells written while it was open, spaces included
+    const link = (try spanProbe("\x1b]8;;https://example.com/x\x1b\\link here\x1b]8;;\x1b\\ plain", 1)).?;
+    try std.testing.expectEqual(LinkKind.hyperlink, link.kind);
+    try std.testing.expectEqual(@as(u16, 0), link.lo);
+    try std.testing.expectEqual(@as(u16, 8), link.hi);
+    // columns, not bytes: CJK characters take two cells each
+    const cjk_path = (try spanProbe("漢字 a/b.c:9", 5)).?;
+    try std.testing.expectEqual(LinkKind.path, cjk_path.kind);
+    try std.testing.expectEqual(@as(u16, 5), cjk_path.lo);
+    try std.testing.expectEqual(@as(u16, 11), cjk_path.hi);
+    const cjk_url = (try spanProbe("漢 http://a.b/c", 6)).?;
+    try std.testing.expectEqual(LinkKind.url, cjk_url.kind);
+    try std.testing.expectEqual(@as(u16, 3), cjk_url.lo);
+    try std.testing.expectEqual(@as(u16, 14), cjk_url.hi);
+    try std.testing.expect((try spanProbe("see https://example.com/a. ok", 3)) == null); // on a space
 }
 
 test "markUrls colors a plain URL and nothing else" {

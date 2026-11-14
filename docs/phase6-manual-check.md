@@ -40,6 +40,16 @@ Open a **new** window or tab so the shell starts with the shim. Your own zsh set
 - [ ] While the sheet is open, copy something else, then press Paste: what you first copied is pasted, not the new text.
 - [ ] `paste_guard = off` in the config, then repeat the bash paste: no sheet.
 
+## Cmd-click on paths and URLs, link coloring, and the editor picker
+- [ ] `echo https://example.com/a.` prints the URL in blue and underlined, without the full stop; `echo ftp://x.org` and `echo see example.com` stay plain. A program that colors its own URLs (for example `git`, `gh`) keeps its colors.
+- [ ] Cmd-click on that URL opens the browser. Cmd-click on an OSC 8 link (`printf '\e]8;;https://example.com\e\\link\e]8;;\e\\\n'`) still does too.
+- [ ] Hold Cmd and move over a URL, an OSC 8 link, and a file name that exists (`echo README.md:3`): each gets a blue tint with a line under it and the pointing hand; a file that does not exist, a directory and a plain word get nothing. Let go of Cmd, or move away: it clears at once.
+- [ ] In the config: `editor = vscode://file{path}:{line}:{col}`. `echo src/main.swift:12:5` then Cmd-click: VS Code opens that file at line 12, column 5 (also when VS Code is already running). **I could not run VS Code here: if the URL form needs `file//`, tell me.**
+- [ ] A relative path opens relative to the pane's current directory, also after `cd` in a split.
+- [ ] With no `editor` line, Cmd-click on a file name opens it in TextEdit. A file called `x.command` or an `.app` is shown as text, never launched.
+- [ ] Harf menu > Choose Editor… shows the macOS app picker. Pick VS Code: `editor = vscode://file{path}:{line}:{col}` appears in `~/.config/harf/config` and takes effect at once. Pick another app (for example Sublime Text): `editor = app:/Applications/Sublime Text.app`, and the file opens in it with no line number.
+- [ ] `editor = code --goto {path}:{line}:{col}` works too if `code` is installed in your shell's PATH. A file called `a; touch /tmp/pwned.txt` opens as that name and does not run anything.
+
 ## Configuration (`Cmd+,` opens `~/.config/harf/config`, creating it with every setting commented out)
 - [ ] `font_size = 18` then save: the font changes at once in every window, no restart. `font_family = Monaco` works; `font_family = Helvetica` prints a warning to stderr and keeps Menlo.
 - [x] Cmd+= and Cmd+- change the font size for this run. *(owner, 2026-11-14)*

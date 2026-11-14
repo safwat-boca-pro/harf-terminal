@@ -357,6 +357,34 @@ export fn harf_term_url_at(t: *HarfTerm, p: *draw.Painter, x_px: f64, y_px: f64,
     return g.urlAt(cell.col, cell.row, out[0..cap]) orelse 0;
 }
 
+/// The link under a pixel of the grid and the cells it covers: returns 0 for none, 1 an OSC 8 hyperlink, 2 a plain URL, 3 a file path
+/// (with its `:line:col`); `*row`, `*lo` and `*hi` get its row and first and last column. Whether it can be opened, or the file
+/// exists, is the caller's to check.
+export fn harf_term_link_span_at(t: *HarfTerm, p: *draw.Painter, x_px: f64, y_px: f64, row: *u16, lo: *u16, hi: *u16) c_int {
+    const g = t.session.lock();
+    defer t.session.unlock();
+    const cell = p.cellAt(g, x_px, y_px);
+    const s = g.linkSpanAt(cell.col, cell.row) orelse return 0;
+    row.* = s.row;
+    lo.* = s.lo;
+    hi.* = s.hi;
+    return switch (s.kind) {
+        .hyperlink => 1,
+        .url => 2,
+        .path => 3,
+    };
+}
+
+/// Tints the cells `lo` to `hi` of visible row `row` the next time that row is drawn (the caller invalidates the row). One
+/// highlight at a time; `harf_painter_clear_highlight` removes it.
+export fn harf_painter_set_highlight(p: *draw.Painter, row: u16, lo: u16, hi: u16, r: u8, g: u8, b: u8) void {
+    p.highlight = .{ .row = row, .lo = lo, .hi = @max(lo, hi), .color = .{ .r = r, .g = g, .b = b } };
+}
+
+export fn harf_painter_clear_highlight(p: *draw.Painter) void {
+    p.highlight = null;
+}
+
 /// Clear the screen (and the scrollback if `scrollback` is not 0), then type Ctrl+L so a shell redraws its prompt. On the
 /// alternate screen nothing happens and it returns 0 (the key is the program's); otherwise 1.
 export fn harf_term_clear(t: *HarfTerm, scrollback: c_int) c_int {

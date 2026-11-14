@@ -109,6 +109,12 @@ size_t harf_term_hyperlink_at(HarfTerm *t, HarfPainter *p, double x_px, double y
 /* The file path under a pixel (same convention): its length (0 = none, or it does not fit), and the :line and :col after it (0 when
    absent). The file may not exist: the caller checks. */
 size_t harf_term_path_at(HarfTerm *t, HarfPainter *p, double x_px, double y_px, uint8_t *out, size_t cap, uint32_t *line, uint32_t *col);
+/* The link under a pixel and the cells it covers: 0 none, 1 an OSC 8 hyperlink, 2 a plain URL, 3 a file path (with its :line:col);
+   *row, *lo, *hi get its row and first and last column. The caller checks that it can be opened (allowed scheme, file exists). */
+int harf_term_link_span_at(HarfTerm *t, HarfPainter *p, double x_px, double y_px, uint16_t *row, uint16_t *lo, uint16_t *hi);
+/* Tints cells lo..hi of visible row `row` whenever that row is drawn (the caller invalidates the row); one at a time. */
+void harf_painter_set_highlight(HarfPainter *p, uint16_t row, uint16_t lo, uint16_t hi, uint8_t r, uint8_t g, uint8_t b);
+void harf_painter_clear_highlight(HarfPainter *p);
 /* The plain http or https URL under a pixel: its length (0 = none, or it does not fit). */
 size_t harf_term_url_at(HarfTerm *t, HarfPainter *p, double x_px, double y_px, uint8_t *out, size_t cap);
 /* Starts a find for `needle` (UTF-8; ASCII letters match in either case) over the screen and scrollback; returns the number of
