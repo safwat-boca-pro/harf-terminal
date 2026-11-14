@@ -518,8 +518,11 @@ final class TerminalView: NSView {
     /// A key the configuration binds (Command shortcuts, `send:` remaps) runs its action and never reaches the program. This
     /// runs before the main menu sees the key, so a binding wins over a menu shortcut.
     private func runBinding(_ event: NSEvent) -> Bool {
-        // a text field (the find bar) that has the keyboard keeps its own copy, paste and typing
-        guard !(window?.firstResponder is NSTextView), let t = Trigger(event), let b = Settings.shared.bindings[t] else { return false }
+        // AppKit offers a key to every terminal view in the window in turn, so only the view that has the keyboard may act: not a
+        // sibling pane, and not while a text field (the find bar) has it, which keeps its own copy, paste and typing.
+        // (A view with no window, as in the self-test, has nothing to compare with.)
+        if let responder = window?.firstResponder, responder !== self { return false }
+        guard let t = Trigger(event), let b = Settings.shared.bindings[t] else { return false }
         if controller?.perform(b.action, arg: b.arg) == true { return true }   // copy, paste, clear, send: this terminal's own
         return (NSApp.delegate as? AppDelegate)?.perform(b.action, b.arg, from: controller) ?? false
     }

@@ -693,6 +693,56 @@ func selfTest() -> Never {
         if !windowClosed || !wc.closed { fail("close: closing the last pane should close the window") }
     }
 
+    // 2k. The app's own shortcuts, end to end: a Command key reaches the view, the key map finds the action, and the app delegate
+    // does it. (2i and 2j test the key map and the panes; this is the layer between them, which the real app runs.)
+    do {
+        let d = AppDelegate()
+        NSApp.delegate = d
+        let defaults = NSTemporaryDirectory() + "harf-selftest-shortcuts-\(getpid())"
+        try? FileManager.default.createDirectory(atPath: defaults, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: defaults) }
+        Settings.shared.load(directory: defaults)   // the default key bindings
+        guard let c = TerminalController(argv: ["/bin/sh", "-c", "sleep 8"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the shortcut session") }
+        let opened = NSApp.windows.count
+        if !c.view.performKeyEquivalent(with: keyEvent(45, "n", [.command])) { fail("shortcuts: Cmd+N was not handled by the view") }
+        if NSApp.windows.count != opened + 1 { fail("shortcuts: Cmd+N did not open a window (\(opened) windows before, \(NSApp.windows.count) after)") }
+        if c.view.performKeyEquivalent(with: keyEvent(45, "n", [.control])) { fail("shortcuts: Ctrl+N must reach the program, not open a window") }
+        if !c.view.performKeyEquivalent(with: keyEvent(17, "t", [.command])) { fail("shortcuts: Cmd+T was not handled by the view") }
+        if NSApp.windows.count != opened + 2 { fail("shortcuts: Cmd+T did not open a tab (\(NSApp.windows.count) windows)") }
+        for w in NSApp.windows.suffix(2) { w.close() }   // closing them ends their shells
+        c.close()
+        NSApp.delegate = nil
+    }
+
+    // 2l. With several panes, a shortcut acts on the pane that has the keyboard. AppKit offers a key to every terminal view in the
+    // window in turn, so a view must refuse it unless it is the one in focus (before this, the first pane took every Cmd+V).
+    do {
+        let dir = NSTemporaryDirectory() + "harf-selftest-focus-\(getpid())"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        try? "keybind = cmd+j = send:Z\n".write(toFile: dir + "/config", atomically: false, encoding: .utf8)
+        Settings.shared.load(directory: dir)
+        defer { Settings.shared.load(directory: dir + "/none") }   // back to the defaults for what follows
+        setenv("SHELL", "/bin/sh", 1)
+        let watch = "stty raw -echo; echo READY; head -c 1 | od -An -c; sleep 30"
+        guard let wc = WindowController(argv: ["/bin/sh", "-c", watch], content: NSSize(width: 700, height: 420), cwd: nil) else { fail("cannot make the focus window") }
+        let first = wc.allPanes[0]
+        wc.split(first, vertical: true)
+        let second = wc.allPanes[1]
+        second.controller.sendText("\(watch)\n")
+        func ready(_ p: TerminalPane) -> Bool { (0..<p.controller.gridSize.rows).contains { p.controller.rowText($0).contains("READY") && !p.controller.rowText($0).contains("echo") } }
+        if !pump(8, until: { ready(first) && ready(second) }) { fail("focus: the two panes never became ready") }
+        wc.window.makeFirstResponder(second.controller.view)
+        let event = keyEvent(38, "j", [.command])
+        if first.controller.view.performKeyEquivalent(with: event) { fail("focus: a pane that does not have the keyboard handled a shortcut") }
+        if !second.controller.view.performKeyEquivalent(with: event) { fail("focus: the pane that has the keyboard did not handle it") }
+        func sawZ(_ p: TerminalPane) -> Bool { (0..<p.controller.gridSize.rows).contains { p.controller.rowText($0).contains("Z") } }   // READY has no Z
+        if !pump(5, until: { sawZ(second) }) { fail("focus: the shortcut's text never reached the focused pane") }
+        _ = pump(0.5) { false }
+        if sawZ(first) { fail("focus: the shortcut's text reached the pane that was not in focus") }
+        wc.window.close()
+    }
+
     // 5. A failing shell keeps its window and says so.
     guard let bad = TerminalController(argv: ["/bin/sh", "-c", "echo boom; exit 3"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start failing session") }
     let win2 = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
