@@ -20,7 +20,7 @@ Harf pairs a **Zig** core (PTY, VT parser/grid, UAX #9 bidi, CoreText shaping, C
   - Editor-style cursor/edit shortcuts (`Option+Left/Right`, `Option+Backspace/Delete`, `Cmd+Left/Right`).
   - OSC 8 clickable links (`Cmd+Click`), OSC 52 clipboard writes (gated to the focused pane), and OSC 9/777 notifications.
 - **Shell Integration (OSC 133)**:
-  - Bundled `zsh` integration (`shell_integration = auto` by default) for prompt jumping (`Cmd+Up` / `Cmd+Down`), selecting the last command's output (`Cmd+Shift+A`), tab running indicators, and completion notifications for long-running commands.
+  - Bundled `zsh` integration (`shell_integration = auto` by default) for prompt jumping (`Cmd+Up` / `Cmd+Down`), selecting the last command's output (`Cmd+Shift+A`), and completion notifications for long-running commands.
 - **Live Configuration**:
   - Plain `key = value` config with automatic hot reload on save, custom themes, system dark/light appearance tracking, and customizable keybindings.
 
@@ -40,6 +40,19 @@ open macos/.build/Harf.app
 ```
 
 > **Note:** `macos/build-app.sh` uses `.tools/zig/zig` if present, otherwise `zig` from `PATH`.
+
+### Installing
+
+Copy the built app to `/Applications` and launch it:
+
+```sh
+./macos/build-app.sh                  # builds macos/.build/Harf.app
+rm -rf /Applications/Harf.app         # only when updating an existing install; quit Harf first
+cp -R macos/.build/Harf.app /Applications/
+open -a Harf
+```
+
+The build is local and unsigned, so macOS does not block it. Harf does not update itself: repeat these steps after each rebuild.
 
 ### Running Tests
 
