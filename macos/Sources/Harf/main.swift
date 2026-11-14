@@ -127,6 +127,75 @@ func selfTest() -> Never {
     typingStrip(prompt: "❯ ", text: "السلام عليكم", name: "typing-prompt.png")
     typingStrip(prompt: "", text: "السلام عليكم", name: "typing-bare.png")
 
+    // 1d. Slice 3 pictures (HARF_SELFTEST_PNG_DIR) and the cost of colored screens.
+    func scriptController(_ text: String) -> TerminalController {
+        let path = NSTemporaryDirectory() + "harf-selftest-\(getpid())-\(UUID().uuidString).sh"
+        do { try (text + "\nsleep 8\n").write(toFile: path, atomically: true, encoding: .utf8) } catch { fail("cannot write a script") }
+        guard let c = TerminalController(argv: ["/bin/sh", path], frame: NSSize(width: 700, height: 420)) else { fail("cannot start a script session") }
+        return c
+    }
+    let colorScript = #"""
+    for b in 0 1; do for c in 30 31 32 33 34 35 36 37 90 91 92 93 94 95 96 97; do printf '\033[%d;%dm %3d \033[0m' $b $c $c; done; printf '\n'; done
+    i=16; while [ $i -lt 52 ]; do printf '\033[48;5;%dm  \033[0m' $i; i=$((i+1)); done; printf '\n'
+    i=0; while [ $i -lt 40 ]; do printf '\033[48;2;%d;%d;128m  \033[0m' $((i*6)) $((255-i*6)); i=$((i+1)); done; printf '\n'
+    printf '\033[1mbold\033[0m \033[3mitalic\033[0m \033[4munderline\033[0m \033[21mdouble\033[0m \033[4:3mcurly\033[0m \033[4:4mdotted\033[0m \033[4:5mdashed\033[0m \033[9mstrike\033[0m \033[2mfaint\033[0m \033[7minverse\033[0m \033[1;3;4mall\033[0m\n'
+    printf '\033[38;2;255;160;0mtruecolor text\033[0m \033[48;2;40;40;90m\033[38;5;229m 256 on truecolor \033[0m\n'
+    printf '\033[42m\033[2K erased line, green background\033[0m\n'
+    """#
+    let colors = scriptController(colorScript)
+    if !pump(5, until: { (0..<colors.gridSize.rows).contains { colors.rowText($0).contains("inverse all") } }) { fail("colors: rows are '\(colors.rowText(0))'") }
+    if let rep = colors.view.bitmapImageRepForCachingDisplay(in: colors.view.bounds) { colors.view.cacheDisplay(in: colors.view.bounds, to: rep); savePNG(rep, "colors.png") }
+    colors.close()
+
+    let arabicColorScript = #"""
+    printf '\033[1;34mمجلد\033[0m  \033[0;32mسكريبت.sh\033[0m  \033[0;31mأرشيف.tar.gz\033[0m  \033[0;36mرابط -> هدف\033[0m  \033[1;33mملف.txt\033[0m\n'
+    printf '\033[44m\033[1;37m  نتيجة: ١٢٣ (ناجح)  \033[0m  \033[41m خطأ \033[0m  \033[4;31mتحذير\033[0m  \033[9mمشطوب\033[0m\n'
+    printf 'plain latin \033[32mgreen\033[0m and \033[1;35mbold magenta\033[0m\n'
+    printf '\033[7m  مقلوب  \033[0m \033[2mباهت\033[0m\n'
+    """#
+    let acolors = scriptController(arabicColorScript)
+    if !pump(5, until: { (0..<acolors.gridSize.rows).contains { acolors.rowText($0).contains("باهت") } }) { fail("arabic colors: rows are '\(acolors.rowText(0))'") }
+    if let rep = acolors.view.bitmapImageRepForCachingDisplay(in: acolors.view.bounds) { acolors.view.cacheDisplay(in: acolors.view.bounds, to: rep); savePNG(rep, "arabic-colors.png") }
+    acolors.close()
+
+    // Selection over a Latin row and an Arabic row, with real mouse events.
+    let selpic = scriptController(#"printf 'select this latin text\nمرحبا بالعالم ورحمة الله\n'"#)
+    let selwin = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
+    selwin.contentView = selpic.view
+    if !pump(5, until: { selpic.rowText(1).contains("ورحمة") }) { fail("selection picture: rows are '\(selpic.rowText(0))'") }
+    do {
+        let cell = selpic.cellSizePt
+        func at(_ col: Double, _ row: Double) -> NSPoint { NSPoint(x: selpic.insetPt + cell.width * (col + 0.5), y: 420 - (selpic.insetPt + cell.height * (row + 0.5))) }
+        func ev(_ type: NSEvent.EventType, _ p: NSPoint) -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: selwin.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: 1, pressure: 1) else { fail("cannot make a mouse event") }
+            return e
+        }
+        selpic.view.mouseDown(with: ev(.leftMouseDown, at(7, 0)))
+        selpic.view.mouseDragged(with: ev(.leftMouseDragged, at(11, 0)))
+        selpic.view.mouseUp(with: ev(.leftMouseUp, at(11, 0)))
+        if let rep = selpic.view.bitmapImageRepForCachingDisplay(in: selpic.view.bounds) { selpic.view.cacheDisplay(in: selpic.view.bounds, to: rep); savePNG(rep, "selection-latin.png") }
+        selpic.view.mouseDown(with: ev(.leftMouseDown, at(22, 1)))
+        selpic.view.mouseDragged(with: ev(.leftMouseDragged, at(14, 1)))
+        selpic.view.mouseUp(with: ev(.leftMouseUp, at(14, 1)))
+        if let rep = selpic.view.bitmapImageRepForCachingDisplay(in: selpic.view.bounds) { selpic.view.cacheDisplay(in: selpic.view.bounds, to: rep); savePNG(rep, "selection-arabic.png") }
+    }
+    selpic.close()
+
+    // Cost of a colored 80x24 screen: plain (per-cell path) and Arabic (shaped path). Cold draws every row, cached reuses layouts.
+    func timedScreen(_ label: String, _ line: String) {
+        let flood = "i=0; while [ $i -lt 40 ]; do printf '\\033[3%d;4%dm\(line)\\033[0m\\n' $((i % 7 + 1)) $(((i + 3) % 7 + 1)) $i; i=$((i+1)); done; sleep 4"
+        guard let c = TerminalController(argv: ["/bin/sh", "-c", flood], frame: NSSize(width: 700, height: 420)) else { fail("cannot start \(label)") }
+        if !pump(5, until: { c.rowText(c.gridSize.rows - 2).contains("x") || c.rowText(c.gridSize.rows - 2).contains("بيتي") }) { fail("\(label): rows not ready") }
+        guard let r = c.view.bitmapImageRepForCachingDisplay(in: c.view.bounds) else { fail("no bitmap") }
+        func t() -> Double { let t0 = Date(); c.view.cacheDisplay(in: c.view.bounds, to: r); return Date().timeIntervalSince(t0) * 1000 }
+        let cold = t(), warm = t()
+        print(String(format: "selftest: colored %@ 80x24 screen: cold draw %.1f ms, second draw %.1f ms", label, cold, warm))
+        c.close()
+    }
+    timedScreen("plain", "colored latin text line %d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    timedScreen("arabic", "بيتي مرحبا السلام عليكم ورحمة الله وبركاته %d بيتي مرحبا السلام عليكم ورحمة الله")
+
     // 2. Typing (a letter, an Arabic letter, Return) goes through the view's own key path.
     let echo = ["/bin/sh", "-c", "read x; echo got:$x"]
     func rows(_ c: TerminalController) -> String { (0..<6).map { c.rowText($0) }.joined(separator: "|") }

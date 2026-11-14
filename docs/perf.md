@@ -86,3 +86,18 @@ Build: `macos/build-app.sh` (Zig 0.17.1 ReleaseFast, Swift release). Apple M1, m
 
 Rows without RTL text never reach CoreText shaping (counted by `Painter.stats.plain_rows` in tests). Not measured: typing latency,
 a screen where every wake changes every row, memory with the cache full (128 rows; the footprint measurement is slice 4).
+
+## Slice 3: colored screens (2026-11-14)
+
+Same method as the Phase 4 section (`Harf --selftest`, section 1d): a child prints 40 lines whose color changes on every line,
+the view draws the whole 80x24 grid twice with `cacheDisplay`. "Cold" draws every row, "second" reuses cached Arabic layouts
+(plain rows have no cache). Release build via `macos/build-app.sh`, Apple M1, macOS 27.0.1, three runs.
+
+| Screen | Cold (ms) | Second draw (ms) |
+|---|---|---|
+| Colored Latin, per-cell path | 2.9, 3.0, 2.7 | 1.9, 2.0, 1.8 |
+| Colored Arabic, shaped path | 14.6, 13.7, 12.9 | 2.7, 2.9, 2.6 |
+| Phase 4, uncolored Arabic, for comparison | 12.1 to 17.8 | 1.9 to 2.4 |
+
+Colors and styles did not change the cost of a draw beyond noise (well inside the 2x budget). Not measured: footprint with
+the four font faces and the larger glyph keys (slice 4), selection drag redraw, scrolling a large scrollback.
