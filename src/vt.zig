@@ -45,6 +45,91 @@ fn urlBoundary(cp: u21) bool {
     };
 }
 
+/// Where the URL that starts at `start` in `text` (at an `http://` or `https://`) ends, exclusive: at a space, quote or angle
+/// bracket, minus trailing punctuation and any closing bracket with no opening one inside the URL. Null if only the scheme is left.
+fn urlEndFrom(text: []const u8, start: usize) ?usize {
+    var end = start;
+    while (end < text.len and !urlBoundary(text[end])) end += 1;
+    var url = text[start..end];
+    while (url.len > 0) {
+        const last = url[url.len - 1];
+        if (std.mem.indexOfScalar(u8, ".,;:!?", last) != null) {
+            url = url[0 .. url.len - 1];
+            continue;
+        }
+        if (last == ')' or last == ']' or last == '}') {
+            const open: u8 = switch (last) {
+                ')' => '(',
+                ']' => '[',
+                else => '{',
+            };
+            if (std.mem.count(u8, url, &.{last}) > std.mem.count(u8, url, &.{open})) {
+                url = url[0 .. url.len - 1];
+                continue;
+            }
+        }
+        break;
+    }
+    const scheme_len: usize = if (startsWithNoCase(url, "https://")) 8 else 7;
+    if (url.len <= scheme_len) return null;
+    return start + url.len;
+}
+
+/// Colors the plain `http://` and `https://` URLs in a row of cells (found the way `urlAt` finds one): cells whose foreground is
+/// the default get `color`, and cells with no underline get a single one. Whatever a program styled itself is left alone. A function of
+/// the row's text and styles only, so the painter's row hash needs no change. Cells past `max_link_cols` are not looked at.
+pub fn markUrls(cells: []Cell, color: Rgb) void {
+    const n_cells = @min(cells.len, max_link_cols);
+    // most rows have no "://": find out before building anything
+    var has = false;
+    for (0..n_cells) |i| {
+        if (i + 2 >= n_cells) break;
+        if (cells[i].cps.len == 1 and cells[i].cps[0] == ':' and cells[i + 1].cps.len == 1 and cells[i + 1].cps[0] == '/' and cells[i + 2].cps.len == 1 and cells[i + 2].cps[0] == '/') {
+            has = true;
+            break;
+        }
+    }
+    if (!has) return;
+    var bytes: [max_link_cols * 4]u8 = undefined;
+    var starts: [max_link_cols]u16 = undefined; // where each cell's text starts in `bytes`
+    var n: usize = 0;
+    for (0..n_cells) |i| {
+        starts[i] = @intCast(n);
+        const cell = cells[i];
+        if (cell.cps.len == 0) {
+            if (cell.wide != .spacer_tail and cell.wide != .spacer_head and n < bytes.len) {
+                bytes[n] = ' '; // a blank cell ends a URL
+                n += 1;
+            }
+            continue;
+        }
+        for (cell.cps) |cp| {
+            const len = std.unicode.utf8CodepointSequenceLength(cp) catch continue;
+            if (n + len > bytes.len) break;
+            _ = std.unicode.utf8Encode(cp, bytes[n..]) catch continue;
+            n += len;
+        }
+    }
+    const underline_one: u16 = @as(u16, 1) << c.GHOSTTY_STYLE_UNDERLINE_SHIFT;
+    const underline_mask: u16 = @as(u16, 7) << c.GHOSTTY_STYLE_UNDERLINE_SHIFT;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, bytes[0..n], from, "://")) |k| {
+        from = k + 3;
+        const start: usize = if (k >= 5 and std.ascii.eqlIgnoreCase(bytes[k - 5 .. k], "https")) k - 5 else if (k >= 4 and std.ascii.eqlIgnoreCase(bytes[k - 4 .. k], "http")) k - 4 else continue;
+        const end = urlEndFrom(bytes[0..n], start) orelse continue;
+        var prev_inside = false;
+        for (0..n_cells) |i| {
+            const spacer = cells[i].wide == .spacer_tail or cells[i].wide == .spacer_head;
+            const inside = if (spacer) prev_inside else starts[i] >= start and starts[i] < end;
+            prev_inside = inside;
+            if (!inside) continue;
+            if (cells[i].style.fg == null) cells[i].style.fg = color;
+            if (cells[i].style.underline() == .none) cells[i].style.flags = (cells[i].style.flags & ~underline_mask) | underline_one;
+        }
+        from = end;
+    }
+}
+
 fn startsWithNoCase(s: []const u8, prefix: []const u8) bool {
     return s.len >= prefix.len and std.ascii.eqlIgnoreCase(s[0..prefix.len], prefix);
 }
@@ -627,28 +712,10 @@ pub const Terminal = struct {
         while (i <= tok.click and i < tok.text.len) : (i += 1) {
             if (startsWithNoCase(tok.text[i..], "https://") or startsWithNoCase(tok.text[i..], "http://")) start = i;
         }
-        var url = tok.text[start orelse return null ..];
-        while (url.len > 0) {
-            const last = url[url.len - 1];
-            if (std.mem.indexOfScalar(u8, ".,;:!?", last) != null) {
-                url = url[0 .. url.len - 1];
-                continue;
-            }
-            if (last == ')' or last == ']' or last == '}') {
-                const open: u8 = switch (last) {
-                    ')' => '(',
-                    ']' => '[',
-                    else => '{',
-                };
-                if (std.mem.count(u8, url, &.{last}) > std.mem.count(u8, url, &.{open})) {
-                    url = url[0 .. url.len - 1];
-                    continue;
-                }
-            }
-            break;
-        }
-        const scheme_len: usize = if (startsWithNoCase(url, "https://")) 8 else 7;
-        if (url.len <= scheme_len or url.len > out.len) return null;
+        const s0 = start orelse return null;
+        const e0 = urlEndFrom(tok.text, s0) orelse return null;
+        const url = tok.text[s0..e0];
+        if (url.len > out.len) return null;
         @memcpy(out[0..url.len], url);
         return url.len;
     }
@@ -1433,6 +1500,61 @@ test "urlAt finds a plain http or https URL under a cell" {
     try std.testing.expect((try urlProbe("see https://x.org", 3, &buf)) == null); // on the space
     var tiny: [4]u8 = undefined;
     try std.testing.expect((try urlProbe("https://example.com", 10, &tiny)) == null); // never a cut-off URL
+}
+
+/// A row of cells for `text` (one cell per codepoint; a CJK character is a wide cell followed by its spacer), `store` holding the codepoints.
+fn testCells(text: []const u8, cells: []Cell, store: []u21) []Cell {
+    var n: usize = 0;
+    var s: usize = 0;
+    var it = std.unicode.Utf8View.initUnchecked(text).iterator();
+    while (it.nextCodepoint()) |cp| {
+        store[s] = cp;
+        const wide = cp >= 0x2E80;
+        cells[n] = .{ .cps = store[s .. s + 1], .wide = if (wide) .wide else .narrow };
+        n += 1;
+        s += 1;
+        if (wide) {
+            cells[n] = .{ .cps = store[s..s], .wide = .spacer_tail };
+            n += 1;
+        }
+    }
+    return cells[0..n];
+}
+
+test "markUrls colors a plain URL and nothing else" {
+    const blue: Rgb = .{ .r = 10, .g = 20, .b = 250 };
+    var cells: [64]Cell = undefined;
+    var store: [64]u21 = undefined;
+    // "see https://example.com/a?b=1. ok": the URL is cells 4 to 28; the full stop after it is not part of it
+    var row = testCells("see https://example.com/a?b=1. ok", &cells, &store);
+    markUrls(row, blue);
+    for (row, 0..) |cell, i| {
+        const inside = i >= 4 and i <= 28;
+        try std.testing.expectEqual(inside, cell.style.fg != null and std.meta.eql(cell.style.fg.?, blue));
+        try std.testing.expectEqual(inside, cell.style.underline() == .single);
+    }
+    // a program that set the colour itself, or underlined, is respected
+    row = testCells("go http://x.org/p now", &cells, &store);
+    row[8].style.fg = .{ .r = 1, .g = 2, .b = 3 };
+    row[9].style.flags = @as(u16, 3) << c.GHOSTTY_STYLE_UNDERLINE_SHIFT; // curly
+    markUrls(row, blue);
+    try std.testing.expectEqual(Rgb{ .r = 1, .g = 2, .b = 3 }, row[8].style.fg.?);
+    try std.testing.expectEqual(Style.Underline.single, row[8].style.underline()); // underlined, its own colour kept
+    try std.testing.expectEqual(blue, row[9].style.fg.?);
+    try std.testing.expectEqual(Style.Underline.curly, row[9].style.underline());
+    // other schemes and a bare scheme are left alone
+    for ([_][]const u8{ "ftp://x.org/a", "https://", "file:///etc/passwd", "no url here" }) |text| {
+        row = testCells(text, &cells, &store);
+        markUrls(row, blue);
+        for (row) |cell| try std.testing.expect(cell.style.fg == null and cell.style.underline() == .none);
+    }
+    // a wide character before the URL is two cells: the URL "http://a.b" starts at cell 3, and a spacer inside it is coloured too
+    row = testCells("漢 http://a.b", &cells, &store);
+    markUrls(row, blue);
+    for (row, 0..) |cell, i| try std.testing.expectEqual(i >= 3, cell.style.fg != null);
+    row = testCells("http://a.b/漢", &cells, &store);
+    markUrls(row, blue);
+    for (row) |cell| try std.testing.expect(cell.style.fg != null); // the spacer of the wide character at the end is part of the URL
 }
 
 test "setTheme changes the default colors, the 16 ANSI colors and what a program is told, and keeps the rest of the palette" {

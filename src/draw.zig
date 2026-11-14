@@ -371,6 +371,7 @@ pub const Painter = struct {
             const buf: *[16]u21 = self.cell_store.items[col * 16 ..][0..16];
             self.cells.items[col] = term.cellInRow(@intCast(col), buf);
         }
+        vt.markUrls(self.cells.items, term.paletteColor(12)); // plain URLs in the theme's bright blue, underlined
         return self.cells.items;
     }
 
@@ -932,6 +933,35 @@ test "latin rows take the plain path" {
     defer s.cv.deinit();
     try std.testing.expectEqual(@as(u32, 0), p.stats.shaped_rows);
     try std.testing.expectEqual(@as(u32, 3), p.stats.plain_rows);
+}
+
+test "a plain URL is drawn in the link color and the text around it is not" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 30, 2, 30, "see https://example.com ok\r\nplain text");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const m = p.metrics();
+    const cw: usize = @intFromFloat(m.cell_w);
+    const ch: usize = @intFromFloat(m.cell_h);
+    // blue ink: a pixel clearly bluer than the grey default text
+    const blue = struct {
+        fn in(cv: Canvas, x0: usize, y0: usize, x1: usize, y1: usize) bool {
+            var y = y0;
+            while (y < y1) : (y += 1) {
+                var x = x0;
+                while (x < x1) : (x += 1) {
+                    const px = cv.px(x, y);
+                    if (@as(i32, px[2]) > @as(i32, px[0]) + 60) return true;
+                }
+            }
+            return false;
+        }
+    }.in;
+    try std.testing.expect(blue(s.cv, 4 * cw, 0, 23 * cw, ch)); // the URL
+    try std.testing.expect(!blue(s.cv, 0, 0, 4 * cw, ch)); // "see "
+    try std.testing.expect(!blue(s.cv, 24 * cw, 0, 28 * cw, ch)); // "ok"
+    try std.testing.expect(!blue(s.cv, 0, ch, 30 * cw, 2 * ch)); // a row with no URL
 }
 
 test "arabic word is joined" {
