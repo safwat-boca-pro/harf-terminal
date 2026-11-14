@@ -128,8 +128,10 @@ func selfTest() -> Never {
     typingStrip(prompt: "", text: "السلام عليكم", name: "typing-bare.png")
 
     // 1d. Slice 3 pictures (HARF_SELFTEST_PNG_DIR) and the cost of colored screens.
+    var tempScripts: [String] = []   // removed before the self-test ends
     func scriptController(_ text: String) -> TerminalController {
         let path = NSTemporaryDirectory() + "harf-selftest-\(getpid())-\(UUID().uuidString).sh"
+        tempScripts.append(path)
         do { try (text + "\nsleep 8\n").write(toFile: path, atomically: true, encoding: .utf8) } catch { fail("cannot write a script") }
         guard let c = TerminalController(argv: ["/bin/sh", path], frame: NSSize(width: 700, height: 420)) else { fail("cannot start a script session") }
         return c
@@ -235,6 +237,34 @@ func selfTest() -> Never {
         print(String(format: "selftest: footprint before flood %.1f MB, with the flooded session open %.1f MB, after it is closed %.1f MB", before, during, after))
         if during - before > 2 { fail(String(format: "footprint after a flood is %.1f MB above before (limit 2 MB)", during - before)) }
         if after - before > 2 { fail(String(format: "footprint after closing the flood session is %.1f MB above before (limit 2 MB)", after - before)) }
+    }
+
+    // 1g. Pictures of real programs running in the view (HARF_SELFTEST_PNG_DIR); each is skipped if the program is missing.
+    if pictureDir != nil {
+        func installed(_ tool: String) -> Bool {
+            ["/opt/homebrew/bin/", "/usr/local/bin/", "/usr/bin/"].contains { FileManager.default.isExecutableFile(atPath: $0 + tool) }
+        }
+        func programPicture(_ tool: String, _ png: String, script: String, ready: String, keys: [String]) {
+            guard installed(tool) else { print("selftest: \(tool) is not installed, no picture"); return }
+            let c = scriptController(script)
+            if !pump(10, until: { (0..<c.gridSize.rows).contains { c.rowText($0).contains(ready) } }) { fail("\(tool): '\(ready)' never appeared") }
+            for k in keys { c.sendText(k); _ = pump(0.5) { false } }
+            _ = pump(0.8) { false }
+            if let rep = c.view.bitmapImageRepForCachingDisplay(in: c.view.bounds) { c.view.cacheDisplay(in: c.view.bounds, to: rep); savePNG(rep, png) }
+            c.close()
+        }
+        let sample = #"printf '#!/bin/sh\n# a small script\nname="harf"\nif [ -n "$name" ]; then\n  echo "hello $name" | tr a-z A-Z\nfi\nfor i in 1 2 3; do\n  echo "$i"\ndone\n' > "$F""#
+        tempScripts.append("\(NSTemporaryDirectory())harf-selftest-vim-\(getpid()).sh")   // the picture closes vim before its own rm runs
+        programPicture("vim", "vim.png", script: "F=\(NSTemporaryDirectory())harf-selftest-vim-\(getpid()).sh; \(sample); vim -u NONE -N -n \"$F\"; rm -f \"$F\"",
+                       ready: "a small script", keys: [":syntax on\r", ":set ft=sh\r", ":set number\r"])
+        let tmuxName = "harfpic\(getpid())"
+        programPicture("tmux", "tmux.png", script: "tmux -L \(tmuxName) -f /dev/null new-session", ready: "[0]", keys: ["\u{2}%", "echo left pane\r", "\u{2}o", "echo right pane\r"])
+        for dir in ["/opt/homebrew/bin/", "/usr/local/bin/", "/usr/bin/"] where FileManager.default.isExecutableFile(atPath: dir + "tmux") {
+            let kill = Process(); kill.executableURL = URL(fileURLWithPath: dir + "tmux"); kill.arguments = ["-L", tmuxName, "kill-server"]
+            try? kill.run(); kill.waitUntilExit(); break
+        }
+        programPicture("htop", "htop.png", script: "htop", ready: "Tasks", keys: [])
+        programPicture("fzf", "fzf.png", script: "printf 'alpha\\nbeta\\ngamma\\ndelta\\nepsilon\\nzeta\\n' | fzf --height=100%", ready: "gamma", keys: ["a"])
     }
 
     // 2. Typing (a letter, an Arabic letter, Return) goes through the view's own key path.
@@ -398,6 +428,7 @@ func selfTest() -> Never {
     if !bad.rowText(0).contains("boom") { fail("row 0 is '\(bad.rowText(0))'") }
     bad.close()
 
+    for p in tempScripts { try? FileManager.default.removeItem(atPath: p) }
     print("selftest ok")
     exit(0)
 }
