@@ -3,6 +3,8 @@
 const std = @import("std");
 const ct = @import("shape/ct.zig");
 const vt = @import("vt.zig");
+const rowfacts = @import("rowfacts.zig");
+const rowlayout = @import("rowlayout.zig");
 
 pub const Metrics = struct { cell_w: f32, cell_h: f32, ascent: f32 };
 
@@ -24,6 +26,16 @@ pub const Painter = struct {
     /// Fonts CoreText picked for characters Menlo lacks (deduplicated, retained).
     fallbacks: std.ArrayList(*ct.CTFont) = .empty,
     cache: std.AutoHashMapUnmanaged(u21, ?Glyph) = .empty,
+    /// Base-direction policy for rows with Arabic (brief 4.4). No config UI before Phase 6.
+    policy: rowfacts.Policy = .auto,
+    /// Counters that make the fast path and the cache testable.
+    stats: struct { shaped_rows: u32 = 0, plain_rows: u32 = 0, cache_hits: u32 = 0 } = .{},
+    shaper: rowlayout.Shaper,
+    // Per-row scratch, reused so a draw does not allocate once warm.
+    cell_store: std.ArrayList(u21) = .empty,
+    cells: std.ArrayList(vt.Cell) = .empty,
+    flat: std.ArrayList(u21) = .empty,
+    text: std.ArrayList(u8) = .empty,
 
     pub fn init(gpa: std.mem.Allocator, size_px: f32) !*Painter {
         const name = ct.cfString("Menlo") orelse return error.FontUnavailable;
@@ -37,12 +49,15 @@ pub const Painter = struct {
         const asc = @ceil(ct.CTFontGetAscent(font));
         const desc = @ceil(ct.CTFontGetDescent(font));
         const lead = @ceil(ct.CTFontGetLeading(font));
+        const cell_w: f32 = @floatCast(@round(ct.CTFontGetAdvancesForGlyphs(font, ct.orientation_horizontal, &g, null, 1)));
         self.* = .{
             .gpa = gpa,
             .primary = font,
             .size_px = size_px,
+            // The Arabic font is the primary font; CoreText's cascade picks the face (cell-model.md).
+            .shaper = rowlayout.Shaper.init(gpa, font, cell_w),
             .metrics_ = .{
-                .cell_w = @floatCast(@round(ct.CTFontGetAdvancesForGlyphs(font, ct.orientation_horizontal, &g, null, 1))),
+                .cell_w = cell_w,
                 .cell_h = @floatCast(asc + desc + lead),
                 .ascent = @floatCast(asc),
             },
@@ -51,6 +66,11 @@ pub const Painter = struct {
     }
 
     pub fn deinit(self: *Painter) void {
+        self.shaper.deinit();
+        self.cell_store.deinit(self.gpa);
+        self.cells.deinit(self.gpa);
+        self.flat.deinit(self.gpa);
+        self.text.deinit(self.gpa);
         for (self.fallbacks.items) |f| ct.CFRelease(f);
         self.fallbacks.deinit(self.gpa);
         self.cache.deinit(self.gpa);
@@ -135,9 +155,50 @@ pub const Painter = struct {
         }
     }
 
+    /// Reads the cells of the selected row (`term.selectRow` first). The slice is valid until the next call.
+    fn gather(self: *Painter, term: *vt.Terminal, cols: u16) ![]const vt.Cell {
+        try self.cell_store.resize(self.gpa, @as(usize, cols) * 16);
+        try self.cells.resize(self.gpa, cols);
+        for (0..cols) |col| {
+            const buf: *[16]u21 = self.cell_store.items[col * 16 ..][0..16];
+            self.cells.items[col] = term.cellInRow(@intCast(col), buf);
+        }
+        return self.cells.items;
+    }
+
+    /// The shaped layout for a gathered row, or null if the row draws plain (no RTL text, or it cannot
+    /// be mapped one cell per character). The caller owns the result.
+    fn shapedRow(self: *Painter, cells: []const vt.Cell) !?rowlayout.RowLayout {
+        self.flat.clearRetainingCapacity();
+        for (cells) |cell| {
+            if (cell.wide == .spacer_tail or cell.wide == .spacer_head) continue;
+            if (cell.cps.len == 0) try self.flat.append(self.gpa, ' ') else try self.flat.appendSlice(self.gpa, cell.cps);
+        }
+        const facts = rowfacts.analyze(self.flat.items, self.policy);
+        if (!facts.needs_layout) return null;
+        self.text.clearRetainingCapacity();
+        const n = (try rowlayout.rowText(cells, &self.text, self.gpa)) orelse return null;
+        return try self.shaper.shape(self.text.items, n, facts.rtl_base);
+    }
+
+    /// Draws a shaped row's glyphs (each horizontally scaled by its `sx`) with the pen at `baseline`.
+    fn drawShaped(self: *Painter, ctx: *ct.CGContext, rl: *const rowlayout.RowLayout, baseline: f64, color: [3]f64) void {
+        ct.CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], 1);
+        for (rl.placed) |pl| {
+            ct.CGContextSaveGState(ctx);
+            ct.CGContextTranslateCTM(ctx, pl.x, baseline);
+            ct.CGContextScaleCTM(ctx, pl.sx, -1); // y-down context: flip glyphs upright
+            const gid = [1]ct.CGGlyph{pl.gid};
+            const pos = [1]ct.CGPoint{.{ .x = 0, .y = 0 }};
+            ct.CTFontDrawGlyphs(self.shaper.layouter.font(pl.font_id), &gid, &pos, 1, ctx);
+            ct.CGContextRestoreGState(ctx);
+        }
+    }
+
     /// Draws rows `first_row` to `last_row` (inclusive; clamped to the grid) and the cursor into a
     /// y-down context in device pixels whose origin is the grid's top-left. The caller holds the
-    /// session lock. Refreshes the render state once.
+    /// session lock. Refreshes the render state once. Rows with RTL text are shaped (Phase 4); all
+    /// others are drawn one cell at a time.
     pub fn drawRows(self: *Painter, term: *vt.Terminal, ctx: *ct.CGContext, first_row: u16, last_row: u16) void {
         const size = term.size();
         if (size.rows == 0 or first_row >= size.rows or !term.update()) return;
@@ -150,26 +211,51 @@ pub const Painter = struct {
         defer ct.CGContextRestoreGState(ctx);
         // Wide fallback glyphs must not spill past the grid.
         ct.CGContextClipToRect(ctx, .{ .origin = .{ .x = 0, .y = 0 }, .size = .{ .width = grid_w, .height = ch * @as(f64, @floatFromInt(size.rows)) } });
-        var buf: [16]u21 = undefined;
+        const cur = term.cursor();
+        // The cursor row's layout is kept until the cursor is drawn.
+        var cursor_rl: ?rowlayout.RowLayout = null;
+        defer if (cursor_rl) |*rl| rl.deinit(self.gpa);
         var row: u16 = first_row;
         while (row <= last) : (row += 1) {
             const top = ch * @as(f64, @floatFromInt(row));
             fill(ctx, 0, top, grid_w, ch, bg);
             if (!term.selectRow(row)) continue;
-            var col: u16 = 0;
-            while (col < size.cols) : (col += 1) {
-                const cell = term.cellInRow(col, &buf);
+            const cells = self.gather(term, size.cols) catch continue;
+            var shaped: ?rowlayout.RowLayout = self.shapedRow(cells) catch null;
+            if (shaped) |*rl| {
+                self.stats.shaped_rows += 1;
+                self.drawShaped(ctx, rl, top + m.ascent, fg);
+                if (cur != null and cur.?.row == row) {
+                    cursor_rl = rl.*;
+                } else rl.deinit(self.gpa);
+                continue;
+            }
+            self.stats.plain_rows += 1;
+            for (cells, 0..) |cell, col| {
                 if (cell.wide == .spacer_tail or cell.wide == .spacer_head or cell.cps.len == 0) continue;
                 self.drawCell(ctx, cell.cps, cw * @as(f64, @floatFromInt(col)), top + m.ascent, fg);
             }
         }
-        const cur = term.cursor() orelse return;
-        if (!cur.visible or cur.row < first_row or cur.row > last or cur.col >= size.cols) return;
-        const x = cw * @as(f64, @floatFromInt(cur.col));
-        const top = ch * @as(f64, @floatFromInt(cur.row));
+        const c = cur orelse return;
+        if (!c.visible or c.row < first_row or c.row > last or c.col >= size.cols) return;
+        const top = ch * @as(f64, @floatFromInt(c.row));
+        if (cursor_rl) |*rl| {
+            // A shaped row: the block covers the column's box and the row's glyphs are redrawn inverted inside it.
+            const sp = rl.span(c.col, m.cell_w);
+            const x0: f64 = sp.x0;
+            const bw: f64 = sp.x1 - sp.x0;
+            fill(ctx, x0, top, bw, ch, fg);
+            ct.CGContextSaveGState(ctx);
+            ct.CGContextClipToRect(ctx, .{ .origin = .{ .x = x0, .y = top }, .size = .{ .width = bw, .height = ch } });
+            self.drawShaped(ctx, rl, top + m.ascent, bg);
+            ct.CGContextRestoreGState(ctx);
+            return;
+        }
+        var buf: [16]u21 = undefined;
+        const x = cw * @as(f64, @floatFromInt(c.col));
         fill(ctx, x, top, cw, ch, fg);
-        if (term.selectRow(cur.row)) {
-            const cell = term.cellInRow(cur.col, &buf);
+        if (term.selectRow(c.row)) {
+            const cell = term.cellInRow(c.col, &buf);
             self.drawCell(ctx, cell.cps, x, top + m.ascent, bg); // the glyph under the block, inverted
         }
     }
@@ -320,4 +406,183 @@ test "draw clamps rows" {
     big.write("hello\r\nworld");
     big.resize(3, 1, 0, 0);
     p.drawRows(big, cv.ctx, 0, 9);
+}
+
+// ---- Phase 4: shaped Arabic rows ----
+
+/// Longest run of pixel columns without ink between the first and last inked column of the box.
+fn maxBlankRun(cv: Canvas, x0: usize, x1: usize, y0: usize, y1: usize) usize {
+    var first: ?usize = null;
+    var last: usize = 0;
+    var x = x0;
+    while (x < @min(x1, cv.w)) : (x += 1) {
+        if (cv.inkIn(x, y0, x + 1, y1)) {
+            if (first == null) first = x;
+            last = x;
+        }
+    }
+    const f = first orelse return std.math.maxInt(usize);
+    var best: usize = 0;
+    var run: usize = 0;
+    x = f;
+    while (x <= last) : (x += 1) {
+        if (cv.inkIn(x, y0, x + 1, y1)) run = 0 else {
+            run += 1;
+            best = @max(best, run);
+        }
+    }
+    return best;
+}
+
+/// True if nothing was drawn in the box: outside the grid the canvas keeps its initial transparent black.
+fn untouched(cv: Canvas, x0: usize, y0: usize, x1: usize, y1: usize) bool {
+    var y = y0;
+    while (y < @min(y1, cv.h)) : (y += 1) {
+        var x = x0;
+        while (x < @min(x1, cv.w)) : (x += 1) if (cv.data[(y * cv.w + x) * 4 + 3] != 0) return false;
+    }
+    return true;
+}
+
+fn anyDarkIn(cv: Canvas, x0: usize, y0: usize, x1: usize, y1: usize) bool {
+    var y = y0;
+    while (y < @min(y1, cv.h)) : (y += 1) {
+        var x = x0;
+        while (x < @min(x1, cv.w)) : (x += 1) if (cv.px(x, y)[0] < 60) return true;
+    }
+    return false;
+}
+
+fn testScreen(p: *Painter, cols: u16, rows: u16, canvas_cols: usize, text: []const u8) !struct { t: *vt.Terminal, cv: Canvas } {
+    const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = cols, .rows = rows });
+    errdefer t.deinit();
+    t.write(text);
+    const m = p.metrics();
+    const cv = try Canvas.init(@intFromFloat(m.cell_w * @as(f32, @floatFromInt(canvas_cols))), @intFromFloat(m.cell_h * @as(f32, @floatFromInt(rows))));
+    p.drawRows(t, cv.ctx, 0, rows - 1);
+    return .{ .t = t, .cv = cv };
+}
+
+/// The layout the painter would use for visible row `row` (null if the row draws plain).
+fn testLayout(p: *Painter, t: *vt.Terminal, row: u16) !?rowlayout.RowLayout {
+    _ = t.update();
+    _ = t.selectRow(row);
+    const cells = try p.gather(t, t.size().cols);
+    return p.shapedRow(cells);
+}
+
+test "latin rows take the plain path" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 3, 20, "hello\r\nls -la");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    try std.testing.expectEqual(@as(u32, 0), p.stats.shaped_rows);
+    try std.testing.expectEqual(@as(u32, 3), p.stats.plain_rows);
+}
+
+test "arabic word is joined" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    p.policy = .ltr;
+    const s = try testScreen(p, 20, 2, 20, "  \u{628}\u{64A}\u{62A}\u{64A}\x1b[?25l");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const m = p.metrics();
+    try std.testing.expectEqual(@as(u32, 1), p.stats.shaped_rows);
+    const b = cellBox(m, 2, 0);
+    const word_end = cellBox(m, 5, 0)[2];
+    try std.testing.expect(s.cv.inkIn(b[0], b[1], word_end, b[3]));
+    try std.testing.expect(!s.cv.inkIn(0, b[1], b[0], b[3])); // nothing before the word
+    try std.testing.expect(!s.cv.inkIn(word_end, b[1], s.cv.w, b[3])); // nothing after it
+    try std.testing.expect(maxBlankRun(s.cv, b[0], word_end, b[1], b[3]) <= 1);
+}
+
+test "box row keeps its bars" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 2, 20, "\u{2502} \u{645}\u{631}\u{62D}\u{628}\u{627}    \u{2502}\x1b[?25l");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const m = p.metrics();
+    try std.testing.expectEqual(@as(u32, 1), p.stats.shaped_rows);
+    for ([_]usize{ 0, 11 }) |col| {
+        const b = cellBox(m, col, 0);
+        const cx = (b[0] + b[2]) / 2;
+        try std.testing.expect(s.cv.inkIn(cx, b[1], cx + 1, b[3]));
+    }
+    try std.testing.expect(!s.cv.inkIn(cellBox(m, 12, 0)[0], 0, s.cv.w, cellBox(m, 0, 0)[3]));
+}
+
+test "rtl row is right to left" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 2 });
+    defer t.deinit();
+    t.write("\u{645}\u{631}\u{62D}\u{628}\u{627}");
+    var rl = (try testLayout(p, t, 0)).?;
+    defer rl.deinit(std.testing.allocator);
+    try std.testing.expect(rl.rtl_base);
+    try std.testing.expect(rl.span(0, p.metrics().cell_w).x0 > rl.span(4, p.metrics().cell_w).x0);
+}
+
+test "cursor box on a shaped row" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 30, 2, 30, "\u{645}\u{631}\u{62D}\u{628}\u{627}\x1b[1;3H");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    var rl = (try testLayout(p, s.t, 0)).?;
+    defer rl.deinit(std.testing.allocator);
+    const m = p.metrics();
+    const sp = rl.span(2, m.cell_w);
+    const x0: usize = @intFromFloat(@ceil(sp.x0));
+    const x1: usize = @intFromFloat(@floor(sp.x1));
+    try std.testing.expect(s.cv.px(x0 + 1, 1)[0] > 200); // the block is the foreground color
+    try std.testing.expect(anyDarkIn(s.cv, x0, 0, x1, @intFromFloat(m.cell_h))); // the letter, inverted
+    // past the end of the text: a plain cell
+    s.t.write("\x1b[1;21H");
+    p.drawRows(s.t, s.cv.ctx, 0, 1);
+    const past = cellBox(m, 20, 0);
+    try std.testing.expect(s.cv.px(past[0] + 1, 1)[0] > 200);
+}
+
+test "wide cell row takes the plain path" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 2, 20, "\u{645}\u{631}\u{62D}\u{628}\u{627} \u{4E2D}");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    try std.testing.expectEqual(@as(u32, 0), p.stats.shaped_rows);
+    try std.testing.expectEqual(@as(u32, 2), p.stats.plain_rows);
+}
+
+test "full width row stays inside the grid" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const unit = "\u{628}\u{64A}\u{62A}\u{64A}";
+    var line: [unit.len * 10 + 6]u8 = undefined;
+    for (0..10) |i| @memcpy(line[i * unit.len ..][0..unit.len], unit);
+    @memcpy(line[unit.len * 10 ..], "\x1b[?25l");
+    const s = try testScreen(p, 40, 2, 60, &line);
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const m = p.metrics();
+    try std.testing.expectEqual(@as(u32, 1), p.stats.shaped_rows);
+    const gw: usize = @intFromFloat(m.cell_w * 40);
+    try std.testing.expect(s.cv.inkIn(0, 0, gw, @intFromFloat(m.cell_h)));
+    try std.testing.expect(untouched(s.cv, gw, 0, s.cv.w, s.cv.h));
+}
+
+test "tiny grids" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    inline for (.{ 1, 2 }) |cols| {
+        const s = try testScreen(p, cols, 2, 10, "\u{645}\u{631}\u{62D}\u{628}\u{627}");
+        defer s.t.deinit();
+        defer s.cv.deinit();
+        const m = p.metrics();
+        const gw: usize = @intFromFloat(m.cell_w * cols);
+        try std.testing.expect(untouched(s.cv, gw, 0, s.cv.w, s.cv.h));
+    }
 }
