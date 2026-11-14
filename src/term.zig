@@ -51,6 +51,8 @@ pub const Session = struct {
     stop_pipe: [2]c_int = .{ -1, -1 },
     wake_pending: std.atomic.Value(bool) = .init(false),
     focus: std.atomic.Value(bool) = .init(true),
+    /// Wheel rows carried toward the next wheel event (|rows| < 3); guarded by `term_lock`.
+    wheel_rows: i32 = 0,
     /// The pointer's last cell, packed (col << 16 | row).
     pointer: std.atomic.Value(u32) = .init(0),
     /// Cell size in pixels, for mouse reports (set by the first draw or `harf_term_mouse`).
@@ -222,6 +224,12 @@ pub const Session = struct {
         return true;
     }
 
+    /// Not tracking the mouse: nothing is carried toward a program any more. Always true (for the `else if`).
+    fn resetWheel(self: *Session) bool {
+        self.wheel_rows = 0;
+        return true;
+    }
+
     /// The wheel or trackpad: `delta_rows` rows toward newer output when positive, older when negative.
     /// On the alternate screen the program gets that many Up or Down key presses (in its cursor key
     /// mode); otherwise the viewport scrolls through the scrollback. At most 64 presses per call.
@@ -233,13 +241,19 @@ pub const Session = struct {
             const t = self.lock();
             defer self.unlock();
             if (t.mouseTracking()) {
-                // A wheel notch is three rows; a program gets one wheel event per notch, at the pointer.
+                // A wheel notch is three rows and a program treats one wheel event as about a notch, so rows
+                // add up: small trackpad steps send an event only once three have gathered. A change of
+                // direction drops the rows carried the other way.
+                if ((delta_rows < 0) != (self.wheel_rows < 0) and self.wheel_rows != 0) self.wheel_rows = 0;
+                self.wheel_rows += delta_rows;
+                const notches = @divTrunc(self.wheel_rows, 3);
+                self.wheel_rows -= notches * 3;
                 const p = self.pointer.load(.acquire);
                 const cp = self.cell_px.load(.acquire);
-                const button: vt.Terminal.MouseButton = if (delta_rows < 0) .wheel_up else .wheel_down;
-                const events = @min((@abs(delta_rows) + 2) / 3, 16);
+                const button: vt.Terminal.MouseButton = if (notches < 0) .wheel_up else .wheel_down;
+                const events = @min(@abs(notches), 16);
                 for (0..events) |_| n += t.encodeMouse(.press, button, 0, @intCast(p >> 16), @intCast(p & 0xFFFF), cp >> 16, cp & 0xFFFF, buf[n..]).len;
-            } else if (t.onAlternateScreen()) {
+            } else if (self.resetWheel() and t.onAlternateScreen()) {
                 const arrow = keys.fromMac(if (delta_rows < 0) 126 else 125).?; // Up, Down
                 const presses = @min(@abs(delta_rows), 64);
                 for (0..presses) |_| n += t.encodeKey(arrow, 0, "", 0, .press, buf[n..]).len;
@@ -854,8 +868,8 @@ test "scroll: a program that tracks the mouse gets wheel events, not a scrolled 
     defer s.deinit();
     try std.testing.expect(hexOf(s, "ready"));
     s.setPointer(6, 1);
-    try s.scroll(-1); // one wheel-up event at the pointer: ESC [ < 64 ; 7 ; 2 M
-    try s.scroll(4); // two wheel-down events (a notch is three rows): ESC [ < 65 ; 7 ; 2 M, twice
+    try s.scroll(-3); // one wheel-up event at the pointer: ESC [ < 64 ; 7 ; 2 M
+    try s.scroll(6); // two wheel-down events (a notch is three rows): ESC [ < 65 ; 7 ; 2 M, twice
     try std.testing.expect(hexOf(s, "1b5b3c36343b373b324d1b5b3c36353b373b324d1b5b3c36353b373b324d"));
 }
 
@@ -917,4 +931,62 @@ test "typing, keys and paste clear the selection; lone modifier keys and Cmd+C d
     selectFirstCells(s);
     try s.paste("p");
     try std.testing.expect(!sel.now());
+}
+
+const wheel_up_event = "1b5b3c36343b313b314d"; // ESC [ < 64 ; 1 ; 1 M
+const wheel_down_event = "1b5b3c36353b313b314d"; // ESC [ < 65 ; 1 ; 1 M
+
+fn wheelSession(read_bytes: usize) !*Session {
+    var script: [160]u8 = undefined;
+    const text = try std.fmt.bufPrintSentinel(&script, "printf '\\033[?1000h\\033[?1006h'; stty raw -echo; echo ready; dd bs=1 count={d} 2>/dev/null | xxd -p", .{read_bytes}, 0);
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", text } });
+    errdefer s.deinit();
+    if (!hexOf(s, "ready")) return error.NotReady;
+    return s;
+}
+
+test "scroll: small trackpad steps add up to one wheel event per three rows" {
+    // Three calls of one row are one notch, not three events; a program treats one event as about three lines.
+    const s = try wheelSession(11);
+    defer s.deinit();
+    try s.scroll(-1);
+    try s.scroll(-1);
+    try s.scroll(-1);
+    try s.input("Z"); // a marker: nothing but one event may come before it
+    try std.testing.expect(hexOf(s, wheel_up_event ++ "5a"));
+}
+
+test "scroll: three rows at once is one wheel event" {
+    const s = try wheelSession(11);
+    defer s.deinit();
+    try s.scroll(-3);
+    try s.input("Z");
+    try std.testing.expect(hexOf(s, wheel_up_event ++ "5a"));
+}
+
+test "scroll: a change of direction drops the carried rows" {
+    const s = try wheelSession(11);
+    defer s.deinit();
+    try s.scroll(-2); // two rows toward older output are carried
+    try s.scroll(2); // the other way: the carry is dropped, two rows are carried
+    try s.scroll(1); // three rows in this direction: one wheel-down event
+    try s.input("Z");
+    try std.testing.expect(hexOf(s, wheel_down_event ++ "5a"));
+}
+
+test "scroll: the carried rows are dropped when tracking turns off" {
+    const script = "printf '\\\\033[?1000h\\\\033[?1006h'; stty raw -echo; echo ready; dd bs=1 count=1 2>/dev/null >/dev/null; printf '\\\\033[?1000l'; echo off; sleep 0.3; printf '\\\\033[?1000h'; echo on2; dd bs=1 count=1 2>/dev/null | xxd -p";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    try s.scroll(-2); // carried: two rows
+    try s.input("a"); // lets the child go on and turn tracking off
+    try std.testing.expect(hexOf(s, "off"));
+    try s.scroll(1); // tracking is off: this scrolls the viewport and clears the carry
+    try std.testing.expect(hexOf(s, "on2"));
+    try s.scroll(-1); // one row carried again; had the old carry survived this would be three rows: an event
+    try s.input("Z");
+    // The child reads one byte: the marker "5a". Had an event gone out first, it would read 1b (or leftovers of an
+    // earlier event, 5b), never 5a.
+    try std.testing.expect(hexOf(s, "5a"));
 }

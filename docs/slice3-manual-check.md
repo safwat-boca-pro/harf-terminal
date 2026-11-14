@@ -13,7 +13,7 @@ Build and open: `macos/build-app.sh && open macos/.build/Harf.app`. Pictures fro
 - [ ] `seq 1 500`, then scroll back with the trackpad and a mouse wheel: smooth, no jumps, stops at the top and bottom; new output does not drag the view.
 - [ ] Scrolled up, type a letter: the view returns to the bottom and the letter shows.
 - [ ] `less /etc/services` and `man ls`: the wheel scrolls the pager (arrow keys), not the window.
-- [ ] `vim` with `:set mouse=a`: wheel scrolls, a click moves the cursor.
+- [ ] `vim` with `:set mouse=a`: wheel scrolls, a click moves the cursor. A two-finger trackpad drag of about 10 rows scrolls about 10 lines, not about 30.
 
 **Mouse**
 - [ ] `tmux` with `set -g mouse on`: click a pane, drag a pane border, wheel. Shift-drag selects text instead.
