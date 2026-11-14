@@ -30,6 +30,45 @@ private let bellCallback: @convention(c) (UnsafeMutableRawPointer?) -> Void = { 
 private let exitedCallback: @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void = { ctx, status in hop(ctx) { $0.exitedOnMain(status) } }
 
 /// Owns one session, its painter and its view. All methods run on the main thread.
+// Measurement hooks. HARF_MEASURE=1 records when each frame finished (read by the self-test's latency section);
+// HARF_TRACE=startup prints the time from process start to the end of the first frame. Both cost one environment
+// lookup at launch and nothing per frame when off.
+nonisolated(unsafe) var measureFrameEnd: Double = 0
+private let measureFrames = ProcessInfo.processInfo.environment["HARF_MEASURE"] == "1"
+private let traceStartup = ProcessInfo.processInfo.environment["HARF_TRACE"] == "startup"
+nonisolated(unsafe) private var startupReported = false
+
+private func processStartTime() -> Double? {
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+    var info = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0 else { return nil }
+    let t = info.kp_proc.p_un.__p_starttime
+    return Double(t.tv_sec) + Double(t.tv_usec) / 1_000_000
+}
+
+/// Prints the time since process start with a label (HARF_TRACE=startup).
+func traceStep(_ label: String) {
+    guard traceStartup, let start = processStartTime() else { return }
+    var now = timeval()
+    gettimeofday(&now, nil)
+    print(String(format: "  +%.1f ms %@", (Double(now.tv_sec) + Double(now.tv_usec) / 1_000_000 - start) * 1000, label))
+    fflush(stdout)
+}
+
+func noteFrameEnd() {
+    if measureFrames { measureFrameEnd = ProcessInfo.processInfo.systemUptime }
+    if traceStartup && !startupReported {
+        startupReported = true
+        var now = timeval()
+        gettimeofday(&now, nil)
+        if let start = processStartTime() {
+            print(String(format: "startup_ms=%.1f", (Double(now.tv_sec) + Double(now.tv_usec) / 1_000_000 - start) * 1000))
+            fflush(stdout)
+        }
+    }
+}
+
 @MainActor
 final class TerminalController {
     let view: TerminalView
@@ -232,6 +271,7 @@ final class TerminalController {
     // MARK: drawing
 
     fileprivate func draw(in ctx: CGContext, dirty: NSRect) {
+        defer { noteFrameEnd() }
         guard let t = term, let p = painter else { return }
         let chPt = cellPx.h / scale
         let first = max(0, Int(((dirty.minY - inset) / chPt).rounded(.down)))

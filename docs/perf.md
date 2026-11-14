@@ -312,3 +312,50 @@ These are absolute numbers; no other terminal was run on this machine, so there 
 "competitive"; comparing needs the other terminals installed and is done only if the owner asks). For scale, one sample of at
 least 1 MiB in about 18 to 50 ms is 20 to 55 MiB/s end to end including drawing, against 186 to 448 MB/s for parsing alone in
 the Phase 3 spike.
+
+## Slice 4: latency, startup and idle against the budgets (2026-11-14)
+
+Release build (`macos/build-app.sh`), Apple M1, macOS 27.0.1, 700x420 pt window, warm file cache, commit after `8c1d22f`.
+
+### Keypress to pixel: budget under 10 ms
+
+`HARF_MEASURE=1 macos/.build/Harf.app/Contents/MacOS/Harf --selftest` (section 1h) types 200 letters at an idle `cat` prompt through
+`TerminalView.handleKey` (the code every key reaches after AppKit decodes the event) and times each from just before the call until
+the frame that shows the echo has finished (`measureFrameEnd`, set at the end of `TerminalController.draw`).
+
+| Metric | Result |
+|---|---|
+| Median | **4.73 ms** |
+| p95 | 5.52 ms |
+| Max | 6.48 ms |
+
+What the number includes: handing the key to the core, the PTY round trip and the child's echo, parsing, the wake and the hop to
+the main thread, and a full-frame draw. It is conservative in one way (the timer also spans `cacheDisplay`'s bitmap setup before
+the draw starts) and leaves out two things: waiting for the display's next refresh (up to one frame, about 8 ms on average at
+60 Hz) and the compositor. Not measured: the same during a flood (a typed character is not distinguishable in a continuous
+stream without extra machinery), and real `NSEvent` delivery (`keyDown` goes through `interpretKeyEvents`, which needs an
+active window; the synthetic path starts one call later). The budget holds with margin for the part Harf controls.
+
+### Startup: budget under 100 ms to the first usable frame
+
+`bench/startup.sh 10` (own pid, `HARF_TRACE=startup`): process start (kernel `p_starttime`) to the end of the first frame.
+
+| Run | ms |
+|---|---|
+| first launch after a rebuild | 1179 |
+| the next nine, sorted | 118, 121, 121, 122, 122, 123, 123, 128, 128 (median 122) |
+
+Where the time goes, from one traced launch (`HARF_TRACE=startup` prints each step; about 155 ms with the extra printing):
+17 ms to `main()`, 50 ms in `NSApplication.shared`, 35 ms to `applicationDidFinishLaunching`, 7 ms to create the core, painter and
+shell, 27 ms to build the window, 16 ms to the first frame. Harf's own work is about 50 ms of that.
+
+**The floor.** A minimal AppKit app (one window, one empty view, nothing else) built the same way reaches its first frame in
+**123 to 139 ms, median 131 ms** on this machine. Harf (118 to 128 ms) is at that floor, not above it. **The 100 ms budget is
+below what any AppKit window reaches here**, so it cannot be met by changes to Harf; it needs an owner decision (for example
+"within 10 percent of an empty AppKit window", or a budget measured to a different moment). Not measured: a cold file cache
+(needs `sudo purge`).
+
+### Idle: budget about 0
+
+`bench/idle.sh macos/.build/Harf.app 60`: window open at the prompt, 60 s sampled every 2 s: mean **0.01 percent**, max
+0.20 percent, cumulative CPU time 0:00.15 to 0:00.16 (0.01 s in 60 s). `phys_footprint` 22 MB.

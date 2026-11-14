@@ -49,7 +49,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var binding: WindowBinding!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        traceStep("applicationDidFinishLaunching")
         installMainMenu()
+        traceStep("main menu installed")
         // Measurement hook (docs/perf.md): HARF_CONTENT_SIZE=WxH pins the window, e.g. 700x420 for the 80x24 class.
         var content = NSSize(width: 700, height: 420)
         if let s = ProcessInfo.processInfo.environment["HARF_CONTENT_SIZE"] {
@@ -64,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             argv = ["/bin/sh", "-c", "\(cmd); exec \(shell) -l"]
         }
         guard let c = TerminalController(argv: argv, frame: content, scale: scale) else { fatalError("cannot start the terminal") }
+        traceStep("terminal controller created (core, painter, shell spawned)")
         window = NSWindow(contentRect: NSRect(origin: .zero, size: content), styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "Harf"
@@ -74,7 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentView = c.view
         binding = WindowBinding(window: window, controller: c)
         window.center()
+        traceStep("window built")
         window.makeKeyAndOrderFront(nil)
+        traceStep("window ordered front")
         window.makeFirstResponder(c.view)
         NSApp.activate()
     }

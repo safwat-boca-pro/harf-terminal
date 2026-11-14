@@ -267,6 +267,36 @@ func selfTest() -> Never {
         programPicture("fzf", "fzf.png", script: "printf 'alpha\\nbeta\\ngamma\\ndelta\\nepsilon\\nzeta\\n' | fzf --height=100%", ready: "gamma", keys: ["a"])
     }
 
+    // 1h. HARF_MEASURE=1: keypress-to-draw latency at an idle prompt. In process: from just before the key is handed to the view
+    // until the frame that shows the echo has finished. It leaves out waiting for the display's next refresh and the compositor.
+    if ProcessInfo.processInfo.environment["HARF_MEASURE"] == "1" {
+        guard let c = TerminalController(argv: ["/bin/sh", "-c", "exec cat"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the latency session") }
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
+        win.contentView = c.view
+        guard let rep = c.view.bitmapImageRepForCachingDisplay(in: c.view.bounds) else { fail("no bitmap") }
+        _ = pump(1.0) { false }
+        c.view.cacheDisplay(in: c.view.bounds, to: rep)   // warm the draw path once
+        func typed() -> Int { (0..<c.gridSize.rows).reduce(0) { $0 + c.rowText($1).filter { $0.isLetter }.count } }
+        let letters = Array("abcdefghijklmnopqrstuvwxyz")
+        var samples: [Double] = []
+        for i in 0..<200 {
+            let ch = String(letters[i % 26])
+            let before = typed()
+            let t0 = ProcessInfo.processInfo.systemUptime
+            c.view.handleKey(code: 0, mods: 0, characters: ch, isRepeat: false) { c.sendText(ch) }
+            let deadline = t0 + 2
+            while typed() == before && ProcessInfo.processInfo.systemUptime < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.0002)) }
+            c.view.cacheDisplay(in: c.view.bounds, to: rep)
+            samples.append((measureFrameEnd - t0) * 1000)
+            _ = pump(0.01) { false }
+        }
+        c.close()
+        samples.sort()
+        let median = samples[samples.count / 2], p95 = samples[Int(Double(samples.count) * 0.95)], worst = samples[samples.count - 1]
+        print(String(format: "selftest: keypress-to-draw at an idle prompt over %d keystrokes: median %.2f ms, p95 %.2f ms, max %.2f ms", samples.count, median, p95, worst))
+        if median >= 10 { fail(String(format: "median keypress-to-draw latency is %.2f ms (budget 10 ms)", median)) }
+    }
+
     // 2. Typing (a letter, an Arabic letter, Return) goes through the view's own key path.
     let echo = ["/bin/sh", "-c", "read x; echo got:$x"]
     func rows(_ c: TerminalController) -> String { (0..<6).map { c.rowText($0) }.joined(separator: "|") }
@@ -434,6 +464,7 @@ func selfTest() -> Never {
 }
 
 let args = CommandLine.arguments
+traceStep("main() entered")
 if args.contains("--selftest") {
     setvbuf(stdout, nil, _IONBF, 0)
     MainActor.assumeIsolated { _ = NSApplication.shared; selfTest() }
@@ -446,6 +477,7 @@ if let i = args.firstIndex(of: "--conformance"), i + 1 < args.count {
 }
 
 let app = NSApplication.shared
+traceStep("NSApplication.shared")
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.regular)
