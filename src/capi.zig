@@ -214,6 +214,45 @@ export fn harf_term_focus(t: *HarfTerm, focused: c_int) c_int {
     return 0;
 }
 
+/// A selection gesture with the left button, at a pixel of the grid. phase: 0 press, 1 drag, 2 release.
+/// `click_count` is the click count of the event (1 click, 2 word, 3 line). Use it when `harf_term_mouse`
+/// returned 0. 0 on success.
+export fn harf_term_selection_event(t: *HarfTerm, p: *draw.Painter, phase: c_int, click_count: c_int, mods: u32, x_px: f64, y_px: f64) c_int {
+    _ = mods;
+    var col: u16 = 0;
+    var row: u16 = 0;
+    {
+        const g = t.session.lock();
+        defer t.session.unlock();
+        const cell = p.cellAt(g, x_px, y_px);
+        col = cell.col;
+        row = cell.row;
+    }
+    t.session.selection(@intCast(@max(0, @min(2, phase))), @intCast(@max(1, @min(255, click_count))), col, row);
+    return 0;
+}
+
+/// The selected text as UTF-8 in logical order (soft wraps joined, trailing blanks trimmed), or NULL if
+/// nothing is selected. `*len` receives its length. Free it with `harf_free`.
+export fn harf_term_selection_text(t: *HarfTerm, len: *usize) ?[*]u8 {
+    const text = (t.session.selectionText(std.heap.c_allocator) catch return null) orelse return null;
+    len.* = text.len;
+    if (text.len == 0) {
+        std.heap.c_allocator.free(text);
+        return null;
+    }
+    return text.ptr;
+}
+
+/// Frees what `harf_term_selection_text` returned.
+export fn harf_free(p: ?*anyopaque) void {
+    std.c.free(p);
+}
+
+export fn harf_term_clear_selection(t: *HarfTerm) void {
+    t.session.clearSelection();
+}
+
 /// Re-arms the `wake` callback; call before reading the grid for a redraw.
 export fn harf_term_wake_handled(t: *HarfTerm) void {
     t.session.wakeHandled();
@@ -305,6 +344,45 @@ test "harf_term_draw takes the cursor's look from the focus flag" {
     _ = harf_term_focus(t, 0);
     harf_term_draw(t, p, ctx, 0, 2);
     try std.testing.expect(data[mid + 2] < 60); // unfocused: hollow, the middle is background
+}
+
+test "selection through the C ABI: a click on a shaped Arabic row selects the letter under it" {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "printf '\\xd9\\x85\\xd8\\xb1\\xd8\\xad\\xd8\\xa8\\xd8\\xa7'; sleep 5", null };
+    const t = harf_term_new(20, 3, 1 << 20, &argv, null) orelse return error.TermNotCreated;
+    defer harf_term_free(t);
+    const p = harf_painter_new(28) orelse return error.NoPainter;
+    defer harf_painter_free(p);
+    var buf: [64]u8 = undefined;
+    var waited: u32 = 0;
+    while (harf_term_row_text(t, 0, &buf, buf.len) < 10 and waited < 10_000) : (waited += 5) {
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    // The pixel x range that maps to columns 1 and 2 of the shaped row, from the painter's own hit-test.
+    var x1: f64 = 0;
+    var x2: f64 = 0;
+    {
+        const g = t.session.lock();
+        defer t.session.unlock();
+        const m = p.metrics();
+        var px: f64 = 0;
+        while (px < m.cell_w * 5) : (px += 1) {
+            const col = p.cellAt(g, px, m.cell_h * 0.5).col;
+            if (col == 1 and x1 == 0) x1 = px;
+            if (col == 2 and x2 == 0) x2 = px;
+        }
+    }
+    try std.testing.expect(x1 > 0 and x2 > 0);
+    try std.testing.expectEqual(@as(c_int, 0), harf_term_selection_event(t, p, 0, 1, 0, x1, 5)); // press on the second letter
+    try std.testing.expectEqual(@as(c_int, 0), harf_term_selection_event(t, p, 1, 1, 0, x2, 5)); // drag to the third
+    try std.testing.expectEqual(@as(c_int, 0), harf_term_selection_event(t, p, 2, 1, 0, x2, 5));
+    var len: usize = 0;
+    const text = harf_term_selection_text(t, &len) orelse return error.NoSelection;
+    defer harf_free(text);
+    // logical letters 1 and 2 (U+0631 U+062D), wherever they are drawn
+    try std.testing.expectEqualStrings("\u{631}\u{62D}", text[0..len]);
+    harf_term_clear_selection(t);
+    try std.testing.expect(harf_term_selection_text(t, &len) == null);
 }
 
 test "harf_term_new rejects zero size" {

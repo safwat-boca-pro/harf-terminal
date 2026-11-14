@@ -39,7 +39,7 @@ func installMainMenu() {
     }
     add("Harf", [("Quit Harf", #selector(NSApplication.terminate(_:)), "q")])
     add("Shell", [("Close Window", #selector(NSWindow.performClose(_:)), "w")])
-    add("Edit", [("Paste", #selector(TerminalView.paste(_:)), "v")])
+    add("Edit", [("Copy", #selector(TerminalView.copy(_:)), "c"), ("Paste", #selector(TerminalView.paste(_:)), "v")])
     NSApp.mainMenu = main
 }
 

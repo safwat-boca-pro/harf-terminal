@@ -79,6 +79,13 @@ int harf_term_mouse(HarfTerm *t, HarfPainter *p, int action, int button, uint32_
 /* The window gained (1) or lost (0) focus: the cursor is hollow while unfocused, and a program that enabled
  * focus events (mode 1004) is told. 0 = ok. */
 int harf_term_focus(HarfTerm *t, int focused);
+/* A left-button selection gesture at a pixel of the grid (use it when harf_term_mouse returned 0).
+ * phase: 0 press, 1 drag, 2 release. click_count: 1, 2 (word) or 3 (line). 0 = ok. */
+int harf_term_selection_event(HarfTerm *t, HarfPainter *p, int phase, int click_count, uint32_t mods, double x_px, double y_px);
+/* The selected text as UTF-8 in logical order, or NULL if nothing is selected; *len is its length. Free with harf_free. */
+uint8_t *harf_term_selection_text(HarfTerm *t, size_t *len);
+void harf_free(void *p);
+void harf_term_clear_selection(HarfTerm *t);
 /* Pastes text, framed for the terminal's paste mode (bracketed, newlines as CR). 0 = ok. */
 int harf_term_paste(HarfTerm *t, const uint8_t *utf8, size_t len);
 void harf_term_wake_handled(HarfTerm *t);

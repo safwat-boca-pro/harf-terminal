@@ -143,6 +143,29 @@ final class TerminalController {
         _ = bytes.withUnsafeBufferPointer { harf_term_input(t, $0.baseAddress, bytes.count) }
     }
 
+    /// A left-button selection gesture at `p` (view points). phase: 0 press, 1 drag, 2 release.
+    func selection(_ phase: Int32, clickCount: Int, mods: UInt32, at p: NSPoint) {
+        guard let t = term, let painter else { return }
+        let x = Double((p.x - inset) * scale), y = Double((p.y - inset) * scale)
+        _ = harf_term_selection_event(t, painter, phase, Int32(clickCount), mods, x, y)
+    }
+
+    /// The selected text in logical order, or nil.
+    func selectedText() -> String? {
+        guard let t = term else { return nil }
+        var len = 0
+        guard let ptr = harf_term_selection_text(t, &len) else { return nil }
+        defer { harf_free(ptr) }
+        return String(decoding: UnsafeBufferPointer(start: ptr, count: len), as: UTF8.self)
+    }
+
+    /// Cmd+C: the selection goes to the pasteboard; nothing selected does nothing.
+    func copySelection(to pasteboard: NSPasteboard = .general) {
+        guard let s = selectedText() else { return }
+        pasteboard.clearContents()
+        pasteboard.setString(s, forType: .string)
+    }
+
     /// The window became key (true) or resigned (false).
     func setFocus(_ on: Bool) {
         guard let t = term else { return }
@@ -262,13 +285,31 @@ final class TerminalView: NSView {
     /// carries over, so slow scrolling still moves. No timers.
     private var scrollRemainder: CGFloat = 0
 
-    private func sendMouse(_ action: Int32, _ button: Int32, _ event: NSEvent) {
-        controller?.mouse(action, button: button, mods: Self.harfMods(event.modifierFlags), at: convert(event.locationInWindow, from: nil))
+    /// Sends the event to a mouse-tracking program; false means nobody took it.
+    @discardableResult
+    private func sendMouse(_ action: Int32, _ button: Int32, _ event: NSEvent) -> Bool {
+        controller?.mouse(action, button: button, mods: Self.harfMods(event.modifierFlags), at: convert(event.locationInWindow, from: nil)) ?? false
     }
 
-    override func mouseDown(with event: NSEvent) { sendMouse(0, 1, event) }
-    override func mouseUp(with event: NSEvent) { sendMouse(1, 1, event) }
-    override func mouseDragged(with event: NSEvent) { sendMouse(2, 1, event) }
+    /// True while a left drag belongs to the selection (the program did not take its press).
+    private var selecting = false
+
+    private func selectionEvent(_ phase: Int32, _ event: NSEvent) {
+        controller?.selection(phase, clickCount: event.clickCount, mods: Self.harfMods(event.modifierFlags), at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        selecting = !sendMouse(0, 1, event)
+        if selecting { selectionEvent(0, event) }
+    }
+    override func mouseDragged(with event: NSEvent) {
+        if selecting { selectionEvent(1, event) } else { sendMouse(2, 1, event) }
+    }
+    override func mouseUp(with event: NSEvent) {
+        if selecting { selectionEvent(2, event); selecting = false } else { sendMouse(1, 1, event) }
+    }
+
+    @objc func copy(_ sender: Any?) { controller?.copySelection() }
     override func rightMouseDown(with event: NSEvent) { sendMouse(0, 2, event) }
     override func rightMouseUp(with event: NSEvent) { sendMouse(1, 2, event) }
     override func rightMouseDragged(with event: NSEvent) { sendMouse(2, 2, event) }

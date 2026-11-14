@@ -161,6 +161,36 @@ pub const Session = struct {
         if (n > 0) try self.input(buf[0..n]);
     }
 
+    /// A left-button selection gesture at a viewport cell. phase: 0 press, 1 drag, 2 release.
+    pub fn selection(self: *Session, phase: u8, click_count: u8, col: u16, row: u16) void {
+        {
+            const t = self.lock();
+            defer self.unlock();
+            switch (phase) {
+                0 => t.selectionPress(col, row, click_count),
+                1 => t.selectionDrag(col, row),
+                else => t.selectionRelease(),
+            }
+        }
+        self.requestWake();
+    }
+
+    pub fn clearSelection(self: *Session) void {
+        {
+            const t = self.lock();
+            defer self.unlock();
+            t.clearSelection();
+        }
+        self.requestWake();
+    }
+
+    /// The selected text, or null if nothing is selected. The caller frees it with `gpa`.
+    pub fn selectionText(self: *Session, gpa: std.mem.Allocator) !?[]u8 {
+        const t = self.lock();
+        defer self.unlock();
+        return t.selectionText(gpa) catch |e| if (e == error.NoSelection) null else e;
+    }
+
     pub fn focused(self: *const Session) bool {
         return self.focus.load(.acquire);
     }

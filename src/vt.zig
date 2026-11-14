@@ -74,7 +74,7 @@ pub const KeyAction = enum(u8) { press = 0, release = 1, repeat = 2 };
 pub const Wide = enum { narrow, wide, spacer_tail, spacer_head };
 
 /// One grid cell: its codepoints (base plus combining marks) and its width role.
-pub const Cell = struct { cps: []const u21, wide: Wide, style: Style = .{} };
+pub const Cell = struct { cps: []const u21, wide: Wide, style: Style = .{}, selected: bool = false };
 
 fn check(r: c.GhosttyResult) Error!void {
     if (r == c.GHOSTTY_SUCCESS) return;
@@ -106,6 +106,12 @@ pub const Terminal = struct {
     row_cells: c.GhosttyRenderStateRowCells,
     key_encoder: c.GhosttyKeyEncoder,
     key_event: c.GhosttyKeyEvent,
+    /// Where a left press began (column and screen row), for the drag that follows; null between gestures.
+    sel_anchor: ?struct { x: u16, y: u32 } = null,
+    /// The pointer left the press cell, so a one-cell selection is now wanted.
+    sel_dragged: bool = false,
+    /// A selection exists as of the last `update` (cells ask whether they are in it only then).
+    selection_active: bool = false,
     mouse_encoder: c.GhosttyMouseEncoder,
     mouse_event: c.GhosttyMouseEvent,
     /// Colors as of the last `update`.
@@ -170,6 +176,7 @@ pub const Terminal = struct {
     /// `cellInRow` and `cursor`. False on failure.
     pub fn update(self: *Terminal) bool {
         if (c.ghostty_render_state_update(self.render_state, self.handle) != c.GHOSTTY_SUCCESS) return false;
+        self.selection_active = self.hasSelection();
         var rc = std.mem.zeroes(c.GhosttyRenderStateColors);
         rc.size = @sizeOf(c.GhosttyRenderStateColors);
         if (c.ghostty_render_state_get(self.render_state, c.GHOSTTY_RENDER_STATE_DATA_COLORS, &rc) == c.GHOSTTY_SUCCESS) {
@@ -270,6 +277,92 @@ pub const Terminal = struct {
         if (len > utf8.len) return false;
         const cp = std.unicode.utf8Decode(utf8[0..len]) catch return false;
         return cp >= 0xE000 and cp <= 0xF8FF;
+    }
+
+    fn gridRef(self: *Terminal, tag: c.GhosttyPointTag, col: u16, y: u32) ?c.GhosttyGridRef {
+        var pt = std.mem.zeroes(c.GhosttyPoint);
+        pt.tag = tag;
+        pt.value.coordinate = .{ .x = col, .y = y };
+        var ref = std.mem.zeroes(c.GhosttyGridRef);
+        if (c.ghostty_terminal_grid_ref(self.handle, pt, &ref) != c.GHOSTTY_SUCCESS) return null;
+        return ref;
+    }
+
+    fn clampCell(self: *Terminal, col: u16, row: u16) struct { col: u16, row: u16 } {
+        const sz = self.size();
+        return .{ .col = @min(col, sz.cols -| 1), .row = @min(row, sz.rows -| 1) };
+    }
+
+    fn setSelection(self: *Terminal, sel: ?c.GhosttySelection) void {
+        if (sel) |*v| _ = c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_SELECTION, v) else _ = c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_SELECTION, null);
+    }
+
+    /// A left press at a viewport cell. One click only marks where a drag would start (and clears any
+    /// selection); two select the word, three or more the line.
+    pub fn selectionPress(self: *Terminal, col: u16, row: u16, click_count: u8) void {
+        const pos = self.clampCell(col, row);
+        self.sel_anchor = .{ .x = pos.col, .y = @intCast(self.viewport().offset + pos.row) };
+        self.sel_dragged = false;
+        if (click_count <= 1) return self.setSelection(null);
+        const ref = self.gridRef(c.GHOSTTY_POINT_TAG_VIEWPORT, pos.col, pos.row) orelse return;
+        var sel = std.mem.zeroes(c.GhosttySelection);
+        if (click_count == 2) {
+            var o = std.mem.zeroes(c.GhosttyTerminalSelectWordOptions);
+            o.size = @sizeOf(c.GhosttyTerminalSelectWordOptions);
+            o.ref = ref;
+            if (c.ghostty_terminal_select_word(self.handle, &o, &sel) != c.GHOSTTY_SUCCESS) return;
+        } else {
+            var o = std.mem.zeroes(c.GhosttyTerminalSelectLineOptions);
+            o.size = @sizeOf(c.GhosttyTerminalSelectLineOptions);
+            o.ref = ref;
+            if (c.ghostty_terminal_select_line(self.handle, &o, &sel) != c.GHOSTTY_SUCCESS) return;
+        }
+        self.setSelection(sel);
+    }
+
+    /// The pointer moved to a viewport cell with the left button down after a one-click press.
+    pub fn selectionDrag(self: *Terminal, col: u16, row: u16) void {
+        const anchor = self.sel_anchor orelse return;
+        const pos = self.clampCell(col, row);
+        const here_y: u32 = @intCast(self.viewport().offset + pos.row);
+        if (pos.col != anchor.x or here_y != anchor.y) self.sel_dragged = true;
+        if (!self.sel_dragged) return; // a jiggle inside the press cell selects nothing
+        const start = self.gridRef(c.GHOSTTY_POINT_TAG_SCREEN, anchor.x, anchor.y) orelse return;
+        const end = self.gridRef(c.GHOSTTY_POINT_TAG_VIEWPORT, pos.col, pos.row) orelse return;
+        self.setSelection(.{ .start = start, .end = end, .rectangle = false });
+    }
+
+    pub fn selectionRelease(self: *Terminal) void {
+        self.sel_anchor = null;
+        self.sel_dragged = false;
+    }
+
+    pub fn clearSelection(self: *Terminal) void {
+        self.setSelection(null);
+    }
+
+    pub fn hasSelection(self: *Terminal) bool {
+        var sel = std.mem.zeroes(c.GhosttySelection);
+        return c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_SELECTION, &sel) == c.GHOSTTY_SUCCESS;
+    }
+
+    /// The selected text as UTF-8 in logical order: soft-wrapped lines joined, trailing blanks trimmed.
+    /// `error.NoSelection` if nothing is selected. The caller frees the result with `gpa`.
+    pub fn selectionText(self: *Terminal, gpa: std.mem.Allocator) ![]u8 {
+        var sel = std.mem.zeroes(c.GhosttySelection);
+        if (c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_SELECTION, &sel) != c.GHOSTTY_SUCCESS) return error.NoSelection;
+        var fmt: c.GhosttyFormatter = undefined;
+        try check(c.ghostty_formatter_terminal_new(null, &fmt, self.handle));
+        defer c.ghostty_formatter_free(fmt);
+        var yes: bool = true;
+        try check(c.ghostty_formatter_set(fmt, c.GHOSTTY_FORMATTER_OPT_UNWRAP, &yes));
+        try check(c.ghostty_formatter_set(fmt, c.GHOSTTY_FORMATTER_OPT_TRIM, &yes));
+        try check(c.ghostty_formatter_set(fmt, c.GHOSTTY_FORMATTER_OPT_SELECTION, &sel));
+        var ptr: [*c]u8 = null;
+        var len: usize = 0;
+        try check(c.ghostty_formatter_format_alloc(fmt, null, &ptr, &len));
+        defer c.ghostty_free(null, ptr, len);
+        return gpa.dupe(u8, ptr[0..len]);
     }
 
     /// True while the program asked for focus in/out reports (mode 1004).
@@ -435,6 +528,13 @@ pub const Terminal = struct {
         return str.ptr[0..str.len];
     }
 
+    fn readSelected(self: *Terminal) bool {
+        if (!self.selection_active) return false;
+        var sel: bool = false;
+        _ = c.ghostty_render_state_row_cells_get(self.row_cells, c.GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED, &sel);
+        return sel;
+    }
+
     /// The style of the cell `row_cells` currently points at.
     fn readStyle(self: *Terminal) Style {
         var style: Style = .{};
@@ -480,7 +580,7 @@ pub const Terminal = struct {
             c.GHOSTTY_CELL_WIDE_SPACER_TAIL => .spacer_tail,
             c.GHOSTTY_CELL_WIDE_SPACER_HEAD => .spacer_head,
             else => .narrow,
-        }, .style = self.readStyle() };
+        }, .style = self.readStyle(), .selected = self.readSelected() };
     }
 
     /// The cell at (`col`, `row`) of the visible screen; blank (no codepoints) if out of range.
@@ -1083,4 +1183,149 @@ test "focus events are encoded, and the mode says whether the program wants them
     var buf: [8]u8 = undefined;
     try std.testing.expectEqualStrings("\x1b[I", t.encodeFocus(true, &buf));
     try std.testing.expectEqualStrings("\x1b[O", t.encodeFocus(false, &buf));
+}
+
+fn selectText(t: *Terminal, c0: u16, r0: u16, c1: u16, r1: u16) ![]u8 {
+    t.selectionPress(c0, r0, 1);
+    t.selectionDrag(c1, r1);
+    t.selectionRelease();
+    return t.selectionText(std.testing.allocator);
+}
+
+test "selection copy is logical text" {
+    const cases = [_][]const u8{
+        "hello world",
+        "مُحَمَّد", // tashkeel
+        "لا إله إلا الله", // lam-alef
+        "a\u{301}b", // a combining mark
+        "日本語", // wide characters
+    };
+    for (cases) |str| {
+        const t = try Terminal.init(std.testing.allocator, .{ .cols = 30, .rows = 5 });
+        defer t.deinit();
+        t.write(str);
+        _ = t.update();
+        const end = t.cursor().?.col - 1;
+        const got = try selectText(t, 0, 0, end, 0);
+        defer std.testing.allocator.free(got);
+        try std.testing.expectEqualStrings(str, got);
+    }
+}
+
+test "selection copy joins soft wraps and keeps hard newlines, without trailing blanks" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 10, .rows = 6 });
+    defer t.deinit();
+    t.write("abcdefghijklmnopqrstuvwxyz\r\nsecond   ");
+    _ = t.update();
+    const got = try selectText(t, 0, 0, 9, 3);
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings("abcdefghijklmnopqrstuvwxyz\nsecond", got);
+}
+
+test "reversed drag selects the same text" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 30, .rows = 5 });
+    defer t.deinit();
+    t.write("hello world");
+    const got = try selectText(t, 8, 0, 2, 0);
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings("llo wor", got);
+}
+
+test "a jiggle inside the press cell selects nothing; leaving and returning selects one cell" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 30, .rows = 5 });
+    defer t.deinit();
+    t.write("hello world");
+    t.selectionPress(3, 0, 1);
+    t.selectionDrag(3, 0);
+    try std.testing.expect(!t.hasSelection());
+    t.selectionDrag(6, 0);
+    try std.testing.expect(t.hasSelection());
+    t.selectionDrag(3, 0); // back on the press cell after leaving it
+    const one = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(one);
+    try std.testing.expectEqualStrings("l", one);
+}
+
+test "word and line selection" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 30, .rows = 5 });
+    defer t.deinit();
+    t.write("foo bar baz");
+    t.selectionPress(5, 0, 2);
+    const word = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(word);
+    try std.testing.expectEqualStrings("bar", word);
+    t.selectionPress(5, 0, 3);
+    const line = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(line);
+    try std.testing.expectEqualStrings("foo bar baz", line);
+}
+
+test "a plain click clears the selection; clearSelection too" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 30, .rows = 5 });
+    defer t.deinit();
+    t.write("hello world");
+    const got = try selectText(t, 0, 0, 4, 0);
+    std.testing.allocator.free(got);
+    try std.testing.expect(t.hasSelection());
+    t.selectionPress(7, 0, 1);
+    try std.testing.expect(!t.hasSelection()); // a click without a drag selects nothing
+    const again = try selectText(t, 0, 0, 4, 0);
+    std.testing.allocator.free(again);
+    t.clearSelection();
+    try std.testing.expect(!t.hasSelection());
+}
+
+test "selection survives scrolling the viewport" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 10 });
+    defer t.deinit();
+    fillHistory(t, 60);
+    _ = t.update();
+    const got = try selectText(t, 0, 3, 5, 3);
+    defer std.testing.allocator.free(got);
+    t.scrollViewport(-5);
+    _ = t.update();
+    try std.testing.expect(t.hasSelection());
+    const after = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings(got, after);
+}
+
+test "output over the selected cells keeps the selection, and copies what is there now" {
+    // The library does not clear a selection when text is overwritten in place (Decision 9, ruled in the
+    // ledger): the selection stays on its cells, and scrolling output carries it along with the content.
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 30, .rows = 5 });
+    defer t.deinit();
+    t.write("hello world");
+    const got = try selectText(t, 0, 0, 4, 0);
+    std.testing.allocator.free(got);
+    t.write("\x1b[1;1Hxxxxx");
+    try std.testing.expect(t.hasSelection());
+    const now = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(now);
+    try std.testing.expectEqualStrings("xxxxx", now);
+}
+
+test "scrolling output carries the selection with its content" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer t.deinit();
+    t.write("keep me\r\n");
+    const got = try selectText(t, 0, 0, 6, 0);
+    std.testing.allocator.free(got);
+    t.write("a\r\nb\r\nc\r\nd\r\ne\r\nf\r\n"); // scrolls "keep me" up
+    try std.testing.expect(t.hasSelection());
+    const text = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("keep me", text);
+}
+
+test "cells know whether they are selected" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 30, .rows = 5 });
+    defer t.deinit();
+    t.write("hello world");
+    const got = try selectText(t, 2, 0, 4, 0);
+    std.testing.allocator.free(got);
+    var buf: [16]u21 = undefined;
+    try std.testing.expect(!cellOf(t, 0, 1, &buf).selected);
+    try std.testing.expect(cellOf(t, 0, 3, &buf).selected);
+    try std.testing.expect(!cellOf(t, 0, 5, &buf).selected);
 }

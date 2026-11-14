@@ -12,6 +12,9 @@ pub const Glyph = struct { font: *const ct.CTFont, gid: u16 };
 
 const Rgb3 = [3]f64;
 
+/// Selected cells get this background (Decision 9); their foreground is kept.
+const selection_bg: Rgb3 = .{ 0.22, 0.33, 0.55 };
+
 fn rgb(c: vt.Rgb) Rgb3 {
     return .{ @as(f64, @floatFromInt(c.r)) / 255.0, @as(f64, @floatFromInt(c.g)) / 255.0, @as(f64, @floatFromInt(c.b)) / 255.0 };
 }
@@ -20,7 +23,7 @@ fn rgb(c: vt.Rgb) Rgb3 {
 /// foreground half way to the background. `has_bg` says the background differs from the default.
 const CellColors = struct { fg: Rgb3, bg: Rgb3, has_bg: bool };
 
-fn cellColors(style: vt.Style, d: vt.Colors) CellColors {
+fn cellColors(style: vt.Style, selected: bool, d: vt.Colors) CellColors {
     var f = style.fg orelse d.fg;
     var b = style.bg orelse d.bg;
     if (style.flags & vt.Style.Flag.inverse != 0) std.mem.swap(vt.Rgb, &f, &b);
@@ -29,6 +32,7 @@ fn cellColors(style: vt.Style, d: vt.Colors) CellColors {
     if (style.flags & vt.Style.Flag.faint != 0) for (&fc, bc) |*x, y| {
         x.* = (x.* + y) / 2;
     };
+    if (selected) return .{ .fg = fc, .bg = selection_bg, .has_bg = true };
     return .{ .fg = fc, .bg = bc, .has_bg = b.r != d.bg.r or b.g != d.bg.g or b.b != d.bg.b };
 }
 
@@ -39,6 +43,11 @@ fn faceOf(style: vt.Style) u2 {
 }
 
 /// A wide cell's spacer takes the wide cell's style (the library may leave it unstyled).
+fn colorsAt(cells: []const vt.Cell, col: usize, d: vt.Colors) CellColors {
+    const cell = if (cells[col].wide == .spacer_tail and col > 0) cells[col - 1] else cells[col];
+    return cellColors(cell.style, cell.selected, d);
+}
+
 fn styleAt(cells: []const vt.Cell, col: usize) vt.Style {
     if (cells[col].wide == .spacer_tail and col > 0) return cells[col - 1].style;
     return cells[col].style;
@@ -296,9 +305,9 @@ pub const Painter = struct {
     fn drawShaped(self: *Painter, ctx: *ct.CGContext, rl: *const rowlayout.RowLayout, cells: []const vt.Cell, d: vt.Colors, baseline: f64, flat: ?Rgb3) void {
         for (rl.placed) |pl| {
             const color = if (flat) |f| f else blk: {
-                const st = if (pl.lcol < cells.len) cells[pl.lcol].style else vt.Style{};
-                if (st.flags & vt.Style.Flag.invisible != 0) continue;
-                break :blk cellColors(st, d).fg;
+                if (pl.lcol >= cells.len) break :blk cellColors(.{}, false, d).fg;
+                if (cells[pl.lcol].style.flags & vt.Style.Flag.invisible != 0) continue;
+                break :blk colorsAt(cells, pl.lcol, d).fg;
             };
             ct.CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], 1);
             ct.CGContextSaveGState(ctx);
@@ -412,7 +421,7 @@ pub const Painter = struct {
                 // Backgrounds by column box (columns past the text are plain cells), then glyphs, then lines.
                 for (0..cells.len) |col| {
                     const sp = rl.span(@intCast(col), m.cell_w);
-                    const cc = cellColors(styleAt(cells, col), d);
+                    const cc = colorsAt(cells, col, d);
                     if (cc.has_bg) fill(ctx, sp.x0, top, sp.x1 - sp.x0, ch, cc.bg);
                 }
                 self.drawShaped(ctx, rl, cells, d, top + m.ascent, null);
@@ -420,7 +429,7 @@ pub const Painter = struct {
                     const st = styleAt(cells, col);
                     if (st.underline() == .none and st.flags & vt.Style.Flag.strikethrough == 0) continue;
                     const sp = rl.span(@intCast(col), m.cell_w);
-                    self.drawLines(ctx, st, cellColors(st, d), sp.x0, sp.x1 - sp.x0, top);
+                    self.drawLines(ctx, st, colorsAt(cells, col, d), sp.x0, sp.x1 - sp.x0, top);
                 }
                 if (cur) |c| if (c.visible and c.row == row and c.col < size.cols) {
                     const sp = rl.span(c.col, m.cell_w);
@@ -442,10 +451,10 @@ pub const Painter = struct {
             // Backgrounds: runs of equal color.
             var col: usize = 0;
             while (col < cells.len) {
-                const cc = cellColors(styleAt(cells, col), d);
+                const cc = colorsAt(cells, col, d);
                 var end = col + 1;
                 while (end < cells.len) : (end += 1) {
-                    const next = cellColors(styleAt(cells, end), d);
+                    const next = colorsAt(cells, end, d);
                     if (!std.mem.eql(f64, &next.bg, &cc.bg)) break;
                 }
                 if (cc.has_bg) fill(ctx, cw * @as(f64, @floatFromInt(col)), top, cw * @as(f64, @floatFromInt(end - col)), ch, cc.bg);
@@ -455,12 +464,12 @@ pub const Painter = struct {
             for (cells, 0..) |cell, ci| {
                 if (cell.wide == .spacer_tail or cell.wide == .spacer_head or cell.cps.len == 0) continue;
                 if (cell.style.flags & vt.Style.Flag.invisible != 0) continue;
-                self.drawCell(ctx, cell.cps, faceOf(cell.style), cw * @as(f64, @floatFromInt(ci)), top + m.ascent, cellColors(cell.style, d).fg);
+                self.drawCell(ctx, cell.cps, faceOf(cell.style), cw * @as(f64, @floatFromInt(ci)), top + m.ascent, colorsAt(cells, ci, d).fg);
             }
             for (0..cells.len) |ci| {
                 const st = styleAt(cells, ci);
                 if (st.underline() == .none and st.flags & vt.Style.Flag.strikethrough == 0) continue;
-                self.drawLines(ctx, st, cellColors(st, d), cw * @as(f64, @floatFromInt(ci)), cw, top);
+                self.drawLines(ctx, st, colorsAt(cells, ci, d), cw * @as(f64, @floatFromInt(ci)), cw, top);
             }
         }
         const c = cur orelse return;
@@ -1115,4 +1124,76 @@ test "cell lookup on plain and shaped rows" {
     try std.testing.expectEqual(@as(u16, 0), p.cellAt(t, (first.x0 + first.x1) / 2, chh * 1.5).col);
     // past the text: the plain column
     try std.testing.expectEqual(@as(u16, 12), p.cellAt(t, cw * 12.5, chh * 1.5).col);
+}
+
+test "selection draws on plain and shaped rows" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const m = p.metrics();
+    const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 3 });
+    defer t.deinit();
+    t.write("\x1b[?25lhello world\r\n\u{645}\u{631}\u{62D}\u{628}\u{627}");
+    t.selectionPress(2, 0, 1);
+    t.selectionDrag(4, 0);
+    t.selectionRelease();
+    t.selectionPress(1, 1, 1);
+    t.selectionDrag(2, 1);
+    t.selectionRelease();
+    const cv = try Canvas.init(@intFromFloat(m.cell_w * 20), @intFromFloat(m.cell_h * 3));
+    defer cv.deinit();
+    p.drawRows(t, cv.ctx, 0, 2);
+    const sel = [3]u8{ 56, 84, 140 }; // selection_bg as pixels
+    // the first selection was replaced by the second (one selection at a time): row 0 is not highlighted
+    try std.testing.expect(!near(cv.px(cellBox(m, 3, 0)[0] + 1, 1), sel[0], sel[1], sel[2], 3));
+    // shaped row 1: columns 1 and 2 highlighted inside their spans, column 4 not
+    var rl = (try testLayout(p, t, 1)).?;
+    for ([_]u16{ 1, 2 }) |col| {
+        const sp = rl.span(col, m.cell_w);
+        const x: usize = @intFromFloat(@ceil(sp.x0) + 1);
+        try std.testing.expect(near(cv.px(x, @as(usize, @intFromFloat(m.cell_h)) + 1), sel[0], sel[1], sel[2], 3));
+    }
+    const out = rl.span(4, m.cell_w);
+    try std.testing.expect(!near(cv.px(@as(usize, @intFromFloat(@ceil(out.x0) + 1)), @as(usize, @intFromFloat(m.cell_h)) + 1), sel[0], sel[1], sel[2], 3));
+}
+
+test "selection draws on a plain row" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const m = p.metrics();
+    const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 3 });
+    defer t.deinit();
+    t.write("\x1b[?25lhello world");
+    t.selectionPress(2, 0, 1);
+    t.selectionDrag(4, 0);
+    t.selectionRelease();
+    const cv = try Canvas.init(@intFromFloat(m.cell_w * 20), @intFromFloat(m.cell_h * 3));
+    defer cv.deinit();
+    p.drawRows(t, cv.ctx, 0, 2);
+    const sel = [3]u8{ 56, 84, 140 }; // selection_bg as pixels
+    for ([_]usize{ 2, 3, 4 }) |col| try std.testing.expect(near(cv.px(cellBox(m, col, 0)[0] + 1, 1), sel[0], sel[1], sel[2], 3));
+    for ([_]usize{ 1, 5 }) |col| try std.testing.expect(!near(cv.px(cellBox(m, col, 0)[0] + 1, 1), sel[0], sel[1], sel[2], 3));
+}
+
+test "cursor on a selected inverse cell stays legible" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const t = try vt.Terminal.init(std.testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer t.deinit();
+    t.write("\x1b[7mH\x1b[0m\x1b[1D");
+    t.selectionPress(0, 0, 1);
+    t.selectionDrag(0, 0);
+    t.selectionRelease();
+    const m = p.metrics();
+    const cv = try Canvas.init(@intFromFloat(m.cell_w * 10), @intFromFloat(m.cell_h * 2));
+    defer cv.deinit();
+    p.drawRows(t, cv.ctx, 0, 1);
+    const b = cellBox(m, 0, 0);
+    var lo: u8 = 255;
+    var hi: u8 = 0;
+    for (b[1]..b[3]) |y| for (b[0]..b[2]) |x| {
+        const v = cv.px(x, y)[0];
+        lo = @min(lo, v);
+        hi = @max(hi, v);
+    };
+    try std.testing.expect(hi - lo > 100);
 }

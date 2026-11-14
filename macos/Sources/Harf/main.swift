@@ -225,6 +225,39 @@ func selfTest() -> Never {
         f.close()
     }
 
+    // 2g. Drag-select with real mouse events and copy: logical text reaches the pasteboard, nothing selected copies nothing.
+    do {
+        guard let sel = TerminalController(argv: ["/bin/sh", "-c", "printf 'hello world\\nمرحبا بالعالم\\n'; sleep 5"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start selection session") }
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
+        win.contentView = sel.view
+        if !pump(5, until: { sel.rowText(1).contains("بالعالم") }) { fail("selection: rows are '\(sel.rowText(0))|\(sel.rowText(1))'") }
+        let cell = sel.cellSizePt
+        func at(_ col: Double, _ row: Double) -> NSPoint { NSPoint(x: sel.insetPt + cell.width * (col + 0.5), y: 420 - (sel.insetPt + cell.height * (row + 0.5))) }
+        func ev(_ type: NSEvent.EventType, _ p: NSPoint, clicks: Int = 1) -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: win.windowNumber, context: nil,
+                                             eventNumber: 0, clickCount: clicks, pressure: 1) else { fail("cannot make a mouse event") }
+            return e
+        }
+        let pb = NSPasteboard(name: NSPasteboard.Name("harf.selftest.\(getpid())"))
+        sel.copySelection(to: pb)
+        if pb.string(forType: .string) != nil { fail("selection: copy with nothing selected wrote to the pasteboard") }
+        sel.view.mouseDown(with: ev(.leftMouseDown, at(0, 0)))
+        sel.view.mouseDragged(with: ev(.leftMouseDragged, at(4, 0)))
+        sel.view.mouseUp(with: ev(.leftMouseUp, at(4, 0)))
+        sel.copySelection(to: pb)
+        if pb.string(forType: .string) != "hello" { fail("selection: copied '\(pb.string(forType: .string) ?? "nil")', want 'hello'") }
+        // The Arabic row reads right to left, so its logical start is at the right: drag in reading order, right to
+        // left across the 13 cells it occupies. The copy is the logical text. (A left-to-right drag selects the
+        // logical range between its endpoints, which is the minimal copy of slice 3; visual selection is Phase 7.)
+        sel.view.mouseDown(with: ev(.leftMouseDown, at(12, 1)))
+        sel.view.mouseDragged(with: ev(.leftMouseDragged, at(0, 1)))
+        sel.view.mouseUp(with: ev(.leftMouseUp, at(0, 1)))
+        sel.copySelection(to: pb)
+        if pb.string(forType: .string) != "مرحبا بالعالم" { fail("selection: copied '\(pb.string(forType: .string) ?? "nil")', want the Arabic row") }
+        pb.releaseGlobally()
+        sel.close()
+    }
+
     // 3. Paste, bracketed or not, arrives as typed text.
     guard let pasting = TerminalController(argv: echo, frame: NSSize(width: 700, height: 420)) else { fail("cannot start paste session") }
     pasting.paste("x y")
