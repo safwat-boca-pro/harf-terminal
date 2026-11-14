@@ -21,6 +21,9 @@ pub const Callbacks = struct {
     clipboard_write: ?*const fn (ctx: ?*anyopaque, text: []const u8) void = null,
     /// A program asked for a desktop notification (OSC 9, OSC 777). Untrusted text, borrowed for the call.
     notify: ?*const fn (ctx: ?*anyopaque, title: []const u8, body: []const u8) void = null,
+    /// A command started running (`running`, OSC 133 `C`) or ended (`D`, or the next prompt): only when that changes, never
+    /// per sequence. `exit_code` is set at an end the shell reported one for; `duration_ms` is the run time at an end.
+    command: ?*const fn (ctx: ?*anyopaque, running: bool, exit_code: ?i32, duration_ms: u32) void = null,
 };
 
 pub const Options = struct {
@@ -64,6 +67,9 @@ pub const Session = struct {
     /// True inside a render hold (synchronized output). Set by the parser callback (terminal lock held), and cleared
     /// by the I/O thread when `hold_deadline_ms` runs out.
     held: std.atomic.Value(bool) = .init(false),
+    /// A command is running (OSC 133 `C` seen, no `D` yet) and when it started; touched only by the parser callback.
+    cmd_running: bool = false,
+    cmd_started_ms: i64 = 0,
     hold_deadline_ms: u32 = 1000,
     /// Wheel rows carried toward the next wheel event (|rows| < 3); guarded by `term_lock`.
     wheel_rows: i32 = 0,
@@ -99,7 +105,7 @@ pub const Session = struct {
             .cols = opts.cols,
             .rows = opts.rows,
             .scrollback_bytes = opts.scrollback_bytes,
-            .callbacks = .{ .ctx = self, .write_pty = onWritePty, .bell = onBell, .title_changed = onTitle, .render_hold = onRenderHold, .clipboard_write = onClipboard, .notify = onNotify },
+            .callbacks = .{ .ctx = self, .write_pty = onWritePty, .bell = onBell, .title_changed = onTitle, .render_hold = onRenderHold, .clipboard_write = onClipboard, .notify = onNotify, .command = onCommand },
             .allow_clipboard_write = opts.allow_clipboard_write,
         });
         errdefer self.term.deinit();
@@ -485,6 +491,7 @@ pub const Session = struct {
         // The child closed its side: reap it and report.
         const status = self.pty.wait();
         self.exit_status.store(status, .release);
+        self.endCommand(null); // a shell that dies mid-command (`exit 1`) never sends `D`
         if (self.callbacks.exited) |f| f(self.callbacks.ctx, status);
     }
 
@@ -514,6 +521,30 @@ pub const Session = struct {
         if (self.callbacks.clipboard_write) |f| f(self.callbacks.ctx, text);
     }
 
+    fn onCommand(ctx: ?*anyopaque, kind: vt.CommandKind, exit_code: ?i32) void {
+        const self: *Session = @ptrCast(@alignCast(ctx.?));
+        switch (kind) {
+            .output_start => {
+                if (self.cmd_running) return;
+                self.cmd_running = true;
+                self.cmd_started_ms = monotonicMs();
+                if (self.callbacks.command) |f| f(self.callbacks.ctx, true, null, 0);
+            },
+            // a prompt starting also ends a command whose shell never sent `D`
+            .command_end => self.endCommand(exit_code),
+            .prompt_start => self.endCommand(null),
+            .input_start => {},
+        }
+    }
+
+    /// Reports the running command as ended (once); a no-op when none runs.
+    fn endCommand(self: *Session, exit_code: ?i32) void {
+        if (!self.cmd_running) return;
+        self.cmd_running = false;
+        const ran = @max(0, monotonicMs() - self.cmd_started_ms);
+        if (self.callbacks.command) |f| f(self.callbacks.ctx, false, exit_code, @intCast(@min(ran, std.math.maxInt(u32))));
+    }
+
     fn onNotify(ctx: ?*anyopaque, heading: []const u8, body: []const u8) void {
         const self: *Session = @ptrCast(@alignCast(ctx.?));
         if (self.callbacks.notify) |f| f(self.callbacks.ctx, heading, body);
@@ -535,6 +566,27 @@ pub const Session = struct {
         self.unlock();
         self.requestWake();
         return r;
+    }
+
+    /// Jumps `delta` prompts (negative = older) using the shell's OSC 133 marks (see `vt.Terminal.scrollPrompt`). False only on
+    /// the alternate screen, where the key is the program's. On the primary screen the key is always taken, even with no prompt
+    /// that way: sent on, it would reach the shell as an escape sequence (zsh types `;9A` on the command line).
+    pub fn scrollPrompt(self: *Session, delta: i32) bool {
+        const t = self.lock();
+        const alt = t.onAlternateScreen();
+        const moved = !alt and t.scrollPrompt(delta);
+        self.unlock();
+        if (moved) self.requestWake();
+        return !alt;
+    }
+
+    /// Selects the last finished command's output (OSC 133); false if there is none to select (see `vt.Terminal.selectLastOutput`).
+    pub fn selectOutput(self: *Session) bool {
+        const t = self.lock();
+        const ok = t.selectLastOutput();
+        self.unlock();
+        if (ok) self.requestWake();
+        return ok;
     }
 
     pub fn findEnd(self: *Session) void {
@@ -594,6 +646,9 @@ pub const Session = struct {
 const Spy = struct {
     wakes: std.atomic.Value(u32) = .init(0),
     exits: std.atomic.Value(i32) = .init(-1),
+    /// The `command` events in order (the first eight), written by the I/O thread; `cmd_count` publishes them.
+    cmd_events: [8]CmdEvent = undefined,
+    cmd_count: std.atomic.Value(u32) = .init(0),
 
     fn from(ctx: ?*anyopaque) *Spy {
         return @ptrCast(@alignCast(ctx.?));
@@ -604,8 +659,15 @@ const Spy = struct {
     fn exited(ctx: ?*anyopaque, status: u8) void {
         from(ctx).exits.store(status, .release);
     }
+    const CmdEvent = struct { running: bool, exit_code: ?i32, duration_ms: u32 };
+    fn command(ctx: ?*anyopaque, running: bool, exit_code: ?i32, duration_ms: u32) void {
+        const self = from(ctx);
+        const n = self.cmd_count.load(.monotonic);
+        if (n < self.cmd_events.len) self.cmd_events[n] = .{ .running = running, .exit_code = exit_code, .duration_ms = duration_ms };
+        self.cmd_count.store(n + 1, .release);
+    }
     fn callbacks(self: *Spy) Callbacks {
-        return .{ .ctx = self, .wake = wake, .exited = exited };
+        return .{ .ctx = self, .wake = wake, .exited = exited, .command = command };
     }
 };
 
@@ -672,6 +734,133 @@ test "flood and fast exit" {
     }
     try std.testing.expectEqualStrings("200000", last);
     try std.testing.expect(t.scrollbackRows() <= 1200);
+}
+
+const CmdCount = struct {
+    spy: *Spy,
+    want: u32,
+    fn ok(self: CmdCount) bool {
+        return self.spy.cmd_count.load(.acquire) >= self.want;
+    }
+};
+
+test "command callbacks: C starts, D ends with the exit code, repeated marks make no event" {
+    var spy: Spy = .{};
+    const script = "printf '\\033]133;A\\007\\033]133;A\\007'; printf '\\033]133;C\\007'; sleep 0.3; printf '\\033]133;D;3\\007'; " ++
+        "i=0; while [ $i -lt 1000 ]; do printf '\\033]133;A\\007'; i=$((i+1)); done; echo flood-done; sleep 5";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script }, .callbacks = spy.callbacks() });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, CmdCount{ .spy = &spy, .want = 2 }, CmdCount.ok));
+    try std.testing.expect(hexOf(s, "flood-done")); // every mark has been parsed by now
+    try std.testing.expectEqual(@as(u32, 2), spy.cmd_count.load(.acquire)); // one start, one end: the 1002 other marks changed nothing
+    try std.testing.expect(spy.cmd_events[0].running);
+    try std.testing.expectEqual(@as(u32, 0), spy.cmd_events[0].duration_ms);
+    try std.testing.expect(!spy.cmd_events[1].running);
+    try std.testing.expectEqual(@as(?i32, 3), spy.cmd_events[1].exit_code);
+    try std.testing.expect(spy.cmd_events[1].duration_ms >= 250);
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+extern "c" fn system(cmd: [*:0]const u8) c_int;
+
+/// Sets (or, with null, removes) an environment variable for a test and puts it back when `restore` runs.
+const EnvVar = struct {
+    name: [:0]const u8,
+    old: ?[]const u8,
+    fn set(a: std.mem.Allocator, name: [:0]const u8, value: ?[:0]const u8) !EnvVar {
+        const old: ?[]const u8 = if (std.c.getenv(name.ptr)) |v| try a.dupe(u8, std.mem.span(v)) else null;
+        if (value) |v| _ = setenv(name.ptr, v.ptr, 1) else _ = unsetenv(name.ptr);
+        return .{ .name = name, .old = old };
+    }
+    fn restore(self: EnvVar, a: std.mem.Allocator) void {
+        if (self.old) |o| {
+            const z = std.mem.Allocator.dupeSentinel(a, u8, o, 0) catch return;
+            defer a.free(z);
+            _ = setenv(self.name.ptr, z.ptr, 1);
+            a.free(o);
+        } else _ = unsetenv(self.name.ptr);
+    }
+};
+
+test "zsh with the integration reports commands and keeps the user's ZDOTDIR" {
+    const a = std.testing.allocator;
+    const tmp = if (std.c.getenv("TMPDIR")) |d| std.mem.trimEnd(u8, std.mem.span(d), "/") else "/tmp";
+    var home_buf: [256]u8 = undefined;
+    const home = try std.fmt.bufPrintSentinel(&home_buf, "{s}/harf-zsh-test-{d}", .{ tmp, std.c.getpid() }, 0);
+    var cmd_buf: [600]u8 = undefined;
+    _ = system((try std.fmt.bufPrintSentinel(&cmd_buf, "mkdir -p '{s}' && touch '{s}/.zshrc'", .{ home, home }, 0)).ptr); // an empty .zshrc: no new-user prompt
+    defer _ = system((std.fmt.bufPrintSentinel(&cmd_buf, "rm -rf '{s}'", .{home}, 0) catch unreachable).ptr);
+    var cwd_buf: [512]u8 = undefined;
+    const cwd = std.mem.sliceTo(std.c.getcwd(&cwd_buf, cwd_buf.len).?[0..cwd_buf.len], 0);
+    var dir_buf: [600]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}/macos/shell-integration", .{cwd}, 0);
+
+    // a hermetic login zsh: its own HOME, no ZDOTDIR of ours to start with
+    const shell_var = try EnvVar.set(a, "SHELL", "/bin/zsh");
+    defer shell_var.restore(a);
+    const home_var = try EnvVar.set(a, "HOME", home);
+    defer home_var.restore(a);
+    const zdot_var = try EnvVar.set(a, "ZDOTDIR", home);
+    defer zdot_var.restore(a);
+    pty.default_shell_integration_dir = dir;
+    defer pty.default_shell_integration_dir = null;
+
+    var spy: Spy = .{};
+    const s = try Session.start(a, .{ .callbacks = spy.callbacks() });
+    defer s.deinit();
+    try s.typeText("false\n");
+    try std.testing.expect(waitFor(15_000, CmdCount{ .spy = &spy, .want = 2 }, CmdCount.ok));
+    try std.testing.expect(spy.cmd_events[0].running);
+    try std.testing.expect(!spy.cmd_events[1].running);
+    try std.testing.expectEqual(@as(?i32, 1), spy.cmd_events[1].exit_code);
+    try s.typeText("true\n");
+    try std.testing.expect(waitFor(15_000, CmdCount{ .spy = &spy, .want = 4 }, CmdCount.ok));
+    try std.testing.expectEqual(@as(?i32, 0), spy.cmd_events[3].exit_code);
+    try s.typeText("print -r -- \"Z=$ZDOTDIR\"\n");
+    var want_buf: [300]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "Z={s}", .{home});
+    try std.testing.expect(hexOf(s, want)); // the user's own ZDOTDIR is back inside the shell
+
+    // no ZDOTDIR at all: the shim leaves none behind
+    _ = unsetenv("ZDOTDIR");
+    var spy2: Spy = .{};
+    const s2 = try Session.start(a, .{ .callbacks = spy2.callbacks() });
+    defer s2.deinit();
+    try s2.typeText("print -r -- \"Z=$ZDOTDIR\"\n");
+    try std.testing.expect(waitFor(15_000, Row{ .s = s2, .want = "Z=", .exact = true }, Row.ok));
+
+    // `exec` replaces the shell with a process that never closes the command, so it must not open one, however it is typed
+    for ([_][]const u8{ " exec sh -c 'echo EXECED; sleep 5'\n", "builtin exec sh -c 'echo EXECED; sleep 5'\n" }) |line| {
+        var spy3: Spy = .{};
+        const s3 = try Session.start(a, .{ .callbacks = spy3.callbacks() });
+        defer s3.deinit();
+        try s3.typeText(line);
+        try std.testing.expect(waitFor(15_000, Row{ .s = s3, .want = "EXECED", .exact = true }, Row.ok));
+        try std.testing.expectEqual(@as(u32, 0), spy3.cmd_count.load(.acquire));
+    }
+}
+
+test "scrollPrompt takes the key on the primary screen even with nowhere to go, and never on the alternate screen" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "seq 1 5; sleep 5" } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "5"));
+    try std.testing.expect(s.scrollPrompt(-1)); // no prompt marks: nothing moves, but the key must not reach the shell (zsh would type ";9A")
+    try std.testing.expect(s.scrollPrompt(1));
+    const alt = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf '\\033[?1049hINALT'; sleep 5" } });
+    defer alt.deinit();
+    try std.testing.expect(hexOf(alt, "INALT"));
+    try std.testing.expect(!alt.scrollPrompt(-1)); // a full-screen program owns its keys
+}
+
+test "a command still running when the child exits is closed" {
+    var spy: Spy = .{};
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf '\\033]133;C\\007'; sleep 0.2; exit 3" }, .callbacks = spy.callbacks() });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, CmdCount{ .spy = &spy, .want = 2 }, CmdCount.ok));
+    try std.testing.expect(spy.cmd_events[0].running);
+    try std.testing.expect(!spy.cmd_events[1].running); // otherwise the tab would show a running command for a dead shell
+    try std.testing.expectEqual(@as(?i32, null), spy.cmd_events[1].exit_code);
 }
 
 test "wake is coalesced until handled" {

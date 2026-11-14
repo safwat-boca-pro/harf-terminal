@@ -24,7 +24,19 @@ pub const SpawnOptions = struct {
     cols: u16 = 80,
     rows: u16 = 24,
     cwd: ?[:0]const u8 = null,
+    /// A directory holding `zsh/.zshenv` (Harf's shell integration). When set and the program is zsh, the child starts with
+    /// `ZDOTDIR` pointing there and its own `ZDOTDIR` kept in `HARF_ORIG_ZDOTDIR`; any other program is left alone.
+    shell_integration_dir: ?[:0]const u8 = null,
 };
+
+/// The shell integration directory the login shell gets (`spawnShell`); null means none.
+/// ponytail: process-wide, set by the app from its config; make it a per-window setting if that is ever needed.
+pub var default_shell_integration_dir: ?[:0]const u8 = null;
+
+fn isZsh(path: []const u8) bool {
+    const base = if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| path[i + 1 ..] else path;
+    return std.mem.eql(u8, base, "zsh");
+}
 
 /// Marks `fd` close-on-exec, so children started later do not inherit it. Without this a second
 /// session's shell would hold the first session's PTY master open and never see it hang up.
@@ -57,14 +69,23 @@ fn startsWith(s: []const u8, prefix: []const u8) bool {
     return std.mem.startsWith(u8, s, prefix);
 }
 
-/// The parent's environment with the terminal variables replaced, and a UTF-8 LANG if none is set.
-fn buildEnv(arena: std.mem.Allocator) ![:null]?[*:0]const u8 {
+/// The parent's environment with the terminal variables replaced, and a UTF-8 LANG if none is set. With `integration` (the shell
+/// integration directory, for zsh) `ZDOTDIR` points at its `zsh` folder and the user's own is kept in `HARF_ORIG_ZDOTDIR`.
+fn buildEnv(arena: std.mem.Allocator, integration: ?[:0]const u8) ![:null]?[*:0]const u8 {
     var list: std.ArrayList(?[*:0]const u8) = .empty;
     var have_locale = false;
+    var orig_zdotdir: []const u8 = "";
     var i: usize = 0;
     while (c.environ[i]) |entry| : (i += 1) {
         const s = std.mem.sliceTo(entry, 0);
         if (startsWith(s, "TERM=") or startsWith(s, "COLORTERM=") or startsWith(s, "TERM_PROGRAM=")) continue;
+        if (integration != null) {
+            if (startsWith(s, "ZDOTDIR=")) {
+                orig_zdotdir = s["ZDOTDIR=".len..];
+                continue;
+            }
+            if (startsWith(s, "HARF_ORIG_ZDOTDIR=") or startsWith(s, "HARF_SHELL_INTEGRATION=")) continue;
+        }
         if (startsWith(s, "LANG=") or startsWith(s, "LC_ALL=")) have_locale = true;
         try list.append(arena, entry);
     }
@@ -72,6 +93,11 @@ fn buildEnv(arena: std.mem.Allocator) ![:null]?[*:0]const u8 {
     try list.append(arena, "COLORTERM=truecolor");
     try list.append(arena, "TERM_PROGRAM=Harf");
     if (!have_locale) try list.append(arena, "LANG=en_US.UTF-8");
+    if (integration) |dir| {
+        try list.append(arena, (try std.fmt.allocPrintSentinel(arena, "ZDOTDIR={s}/zsh", .{dir}, 0)).ptr);
+        try list.append(arena, (try std.fmt.allocPrintSentinel(arena, "HARF_ORIG_ZDOTDIR={s}", .{orig_zdotdir}, 0)).ptr);
+        try list.append(arena, "HARF_SHELL_INTEGRATION=1");
+    }
     return list.toOwnedSliceSentinel(arena, null);
 }
 
@@ -100,7 +126,8 @@ pub const Pty = struct {
         const argv = try arena.allocSentinel(?[*:0]const u8, opts.argv.len, null);
         for (opts.argv, 0..) |a, i| argv[i] = a.ptr;
         if (opts.argv0) |a0| argv[0] = a0.ptr;
-        const envp = try buildEnv(arena);
+        const integration = if (opts.shell_integration_dir) |d| (if (isZsh(opts.argv[0])) d else null) else null;
+        const envp = try buildEnv(arena, integration);
 
         var ws: c.winsize = .{ .row = opts.rows, .col = opts.cols, .xpixel = 0, .ypixel = 0 };
         var master: c_int = -1;
@@ -148,6 +175,7 @@ pub const Pty = struct {
             .cols = cols,
             .rows = rows,
             .cwd = home,
+            .shell_integration_dir = default_shell_integration_dir,
         });
     }
 
@@ -306,6 +334,22 @@ test "child environment" {
     const out = try readAll(&p, gpa);
     defer gpa.free(out);
     try std.testing.expectEqualStrings("xterm-256color:truecolor:Harf", out);
+}
+
+test "shell integration points ZDOTDIR at the shim for zsh only" {
+    const gpa = std.testing.allocator;
+    const script = "printf \"[%s|%s]\" \"$ZDOTDIR\" \"$HARF_SHELL_INTEGRATION\"";
+    var sh = try Pty.spawn(gpa, .{ .argv = &.{ "/bin/sh", "-c", script }, .shell_integration_dir = "/opt/harf" });
+    defer sh.deinit();
+    const not_zsh = try readAll(&sh, gpa);
+    defer gpa.free(not_zsh);
+    try std.testing.expect(std.mem.indexOf(u8, not_zsh, "/opt/harf") == null and std.mem.indexOf(u8, not_zsh, "|1]") == null);
+
+    var z = try Pty.spawn(gpa, .{ .argv = &.{ "/bin/zsh", "-f", "-c", script }, .shell_integration_dir = "/opt/harf" });
+    defer z.deinit();
+    const zsh = try readAll(&z, gpa);
+    defer gpa.free(zsh);
+    try std.testing.expectEqualStrings("[/opt/harf/zsh|1]", zsh);
 }
 
 test "resize reaches the child" {

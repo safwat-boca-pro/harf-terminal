@@ -830,6 +830,21 @@ func selfTest() -> Never {
         try? fm.removeItem(atPath: tmp)
     }
 
+    // 2p. OSC 133 marks reach the controller as a start and an end, with the exit code and how long the command ran; and only a
+    // command that ran long enough produces a notification, which says nothing of what was run.
+    do {
+        guard let c = TerminalController(argv: ["/bin/sh", "-c", "printf '\\033]133;C\\007'; sleep 0.3; printf '\\033]133;D;3\\007'; sleep 5"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the command-state session") }
+        var events: [(running: Bool, exitCode: Int32?, durationMs: UInt32)] = []
+        c.onCommand = { events.append(($0, $1, $2)) }
+        if !pump(5, until: { events.count >= 2 }) { fail("command state: wanted a start and an end, got \(events.count) events") }
+        if !events[0].running { fail("command state: the first event must be the start") }
+        if events[1].running || events[1].exitCode != 3 || events[1].durationMs < 250 { fail("command state: the end was \(events[1])") }
+        c.close()
+        if commandNotification(exitCode: 3, durationMs: 12_000)?.body != "Failed (exit 3)" { fail("a failed long command must say it failed") }
+        if commandNotification(exitCode: 0, durationMs: 10_000)?.body != "Done" || commandNotification(exitCode: nil, durationMs: 10_000)?.body != "Done" { fail("a finished long command says Done") }
+        if commandNotification(exitCode: 0, durationMs: 9_999) != nil { fail("a short command must not notify") }
+    }
+
     // 5. A failing shell keeps its window and says so.
     guard let wc2 = WindowController(argv: ["/bin/sh", "-c", "echo boom; exit 3"], content: NSSize(width: 700, height: 420), cwd: nil) else { fail("cannot start failing session") }
     let bad = wc2.allPanes[0].controller

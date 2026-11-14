@@ -20,7 +20,12 @@ pub const Callbacks = struct {
     clipboard_write: ?*const fn (ctx: ?*anyopaque, text: []const u8) void = null,
     /// A program asked for a desktop notification (OSC 9, OSC 777). Both strings are untrusted program text.
     notify: ?*const fn (ctx: ?*anyopaque, title: []const u8, body: []const u8) void = null,
+    /// A shell integration step (OSC 133). `exit_code` is set for `command_end` when the shell sent one. The command line and
+    /// error text the sequence may carry are never passed on (untrusted). Runs inside `write` with the caller's lock held.
+    command: ?*const fn (ctx: ?*anyopaque, kind: CommandKind, exit_code: ?i32) void = null,
 };
+
+pub const CommandKind = enum { prompt_start, input_start, output_start, command_end };
 
 pub const Rgb = struct { r: u8, g: u8, b: u8 };
 
@@ -202,6 +207,19 @@ fn notificationTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, n: [*c]const c.
     f(self.callbacks.ctx, title, body);
 }
 
+fn semanticPromptTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, ev: [*c]const c.GhosttyTerminalSemanticPrompt) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(ud.?));
+    const f = self.callbacks.command orelse return;
+    const kind: CommandKind = switch (ev.*.kind) {
+        c.GHOSTTY_SEMANTIC_PROMPT_PROMPT_START => .prompt_start,
+        c.GHOSTTY_SEMANTIC_PROMPT_INPUT_START => .input_start,
+        c.GHOSTTY_SEMANTIC_PROMPT_OUTPUT_START => .output_start,
+        c.GHOSTTY_SEMANTIC_PROMPT_COMMAND_END => .command_end,
+        else => return, // a kind from a later library version
+    };
+    f(self.callbacks.ctx, kind, if (ev.*.has_exit_code) ev.*.exit_code else null);
+}
+
 fn colorSchemeTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, out: *c.GhosttyColorScheme) callconv(.c) bool {
     const self: *Terminal = @ptrCast(@alignCast(ud.?));
     out.* = if (self.dark_scheme) c.GHOSTTY_COLOR_SCHEME_DARK else c.GHOSTTY_COLOR_SCHEME_LIGHT;
@@ -276,6 +294,7 @@ pub const Terminal = struct {
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_RENDER_HOLD, @as(?*const anyopaque, @ptrCast(&renderHoldTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, @as(?*const anyopaque, @ptrCast(&clipboardWriteTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, @as(?*const anyopaque, @ptrCast(&notificationTrampoline))));
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT, @as(?*const anyopaque, @ptrCast(&semanticPromptTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_COLOR_SCHEME, @as(?*const anyopaque, @ptrCast(&colorSchemeTrampoline))));
         try check(c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT, &self.builtin_palette));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_XTVERSION, @as(?*const anyopaque, @ptrCast(&xtversionTrampoline))));
@@ -655,6 +674,39 @@ pub const Terminal = struct {
         return c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_SELECTION, &sel) == c.GHOSTTY_SUCCESS;
     }
 
+    /// The OSC 133 mark of screen row `y` (0 = the oldest row kept): none, a primary prompt row, or a continuation row of one.
+    fn promptRowKind(self: *Terminal, y: u32) c.GhosttyRowSemanticPrompt {
+        const ref = self.gridRef(c.GHOSTTY_POINT_TAG_SCREEN, 0, y) orelse return c.GHOSTTY_ROW_SEMANTIC_NONE;
+        var row: c.GhosttyRow = undefined;
+        if (c.ghostty_grid_ref_row(&ref, &row) != c.GHOSTTY_SUCCESS) return c.GHOSTTY_ROW_SEMANTIC_NONE;
+        var sp: c.GhosttyRowSemanticPrompt = c.GHOSTTY_ROW_SEMANTIC_NONE;
+        if (c.ghostty_row_get(row, c.GHOSTTY_ROW_DATA_SEMANTIC_PROMPT, &sp) != c.GHOSTTY_SUCCESS) return c.GHOSTTY_ROW_SEMANTIC_NONE;
+        return sp;
+    }
+
+    fn isPromptRow(self: *Terminal, y: u32) bool {
+        return self.promptRowKind(y) != c.GHOSTTY_ROW_SEMANTIC_NONE;
+    }
+
+    /// Selects the output of the last finished command, found through the shell's OSC 133 marks: the row above the prompt the
+    /// cursor is on (or the nearest one above it) is the end of that output. The selection is the terminal's own, so Cmd+C
+    /// copies it. False, and no selection, with no marks, no output above (a command that printed nothing has none: the row above
+    /// is the previous prompt, never an older command's output), or on the alternate screen.
+    pub fn selectLastOutput(self: *Terminal) bool {
+        if (self.onAlternateScreen()) return false;
+        var cursor_y: u16 = 0;
+        _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_CURSOR_Y, &cursor_y);
+        var y: u32 = @intCast(self.scrollbackRows() + cursor_y);
+        while (!self.isPromptRow(y)) : (y -= 1) if (y == 0) return false; // no prompt mark at or above the cursor
+        while (y > 0 and self.promptRowKind(y) == c.GHOSTTY_ROW_SEMANTIC_PROMPT_CONTINUATION) y -= 1; // a prompt of several lines: its first row
+        if (y == 0 or self.isPromptRow(y - 1)) return false; // nothing above it, or the last command printed nothing
+        const ref = self.gridRef(c.GHOSTTY_POINT_TAG_SCREEN, 0, y - 1) orelse return false;
+        var sel = std.mem.zeroes(c.GhosttySelection);
+        if (c.ghostty_terminal_select_output(self.handle, &ref, &sel) != c.GHOSTTY_SUCCESS) return false;
+        self.setSelection(sel);
+        return true;
+    }
+
     /// The selected text as UTF-8 in logical order: soft-wrapped lines joined, trailing blanks trimmed.
     /// `error.NoSelection` if nothing is selected. The caller frees the result with `gpa`.
     pub fn selectionText(self: *Terminal, gpa: std.mem.Allocator) ![]u8 {
@@ -788,6 +840,16 @@ pub const Terminal = struct {
     pub fn scrollViewport(self: *Terminal, delta: i32) void {
         const behavior: c.GhosttyTerminalScrollViewport = .{ .tag = c.GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA, .value = .{ .delta = delta } };
         _ = c.ghostty_terminal_scroll_viewport(self.handle, behavior);
+    }
+
+    /// Scrolls the viewport so the prompt `delta` prompts away (negative = older) is at its top, using the OSC 133 marks. True only
+    /// if the viewport moved: not on the alternate screen, and not when there is no mark in that direction.
+    pub fn scrollPrompt(self: *Terminal, delta: i32) bool {
+        if (delta == 0 or self.onAlternateScreen()) return false;
+        const before = self.viewport().offset;
+        const behavior: c.GhosttyTerminalScrollViewport = .{ .tag = c.GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA_PROMPT, .value = .{ .delta_prompt = delta } };
+        _ = c.ghostty_terminal_scroll_viewport(self.handle, behavior);
+        return self.viewport().offset != before;
     }
 
     pub fn scrollToBottom(self: *Terminal) void {
@@ -1281,6 +1343,114 @@ test "XTWINOPS size queries are answered once the cell size is known" {
 fn writeLines(t: *Terminal, n: usize) void {
     var buf: [32]u8 = undefined;
     for (0..n) |i| t.write(std.fmt.bufPrint(&buf, "line {d}\r\n", .{i}) catch unreachable);
+}
+
+/// `n` finished commands (a marked prompt `$ cmd<i>`, then `lines` of output, then the exit mark) and a last prompt, as a
+/// shell with OSC 133 integration draws them.
+fn writeBlocks(t: *Terminal, n: usize, lines: usize) void {
+    var buf: [48]u8 = undefined;
+    for (0..n) |i| {
+        t.write(std.fmt.bufPrint(&buf, "\x1b]133;A\x07$ cmd{d}\r\n\x1b]133;C\x07", .{i}) catch unreachable);
+        for (0..lines) |j| t.write(std.fmt.bufPrint(&buf, "out{d}-{d}\r\n", .{ i, j }) catch unreachable);
+        t.write("\x1b]133;D;0\x07");
+    }
+    t.write("\x1b]133;A\x07$ ");
+}
+
+fn topRow(t: *Terminal, buf: []u8) []const u8 {
+    return t.rowText(0, buf);
+}
+
+test "scrollPrompt moves the viewport one prompt at a time" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    writeBlocks(t, 3, 40);
+    var buf: [64]u8 = undefined;
+    try std.testing.expect(t.atBottom());
+    try std.testing.expect(t.scrollPrompt(-1));
+    try std.testing.expectEqualStrings("$ cmd2", topRow(t, &buf));
+    try std.testing.expect(t.scrollPrompt(-1));
+    try std.testing.expectEqualStrings("$ cmd1", topRow(t, &buf));
+    try std.testing.expect(t.scrollPrompt(-1));
+    try std.testing.expectEqualStrings("$ cmd0", topRow(t, &buf));
+    try std.testing.expect(!t.scrollPrompt(-1)); // already at the first prompt
+    try std.testing.expectEqualStrings("$ cmd0", topRow(t, &buf));
+    try std.testing.expect(t.scrollPrompt(1));
+    try std.testing.expectEqualStrings("$ cmd1", topRow(t, &buf));
+}
+
+test "scrollPrompt does nothing without marks, on the alternate screen, or after the scrollback was cleared" {
+    const plain = try Terminal.init(std.testing.allocator, .{});
+    defer plain.deinit();
+    writeLines(plain, 100);
+    const before = plain.viewport().offset;
+    try std.testing.expect(!plain.scrollPrompt(-1));
+    try std.testing.expectEqual(before, plain.viewport().offset);
+
+    const alt = try Terminal.init(std.testing.allocator, .{});
+    defer alt.deinit();
+    writeBlocks(alt, 3, 40);
+    alt.write("\x1b[?1049h");
+    try std.testing.expect(!alt.scrollPrompt(-1));
+
+    const cleared = try Terminal.init(std.testing.allocator, .{});
+    defer cleared.deinit();
+    writeBlocks(cleared, 3, 40);
+    cleared.write("\x1b[H\x1b[2J\x1b[3J"); // Cmd+K: the marks went with the scrollback
+    const at = cleared.viewport().offset;
+    try std.testing.expect(!cleared.scrollPrompt(-1));
+    try std.testing.expectEqual(at, cleared.viewport().offset);
+}
+
+const two_commands = "\x1b]133;A\x07$ one\r\n\x1b]133;C\x07alpha\r\nbeta\r\n\x1b]133;D;0\x07" ++
+    "\x1b]133;A\x07$ two\r\n\x1b]133;C\x07gamma\r\ndelta\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ";
+
+test "selectLastOutput selects the output of the last finished command" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write(two_commands);
+    try std.testing.expect(t.selectLastOutput());
+    const txt = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(txt);
+    try std.testing.expectEqualStrings("gamma\ndelta", txt);
+}
+
+test "selectLastOutput does not reach back past a command that printed nothing" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    // `ls` printed "a b", then `true` printed nothing: the last command's output is empty, not "a b"
+    t.write("\x1b]133;A\x07$ ls\r\n\x1b]133;C\x07a b\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ true\r\n\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    try std.testing.expect(!t.selectLastOutput());
+    try std.testing.expectError(error.NoSelection, t.selectionText(std.testing.allocator));
+}
+
+test "selectLastOutput finds the output above a prompt of two lines" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("\x1b]133;A\x07$ one\r\n\x1b]133;C\x07out1\r\n\x1b]133;D;0\x07\x1b]133;A\x07~/src\r\n$ ");
+    try std.testing.expect(t.selectLastOutput());
+    const txt = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(txt);
+    try std.testing.expectEqualStrings("out1", txt);
+}
+
+test "selectLastOutput does nothing without marks, on the alternate screen, or after the scrollback was cleared" {
+    const plain = try Terminal.init(std.testing.allocator, .{});
+    defer plain.deinit();
+    writeLines(plain, 30);
+    try std.testing.expect(!plain.selectLastOutput());
+    try std.testing.expectError(error.NoSelection, plain.selectionText(std.testing.allocator));
+
+    const alt = try Terminal.init(std.testing.allocator, .{});
+    defer alt.deinit();
+    alt.write(two_commands ++ "\x1b[?1049h");
+    try std.testing.expect(!alt.selectLastOutput());
+
+    const cleared = try Terminal.init(std.testing.allocator, .{});
+    defer cleared.deinit();
+    cleared.write(two_commands ++ "\x1b[H\x1b[2J\x1b[3J");
+    try std.testing.expect(!cleared.selectLastOutput());
+    try std.testing.expectError(error.NoSelection, cleared.selectionText(std.testing.allocator));
 }
 
 test "default scrollback keeps between 500 and 1200 rows at 80 columns" {

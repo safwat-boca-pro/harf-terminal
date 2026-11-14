@@ -2,6 +2,7 @@
 const std = @import("std");
 const ct = @import("shape/ct.zig");
 const term = @import("term.zig");
+const pty = @import("pty.zig");
 const vt = @import("vt.zig");
 const draw = @import("draw.zig");
 const config = @import("config.zig");
@@ -23,6 +24,8 @@ pub const HarfTermCallbacks = extern struct {
     clipboard_write: ?*const fn (ctx: ?*anyopaque, text: [*]const u8, len: usize) callconv(.c) void,
     /// OSC 9 / 777: untrusted UTF-8 title (may be empty) and body, borrowed for the call.
     notify: ?*const fn (ctx: ?*anyopaque, title: [*]const u8, title_len: usize, body: [*]const u8, body_len: usize) callconv(.c) void,
+    /// OSC 133: a command started running or ended; only on that change (see `term.Callbacks.command`).
+    command: ?*const fn (ctx: ?*anyopaque, running: c_int, exit_code: c_int, has_exit_code: c_int, duration_ms: u32) callconv(.c) void,
 };
 
 /// Opaque to C. Holds the session and the caller's callbacks; the session's own callbacks are
@@ -58,6 +61,10 @@ const HarfTerm = struct {
         const self = from(ctx);
         if (self.cb.notify) |f| f(self.cb.ctx, heading.ptr, heading.len, body.ptr, body.len);
     }
+    fn command(ctx: ?*anyopaque, running: bool, exit_code: ?i32, duration_ms: u32) void {
+        const self = from(ctx);
+        if (self.cb.command) |f| f(self.cb.ctx, @intFromBool(running), exit_code orelse 0, @intFromBool(exit_code != null), duration_ms);
+    }
 };
 
 /// Starts a session. `argv` is a NULL-terminated program and arguments (`argv[0]` is the path),
@@ -86,7 +93,7 @@ export fn harf_term_new_in(
     const gpa = std.heap.smp_allocator;
     const self = gpa.create(HarfTerm) catch return null;
     errdefer gpa.destroy(self);
-    self.cb = if (cb) |p| p.* else .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null, .clipboard_write = null, .notify = null };
+    self.cb = if (cb) |p| p.* else .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null, .clipboard_write = null, .notify = null, .command = null };
 
     var list: std.ArrayList([:0]const u8) = .empty;
     defer list.deinit(gpa);
@@ -100,7 +107,7 @@ export fn harf_term_new_in(
         .scrollback_bytes = scrollback_bytes,
         .argv = if (argv != null and list.items.len > 0) list.items else null,
         .cwd = if (cwd) |d| std.mem.span(d) else null,
-        .callbacks = .{ .ctx = self, .wake = HarfTerm.wake, .title = HarfTerm.title, .bell = HarfTerm.bell, .exited = HarfTerm.exited, .clipboard_write = HarfTerm.clipboardWrite, .notify = HarfTerm.notify },
+        .callbacks = .{ .ctx = self, .wake = HarfTerm.wake, .title = HarfTerm.title, .bell = HarfTerm.bell, .exited = HarfTerm.exited, .clipboard_write = HarfTerm.clipboardWrite, .notify = HarfTerm.notify, .command = HarfTerm.command },
     }) catch return null;
     return self;
 }
@@ -123,6 +130,18 @@ export fn harf_term_find_step(t: *HarfTerm, older: c_int, number: *usize, total:
     number.* = r.number;
     total.* = r.total;
     return 1;
+}
+
+/// Scrolls to the prompt `delta` prompts away (negative: older) using the shell's OSC 133 marks. Returns 1 if the key was taken
+/// (even when there is no prompt that way, so the shell never sees it), 0 on the alternate screen: the key belongs to the program.
+export fn harf_term_scroll_prompt(t: *HarfTerm, delta: c_int) c_int {
+    return @intFromBool(t.session.scrollPrompt(delta));
+}
+
+/// Selects the output of the last finished command (the shell's OSC 133 marks); Cmd+C then copies it. Returns 1 if something was
+/// selected, 0 if not (no marks, or the alternate screen: the key then belongs to the program).
+export fn harf_term_select_output(t: *HarfTerm) c_int {
+    return @intFromBool(t.session.selectOutput());
 }
 
 /// Ends the find and clears its selection.
@@ -380,7 +399,7 @@ const TestExit = struct {
 
 test "harf_term round trip through the C ABI" {
     var state: TestExit = .{};
-    const cb: HarfTermCallbacks = .{ .ctx = &state, .wake = null, .title = null, .bell = null, .exited = TestExit.onExited, .clipboard_write = null, .notify = null };
+    const cb: HarfTermCallbacks = .{ .ctx = &state, .wake = null, .title = null, .bell = null, .exited = TestExit.onExited, .clipboard_write = null, .notify = null, .command = null };
     const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "printf hi" };
     const t = harf_term_new(80, 24, 1 << 20, &argv, &cb) orelse return error.TermNotCreated;
     defer harf_term_free(t);
@@ -595,7 +614,7 @@ test "harf_term_grid reports the grid, including a program's 132-column switch" 
 }
 
 test "harf_term_new rejects zero size" {
-    const cb: HarfTermCallbacks = .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null, .clipboard_write = null, .notify = null };
+    const cb: HarfTermCallbacks = .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null, .clipboard_write = null, .notify = null, .command = null };
     try std.testing.expect(harf_term_new(0, 24, 1 << 20, null, &cb) == null);
     try std.testing.expect(harf_term_new(80, 0, 1 << 20, null, &cb) == null);
 }
@@ -820,6 +839,29 @@ export fn harf_config_clipboard_write(cfg: *config.Config) c_int {
 /// 0 unfocused, 1 always, 2 off.
 export fn harf_config_notifications(cfg: *config.Config) c_int {
     return @intFromEnum(cfg.notifications);
+}
+
+/// 0 auto, 1 off.
+export fn harf_config_shell_integration(cfg: *config.Config) c_int {
+    return @intFromEnum(cfg.shell_integration);
+}
+
+var shell_integration_buf: [1024:0]u8 = undefined;
+
+/// Where the shell integration shim lives (a directory holding `zsh/.zshenv`); a login zsh started afterwards gets it. NULL turns
+/// it off. The text is copied; one that does not fit is the same as NULL.
+export fn harf_set_shell_integration_dir(dir: ?[*:0]const u8) void {
+    const s = std.mem.span(dir orelse {
+        pty.default_shell_integration_dir = null;
+        return;
+    });
+    if (s.len >= shell_integration_buf.len) {
+        pty.default_shell_integration_dir = null;
+        return;
+    }
+    @memcpy(shell_integration_buf[0..s.len], s);
+    shell_integration_buf[s.len] = 0;
+    pty.default_shell_integration_dir = shell_integration_buf[0..s.len :0];
 }
 
 /// The theme for a dark (1) or light (0) system appearance.

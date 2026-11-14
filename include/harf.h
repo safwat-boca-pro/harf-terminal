@@ -31,6 +31,9 @@ typedef struct {
     void (*clipboard_write)(void *ctx, const uint8_t *text, size_t len);
     /* OSC 9 / 777: untrusted UTF-8 title (may be empty) and body, borrowed for the call. */
     void (*notify)(void *ctx, const uint8_t *title, size_t title_len, const uint8_t *body, size_t body_len);
+    /* OSC 133: a command started running (running = 1) or ended (running = 0; has_exit_code says whether exit_code is real;
+       duration_ms is how long it ran). Called only when that changes, never once per sequence. */
+    void (*command)(void *ctx, int running, int exit_code, int has_exit_code, uint32_t duration_ms);
 } HarfTermCallbacks;
 
 /* argv: NULL-terminated program and arguments (argv[0] is the path), or NULL for the login shell.
@@ -109,6 +112,12 @@ size_t harf_term_find(HarfTerm *t, const uint8_t *needle, size_t len);
 /* Selects the next match toward older output (older = 1) or newer (0), wrapping; scrolls to it and highlights it. Returns 1 with
  * the match's 1-based position `number` of `total`, or 0 if there are no matches. */
 int harf_term_find_step(HarfTerm *t, int older, size_t *number, size_t *total);
+/* Scrolls to the prompt `delta` prompts away (negative: older) using the shell's OSC 133 marks. Returns 1 if the key was taken (even
+   when there is no prompt that way, so the shell never sees it), 0 on the alternate screen: the key belongs to the program. */
+int harf_term_scroll_prompt(HarfTerm *t, int delta);
+/* Selects the output of the last finished command (the shell's OSC 133 marks); Cmd+C then copies it. Returns 1 if something was
+   selected, 0 if not (no marks, or the alternate screen: the key then belongs to the program). */
+int harf_term_select_output(HarfTerm *t);
 /* Ends the find and clears its highlight. */
 void harf_term_find_end(HarfTerm *t);
 /* Clear the screen (and the scrollback if `scrollback` is not 0), then type Ctrl+L so a shell redraws its prompt. On the
@@ -160,6 +169,9 @@ float harf_config_font_size(HarfConfig *cfg); /* points */
 size_t harf_config_scrollback_bytes(HarfConfig *cfg);
 int harf_config_clipboard_write(HarfConfig *cfg); /* 1 allow, 0 deny */
 int harf_config_notifications(HarfConfig *cfg);   /* 0 unfocused, 1 always, 2 off */
+int harf_config_shell_integration(HarfConfig *cfg); /* 0 auto, 1 off */
+/* The directory holding the zsh shim (`zsh/.zshenv`): a login zsh started afterwards emits OSC 133 marks. NULL turns it off. */
+void harf_set_shell_integration_dir(const char *dir);
 /* The theme for a dark (1) or light (0) system appearance. */
 void harf_config_theme(HarfConfig *cfg, int dark, HarfTheme *out);
 /* One key binding: mods use HARF_MOD_*; key is a lowercase character or a name (left, return, f5); action is its name
