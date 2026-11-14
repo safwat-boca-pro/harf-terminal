@@ -466,6 +466,50 @@ func selfTest() -> Never {
         m.close()
     }
 
+    // 2g. A key release reaches a program that asked for event types (kitty flags 1 + 2), for a key whose press reached it.
+    do {
+        let script = "stty raw -echo; printf '\\033[>3u'; printf R; head -c 16 | od -An -tx1 | tr -s ' '"
+        guard let t = TerminalController(argv: ["/bin/sh", "-c", script], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the release session") }
+        if !pump(5, until: { t.rowText(0).contains("R") }) { fail("release: child not ready: '\(t.rowText(0))'") }
+        _ = pump(0.3) { false }
+        func up(_ type: NSEvent.EventType) -> NSEvent {
+            guard let ev = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [.numericPad, .function], timestamp: 0, windowNumber: 0, context: nil,
+                                            characters: "\u{F700}", charactersIgnoringModifiers: "\u{F700}", isARepeat: false, keyCode: 126) else { fail("cannot make a key event") }
+            return ev
+        }
+        t.view.keyUp(with: up(.keyUp))   // a release with no press behind it is not reported
+        t.view.keyDown(with: up(.keyDown))
+        t.view.keyUp(with: up(.keyUp))
+        if !pump(5, until: { (0..<4).contains { t.rowText($0).contains("1b 5b 31 3b 31 3a 31 41 1b 5b 31 3b 31 3a 33 41") } }) {
+            fail("release: rows are '\((0..<4).map { t.rowText($0) }.joined(separator: "|"))'")
+        }
+        t.close()
+    }
+
+    // 2h. A program's OSC 52 write reaches the clipboard, OSC 9 raises a notification, and a Command-click opens an OSC 8 link:
+    // http(s) and mailto only. A file: link, and a cell with no link, give nothing to open.
+    do {
+        let script = "printf '\\033]52;c;aGVsbG8=\\007'; printf '\\033]9;Build done\\007'; "
+            + "printf '\\033]8;;https://example.com/x\\033\\\\link\\033]8;;\\033\\\\ '; "
+            + "printf '\\033]8;;file:///etc/passwd\\033\\\\evil\\033]8;;\\033\\\\'; sleep 5"
+        guard let c = TerminalController(argv: ["/bin/sh", "-c", script], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the OSC session") }
+        let pb = NSPasteboard(name: NSPasteboard.Name("app.harf.selftest"))
+        pb.clearContents()
+        c.clipboard = pb
+        var notes: [(String, String)] = []
+        c.onNotify = { notes.append(($0, $1)) }
+        if !pump(5, until: { c.rowText(0).contains("evil") }) { fail("OSC: row 0 is '\(c.rowText(0))'") }
+        if pb.string(forType: .string) != "hello" { fail("OSC 52: the clipboard holds \(String(describing: pb.string(forType: .string)))") }
+        if notes.count != 1 || notes[0].1 != "Build done" { fail("OSC 9: notifications are \(notes)") }
+        let cell = c.cellSizePt
+        func at(_ col: Double) -> NSPoint { NSPoint(x: c.insetPt + cell.width * col, y: c.insetPt + cell.height * 0.5) }   // the view is y-down
+        if c.hyperlink(at: at(1.5))?.absoluteString != "https://example.com/x" { fail("OSC 8: link at column 1 is \(String(describing: c.hyperlink(at: at(1.5))))") }
+        if c.hyperlink(at: at(6.5)) != nil { fail("OSC 8: a file: link would be opened") }
+        if c.hyperlink(at: at(30.5)) != nil { fail("OSC 8: a link where there is none") }
+        pb.clearContents()
+        c.close()
+    }
+
     // 2f. Window focus reaches a program that asked for focus events (mode 1004).
     do {
         let script = "stty raw -echo; printf '\\033[?1004h'; printf R; head -c 6 | od -An -tx1 | tr -s ' '"

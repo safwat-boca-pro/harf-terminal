@@ -29,6 +29,19 @@ private let titleCallback: @convention(c) (UnsafeMutableRawPointer?) -> Void = {
 private let bellCallback: @convention(c) (UnsafeMutableRawPointer?) -> Void = { ctx in hop(ctx) { $0.onBell() } }
 private let exitedCallback: @convention(c) (UnsafeMutableRawPointer?, Int32) -> Void = { ctx, status in hop(ctx) { $0.exitedOnMain(status) } }
 
+private func utf8String(_ p: UnsafePointer<UInt8>?, _ n: Int) -> String {
+    guard let p, n > 0 else { return "" }
+    return String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)   // copies: the core's bytes are borrowed
+}
+private let clipboardCallback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, Int) -> Void = { ctx, p, n in
+    let text = utf8String(p, n)
+    hop(ctx) { $0.clipboardOnMain(text) }
+}
+private let notifyCallback: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, Int, UnsafePointer<UInt8>?, Int) -> Void = { ctx, t, tn, b, bn in
+    let title = utf8String(t, tn), body = utf8String(b, bn)
+    hop(ctx) { $0.onNotify(title, body) }
+}
+
 // Measurement hooks. HARF_MEASURE=1 records when each frame finished (read by the self-test's latency section);
 // HARF_TRACE=startup prints the time from process start to the end of the first frame. Both cost one environment
 // lookup at launch and nothing per frame when off.
@@ -96,6 +109,10 @@ final class TerminalController {
     var onTitle: (String) -> Void = { _ in }
     var onBell: () -> Void = {}
     var onExit: (Int32) -> Void = { _ in }
+    /// A program asked for a desktop notification (OSC 9, OSC 777): sanitized title (may be empty) and body.
+    var onNotify: (String, String) -> Void = { _, _ in }
+    /// Where OSC 52 writes go (the self-test points it at a private pasteboard).
+    var clipboard: NSPasteboard = .general
 
     /// `argv` nil runs the login shell. `frame` is the view's initial size in points.
     init?(argv: [String]?, frame: NSSize, scale: CGFloat = 2) {
@@ -106,7 +123,8 @@ final class TerminalController {
         let size = fitGrid(frame)
         let cstrs: [UnsafeMutablePointer<CChar>?] = (argv ?? []).map { strdup($0) } + [nil]
         defer { cstrs.forEach { free($0) } }
-        var cb = HarfTermCallbacks(ctx: nil, wake: wakeCallback, title: titleCallback, bell: bellCallback, exited: exitedCallback)
+        var cb = HarfTermCallbacks(ctx: nil, wake: wakeCallback, title: titleCallback, bell: bellCallback, exited: exitedCallback,
+                                 clipboard_write: clipboardCallback, notify: notifyCallback)
         let retained = Unmanaged.passRetained(target)
         retainedTarget = retained
         cb.ctx = retained.toOpaque()
@@ -318,6 +336,23 @@ final class TerminalController {
         onTitle(String(decoding: buf[0..<n], as: UTF8.self))
     }
 
+    /// OSC 52: the core allowed a program to put text on the clipboard (policy, standard clipboard only).
+    fileprivate func clipboardOnMain(_ text: String) {
+        clipboard.clearContents()
+        clipboard.setString(text, forType: .string)
+    }
+
+    /// The OSC 8 hyperlink under `p` (view points), if it is one worth opening: http, https or mailto. Any other scheme
+    /// (file:, an app's own scheme) could start something the user never meant to open, so a click on it does nothing.
+    func hyperlink(at p: NSPoint) -> URL? {
+        guard let t = term, let painter else { return nil }
+        var buf = [UInt8](repeating: 0, count: 2048)
+        let n = harf_term_hyperlink_at(t, painter, Double((p.x - inset) * scale), Double((p.y - inset) * scale), &buf, buf.count)
+        guard n > 0, let url = URL(string: String(decoding: buf[0..<n], as: UTF8.self)),
+              let scheme = url.scheme?.lowercased(), ["http", "https", "mailto"].contains(scheme) else { return nil }
+        return url
+    }
+
     fileprivate func exitedOnMain(_ status: Int32) {
         exitStatus = status
         onExit(status)
@@ -368,25 +403,37 @@ final class TerminalView: NSView {
         return m
     }
 
+    /// Keys whose press reached the program through the core. A release is forwarded only for these (a program that asked
+    /// for event types, kitty flag 2, hears it); a key that typed text, or that the app itself used, has no release to report.
+    private var forwardedKeys = Set<UInt16>()
+
     /// Function keys and Control combinations are encoded by the core; everything else is text.
     /// `text` is called only for text keys (it runs `interpretKeyEvents` in the real path).
     func handleKey(code: UInt16, mods: UInt32, characters: String, unshifted: UInt32 = 0, isRepeat: Bool, text: () -> Void) {
-        if mods & UInt32(HARF_MOD_SUPER) != 0 {   // Command shortcuts belong to the menu; the core maps the editing keys
-            _ = controller?.sendKey(code: code, mods: mods, text: characters, unshifted: unshifted, action: isRepeat ? 2 : 0)
-            return
-        }
-        if controller?.sendKey(code: code, mods: mods, text: characters, unshifted: unshifted, action: isRepeat ? 2 : 0) == true { return }
+        let handled = controller?.sendKey(code: code, mods: mods, text: characters, unshifted: unshifted, action: isRepeat ? 2 : 0) == true
+        if handled { forwardedKeys.insert(code) }
+        // Command shortcuts belong to the menu; the core maps the editing keys, and nothing else is typed
+        if handled || mods & UInt32(HARF_MOD_SUPER) != 0 { return }
         text()
     }
 
+    /// The layout's text with Control removed (Control turns "c" into U+0003), and its character with no modifiers:
+    /// the core names Control combinations by them, so AZERTY, Dvorak and Colemak work.
+    private func keyText(_ event: NSEvent) -> (text: String, unshifted: UInt32) {
+        let text = event.characters(byApplyingModifiers: event.modifierFlags.subtracting(.control)) ?? event.characters ?? ""
+        return (text, event.characters(byApplyingModifiers: [])?.unicodeScalars.first?.value ?? 0)
+    }
+
     override func keyDown(with event: NSEvent) {
-        // The layout's text with Control removed (Control turns "c" into U+0003), and its character with no
-        // modifiers: the core names Control combinations by them, so AZERTY, Dvorak and Colemak work.
-        let flags = event.modifierFlags
-        let text = event.characters(byApplyingModifiers: flags.subtracting(.control)) ?? event.characters ?? ""
-        let unshifted = event.characters(byApplyingModifiers: [])?.unicodeScalars.first?.value ?? 0
-        handleKey(code: event.keyCode, mods: Self.harfMods(flags), characters: text, unshifted: unshifted,
+        let k = keyText(event)
+        handleKey(code: event.keyCode, mods: Self.harfMods(event.modifierFlags), characters: k.text, unshifted: k.unshifted,
                   isRepeat: event.isARepeat) { interpretKeyEvents([event]) }
+    }
+
+    override func keyUp(with event: NSEvent) {
+        guard forwardedKeys.remove(event.keyCode) != nil else { return }
+        let k = keyText(event)
+        _ = controller?.sendKey(code: event.keyCode, mods: Self.harfMods(event.modifierFlags), text: k.text, unshifted: k.unshifted, action: 1)
     }
 
     @objc func paste(_ sender: Any?) {
@@ -411,6 +458,11 @@ final class TerminalView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        // Command-click opens an OSC 8 link, even while a program tracks the mouse
+        if event.modifierFlags.contains(.command), let url = controller?.hyperlink(at: convert(event.locationInWindow, from: nil)) {
+            NSWorkspace.shared.open(url)
+            return
+        }
         selecting = !sendMouse(0, 1, event)
         if selecting { selectionEvent(0, event) }
     }

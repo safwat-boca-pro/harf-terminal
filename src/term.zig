@@ -17,6 +17,10 @@ pub const Callbacks = struct {
     bell: ?*const fn (ctx: ?*anyopaque) void = null,
     /// The child ended and all its output has been parsed.
     exited: ?*const fn (ctx: ?*anyopaque, status: u8) void = null,
+    /// A program wrote text to the clipboard (OSC 52) and the policy allowed it. The text is borrowed for the call.
+    clipboard_write: ?*const fn (ctx: ?*anyopaque, text: []const u8) void = null,
+    /// A program asked for a desktop notification (OSC 9, OSC 777). Untrusted text, borrowed for the call.
+    notify: ?*const fn (ctx: ?*anyopaque, title: []const u8, body: []const u8) void = null,
 };
 
 pub const Options = struct {
@@ -28,6 +32,8 @@ pub const Options = struct {
     callbacks: Callbacks = .{},
     /// How long a synchronized-output hold (mode 2026) may last before the display is let go anyway.
     hold_deadline_ms: u32 = 1000,
+    /// May a program write the clipboard (OSC 52)?
+    allow_clipboard_write: bool = true,
 };
 
 /// Most bytes `Session.input` queues before refusing more.
@@ -91,7 +97,8 @@ pub const Session = struct {
             .cols = opts.cols,
             .rows = opts.rows,
             .scrollback_bytes = opts.scrollback_bytes,
-            .callbacks = .{ .ctx = self, .write_pty = onWritePty, .bell = onBell, .title_changed = onTitle, .render_hold = onRenderHold },
+            .callbacks = .{ .ctx = self, .write_pty = onWritePty, .bell = onBell, .title_changed = onTitle, .render_hold = onRenderHold, .clipboard_write = onClipboard, .notify = onNotify },
+            .allow_clipboard_write = opts.allow_clipboard_write,
         });
         errdefer self.term.deinit();
         self.pty = if (opts.argv) |argv|
@@ -499,6 +506,23 @@ pub const Session = struct {
         const self: *Session = @ptrCast(@alignCast(ctx.?));
         if (self.callbacks.title) |f| f(self.callbacks.ctx);
     }
+
+    fn onClipboard(ctx: ?*anyopaque, text: []const u8) void {
+        const self: *Session = @ptrCast(@alignCast(ctx.?));
+        if (self.callbacks.clipboard_write) |f| f(self.callbacks.ctx, text);
+    }
+
+    fn onNotify(ctx: ?*anyopaque, heading: []const u8, body: []const u8) void {
+        const self: *Session = @ptrCast(@alignCast(ctx.?));
+        if (self.callbacks.notify) |f| f(self.callbacks.ctx, heading, body);
+    }
+
+    /// Changes whether a program may write the clipboard (config reload).
+    pub fn setClipboardWrite(self: *Session, allow: bool) void {
+        const t = self.lock();
+        defer self.unlock();
+        t.setClipboardWrite(allow);
+    }
 };
 
 // ---- tests ----
@@ -781,6 +805,26 @@ test "key: Option+arrows send the full modifier encoding once the program asked 
     try std.testing.expect(hexOf(s, "ready"));
     try std.testing.expect(try s.key(123, keys.Mods.alt, "", 0, .press)); // ESC [ 1 ; 3 D
     try std.testing.expect(hexOf(s, "1b 5b 31 3b 33 44"));
+}
+
+test "key: a release reaches a program that asked for event types, and only that program" {
+    // flags 1 (disambiguate) + 2 (event types): the press is ESC [ 1 ; 1 : 1 A and the release ESC [ 1 ; 1 : 3 A (16 bytes)
+    const script = "stty raw -echo; printf '\\033[>3u'; echo ready; dd bs=1 count=16 2>/dev/null | od -An -tx1 | tr -s ' '";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    try std.testing.expect(try s.key(126, 0, "", 0, .press));
+    try std.testing.expect(try s.key(126, 0, "", 0, .release));
+    try std.testing.expect(hexOf(s, "1b 5b 31 3b 31 3a 31 41 1b 5b 31 3b 31 3a 33 41"));
+
+    // legacy program: a release is not reported at all
+    const legacy = "stty raw -echo; echo ready; dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -s ' '";
+    const l = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", legacy } });
+    defer l.deinit();
+    try std.testing.expect(hexOf(l, "ready"));
+    try std.testing.expect(!try l.key(126, 0, "", 0, .release));
+    try std.testing.expect(try l.key(126, 0, "", 0, .press));
+    try std.testing.expect(hexOf(l, "1b 5b 41"));
 }
 
 test "key: Ctrl letters follow the layout, not the physical key" {

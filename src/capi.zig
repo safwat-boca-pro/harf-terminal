@@ -18,6 +18,10 @@ pub const HarfTermCallbacks = extern struct {
     title: ?*const fn (ctx: ?*anyopaque) callconv(.c) void,
     bell: ?*const fn (ctx: ?*anyopaque) callconv(.c) void,
     exited: ?*const fn (ctx: ?*anyopaque, status: c_int) callconv(.c) void,
+    /// OSC 52: UTF-8 text a program put on the clipboard (not NUL-terminated, borrowed for the call).
+    clipboard_write: ?*const fn (ctx: ?*anyopaque, text: [*]const u8, len: usize) callconv(.c) void,
+    /// OSC 9 / 777: untrusted UTF-8 title (may be empty) and body, borrowed for the call.
+    notify: ?*const fn (ctx: ?*anyopaque, title: [*]const u8, title_len: usize, body: [*]const u8, body_len: usize) callconv(.c) void,
 };
 
 /// Opaque to C. Holds the session and the caller's callbacks; the session's own callbacks are
@@ -45,6 +49,14 @@ const HarfTerm = struct {
         const self = from(ctx);
         if (self.cb.exited) |f| f(self.cb.ctx, status);
     }
+    fn clipboardWrite(ctx: ?*anyopaque, text: []const u8) void {
+        const self = from(ctx);
+        if (self.cb.clipboard_write) |f| f(self.cb.ctx, text.ptr, text.len);
+    }
+    fn notify(ctx: ?*anyopaque, heading: []const u8, body: []const u8) void {
+        const self = from(ctx);
+        if (self.cb.notify) |f| f(self.cb.ctx, heading.ptr, heading.len, body.ptr, body.len);
+    }
 };
 
 /// Starts a session. `argv` is a NULL-terminated program and arguments (`argv[0]` is the path),
@@ -60,7 +72,7 @@ export fn harf_term_new(
     const gpa = std.heap.smp_allocator;
     const self = gpa.create(HarfTerm) catch return null;
     errdefer gpa.destroy(self);
-    self.cb = if (cb) |p| p.* else .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null };
+    self.cb = if (cb) |p| p.* else .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null, .clipboard_write = null, .notify = null };
 
     var list: std.ArrayList([:0]const u8) = .empty;
     defer list.deinit(gpa);
@@ -73,7 +85,7 @@ export fn harf_term_new(
         .rows = rows,
         .scrollback_bytes = scrollback_bytes,
         .argv = if (argv != null and list.items.len > 0) list.items else null,
-        .callbacks = .{ .ctx = self, .wake = HarfTerm.wake, .title = HarfTerm.title, .bell = HarfTerm.bell, .exited = HarfTerm.exited },
+        .callbacks = .{ .ctx = self, .wake = HarfTerm.wake, .title = HarfTerm.title, .bell = HarfTerm.bell, .exited = HarfTerm.exited, .clipboard_write = HarfTerm.clipboardWrite, .notify = HarfTerm.notify },
     }) catch return null;
     return self;
 }
@@ -247,6 +259,21 @@ export fn harf_term_selection_event(t: *HarfTerm, p: *draw.Painter, phase: c_int
     return 0;
 }
 
+/// The OSC 8 hyperlink under a pixel of the grid (device pixels, origin at its top-left): copies its URI (no NUL) into `out`
+/// and returns its length, or 0 if there is no link there or the URI does not fit `cap` (a cut-off URL is never returned).
+export fn harf_term_hyperlink_at(t: *HarfTerm, p: *draw.Painter, x_px: f64, y_px: f64, out: [*]u8, cap: usize) usize {
+    const g = t.session.lock();
+    defer t.session.unlock();
+    const cell = p.cellAt(g, x_px, y_px);
+    const uri = g.hyperlinkAt(cell.col, cell.row, out[0..cap]);
+    return uri.len;
+}
+
+/// Whether a program may write the clipboard with OSC 52 (1 yes, 0 no). Reading it is never allowed.
+export fn harf_term_set_clipboard_write(t: *HarfTerm, allow: c_int) void {
+    t.session.setClipboardWrite(allow != 0);
+}
+
 /// The selected text as UTF-8 in logical order (soft wraps joined, trailing blanks trimmed), or NULL if
 /// nothing is selected. `*len` receives its length. Free it with `harf_free`.
 export fn harf_term_selection_text(t: *HarfTerm, len: *usize) ?[*]u8 {
@@ -307,7 +334,7 @@ const TestExit = struct {
 
 test "harf_term round trip through the C ABI" {
     var state: TestExit = .{};
-    const cb: HarfTermCallbacks = .{ .ctx = &state, .wake = null, .title = null, .bell = null, .exited = TestExit.onExited };
+    const cb: HarfTermCallbacks = .{ .ctx = &state, .wake = null, .title = null, .bell = null, .exited = TestExit.onExited, .clipboard_write = null, .notify = null };
     const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "printf hi" };
     const t = harf_term_new(80, 24, 1 << 20, &argv, &cb) orelse return error.TermNotCreated;
     defer harf_term_free(t);
@@ -522,7 +549,7 @@ test "harf_term_grid reports the grid, including a program's 132-column switch" 
 }
 
 test "harf_term_new rejects zero size" {
-    const cb: HarfTermCallbacks = .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null };
+    const cb: HarfTermCallbacks = .{ .ctx = null, .wake = null, .title = null, .bell = null, .exited = null, .clipboard_write = null, .notify = null };
     try std.testing.expect(harf_term_new(0, 24, 1 << 20, null, &cb) == null);
     try std.testing.expect(harf_term_new(80, 0, 1 << 20, null, &cb) == null);
 }

@@ -16,6 +16,10 @@ pub const Callbacks = struct {
     /// The program started (`true`) or ended (`false`) a render hold (synchronized output, mode 2026). Runs
     /// inside `write` (and `resize`) with the caller's lock held: set a flag, nothing more.
     render_hold: ?*const fn (ctx: ?*anyopaque, held: bool) void = null,
+    /// A program wrote text to the system clipboard (OSC 52) and the policy allowed it. Runs inside `write`.
+    clipboard_write: ?*const fn (ctx: ?*anyopaque, text: []const u8) void = null,
+    /// A program asked for a desktop notification (OSC 9, OSC 777). Both strings are untrusted program text.
+    notify: ?*const fn (ctx: ?*anyopaque, title: []const u8, body: []const u8) void = null,
 };
 
 pub const Rgb = struct { r: u8, g: u8, b: u8 };
@@ -71,6 +75,8 @@ pub const Options = struct {
     /// libghostty keeps history in whole pages, so this is a limit to within about 400 KB.
     scrollback_bytes: usize = 1 << 20,
     callbacks: Callbacks = .{},
+    /// May a program write the clipboard (OSC 52)? Reading it is never allowed.
+    allow_clipboard_write: bool = true,
 };
 
 pub const Error = error{ OutOfMemory, Ghostty };
@@ -117,6 +123,77 @@ fn sizeTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, out: *c.GhosttySizeRepo
     return true;
 }
 
+/// Most bytes of an OSC 52 write that reach the clipboard.
+const max_clipboard_write = 1 << 20;
+
+fn replyClipboard(w: *const c.GhosttyClipboardWrite, result: c.GhosttyClipboardWriteResult) void {
+    var reply = std.mem.zeroes(c.GhosttyClipboardWriteReply);
+    reply.size = @sizeOf(c.GhosttyClipboardWriteReply);
+    reply.result = result;
+    if (w.reply) |f| f(w, &reply);
+}
+
+/// OSC 52 (and the library's other clipboard writes): the plain-text representation goes to the callback when the
+/// policy allows, for the standard clipboard only. Anything else is answered as refused.
+fn clipboardWriteTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, w: [*c]const c.GhosttyClipboardWrite) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(ud.?));
+    const req: *const c.GhosttyClipboardWrite = @ptrCast(w);
+    if (!self.allow_clipboard_write) return replyClipboard(req, c.GHOSTTY_CLIPBOARD_WRITE_RESULT_DENIED);
+    if (req.location != c.GHOSTTY_CLIPBOARD_LOCATION_STANDARD) return replyClipboard(req, c.GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED);
+    var i: usize = 0;
+    while (i < req.contents_len) : (i += 1) {
+        const item = req.contents[i];
+        if (item.mime.len < 10 or !std.mem.eql(u8, item.mime.ptr[0..10], "text/plain")) continue;
+        if (item.data.len > max_clipboard_write) return replyClipboard(req, c.GHOSTTY_CLIPBOARD_WRITE_RESULT_DENIED);
+        if (self.callbacks.clipboard_write) |f| f(self.callbacks.ctx, item.data.ptr[0..item.data.len]);
+        return replyClipboard(req, c.GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS);
+    }
+    replyClipboard(req, c.GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED);
+}
+
+/// Text from a program that will be shown outside the terminal (a notification): control characters, line and paragraph
+/// separators and the bidi embeddings and overrides that can make one string read as another are dropped (newline and tab
+/// become a space), and the result is cut at `out.len` bytes on a character boundary. Arabic and the direction marks stay.
+pub fn cleanText(out: []u8, in: []const u8) []const u8 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < in.len) {
+        const len = std.unicode.utf8ByteSequenceLength(in[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (i + len > in.len) break;
+        var cp = std.unicode.utf8Decode(in[i..][0..len]) catch {
+            i += 1;
+            continue;
+        };
+        const start = i;
+        i += len;
+        if (cp == '\n' or cp == '\t') cp = ' ';
+        if (cp < 0x20 or (cp >= 0x7f and cp < 0xa0) or cp == 0x2028 or cp == 0x2029 or (cp >= 0x202a and cp <= 0x202e) or cp == 0xfeff) continue;
+        if (cp == ' ' and len == 1) {
+            if (n >= out.len) break;
+            out[n] = ' ';
+            n += 1;
+            continue;
+        }
+        if (n + len > out.len) break;
+        @memcpy(out[n..][0..len], in[start..][0..len]);
+        n += len;
+    }
+    return out[0..n];
+}
+
+fn notificationTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, n: [*c]const c.GhosttyTerminalDesktopNotification) callconv(.c) void {
+    const self: *Terminal = @ptrCast(@alignCast(ud.?));
+    const f = self.callbacks.notify orelse return;
+    var title_buf: [128]u8 = undefined;
+    var body_buf: [256]u8 = undefined;
+    const title = cleanText(&title_buf, if (n.*.title.len == 0) "" else n.*.title.ptr[0..n.*.title.len]);
+    const body = cleanText(&body_buf, if (n.*.body.len == 0) "" else n.*.body.ptr[0..n.*.body.len]);
+    f(self.callbacks.ctx, title, body);
+}
+
 fn titleTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(ud.?));
     if (self.callbacks.title_changed) |f| f(self.callbacks.ctx);
@@ -141,6 +218,7 @@ pub const Terminal = struct {
     selection_active: bool = false,
     mouse_encoder: c.GhosttyMouseEncoder,
     mouse_event: c.GhosttyMouseEvent,
+    allow_clipboard_write: bool = true,
     /// One cell in pixels (width, height) as of the last `resize`; 0 until then.
     cell_px: [2]u32 = .{ 0, 0 },
     /// Colors as of the last `update`.
@@ -154,6 +232,7 @@ pub const Terminal = struct {
         self.* = .{
             .gpa = gpa,
             .callbacks = opts.callbacks,
+            .allow_clipboard_write = opts.allow_clipboard_write,
             .handle = undefined,
             .render_state = undefined,
             .row_iter = undefined,
@@ -171,6 +250,8 @@ pub const Terminal = struct {
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_BELL, @as(?*const anyopaque, @ptrCast(&bellTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, @as(?*const anyopaque, @ptrCast(&titleTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_RENDER_HOLD, @as(?*const anyopaque, @ptrCast(&renderHoldTrampoline))));
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, @as(?*const anyopaque, @ptrCast(&clipboardWriteTrampoline))));
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, @as(?*const anyopaque, @ptrCast(&notificationTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_XTVERSION, @as(?*const anyopaque, @ptrCast(&xtversionTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_SIZE, @as(?*const anyopaque, @ptrCast(&sizeTrampoline))));
         var fg: c.GhosttyColorRgb = .{ .r = opts.default_fg.r, .g = opts.default_fg.g, .b = opts.default_fg.b };
@@ -329,6 +410,21 @@ pub const Terminal = struct {
         var ref = std.mem.zeroes(c.GhosttyGridRef);
         if (c.ghostty_terminal_grid_ref(self.handle, pt, &ref) != c.GHOSTTY_SUCCESS) return null;
         return ref;
+    }
+
+    /// The URI of the OSC 8 hyperlink at a viewport cell, or "" if there is none or it does not fit `out`
+    /// (a cut-off URL must never be opened). Valid until `out` is reused.
+    pub fn hyperlinkAt(self: *Terminal, col: u16, row: u16, out: []u8) []const u8 {
+        const at = self.clampCell(col, row);
+        const ref = self.gridRef(c.GHOSTTY_POINT_TAG_VIEWPORT, at.col, at.row) orelse return "";
+        var n: usize = 0;
+        if (c.ghostty_grid_ref_hyperlink_uri(&ref, out.ptr, out.len, &n) != c.GHOSTTY_SUCCESS) return "";
+        return out[0..n];
+    }
+
+    /// Changes whether a program may write the clipboard (config reload).
+    pub fn setClipboardWrite(self: *Terminal, allow: bool) void {
+        self.allow_clipboard_write = allow;
     }
 
     fn clampCell(self: *Terminal, col: u16, row: u16) struct { col: u16, row: u16 } {
@@ -786,6 +882,12 @@ const Spy = struct {
     reply_len: usize = 0,
     bells: u32 = 0,
     titles: u32 = 0,
+    clip: [256]u8 = undefined,
+    clip_len: usize = 0,
+    clips: u32 = 0,
+    note: [256]u8 = undefined,
+    note_len: usize = 0,
+    notes: u32 = 0,
 
     fn from(ctx: ?*anyopaque) *Spy {
         return @ptrCast(@alignCast(ctx.?));
@@ -801,8 +903,20 @@ const Spy = struct {
     fn titleChanged(ctx: ?*anyopaque) void {
         from(ctx).titles += 1;
     }
+    fn clipboardWrite(ctx: ?*anyopaque, text: []const u8) void {
+        const self = from(ctx);
+        @memcpy(self.clip[0..text.len], text);
+        self.clip_len = text.len;
+        self.clips += 1;
+    }
+    /// Recorded as "title|body".
+    fn notify(ctx: ?*anyopaque, title: []const u8, body: []const u8) void {
+        const self = from(ctx);
+        self.note_len = (std.fmt.bufPrint(&self.note, "{s}|{s}", .{ title, body }) catch unreachable).len;
+        self.notes += 1;
+    }
     fn callbacks(self: *Spy) Callbacks {
-        return .{ .ctx = self, .write_pty = writePty, .bell = bell, .title_changed = titleChanged };
+        return .{ .ctx = self, .write_pty = writePty, .bell = bell, .title_changed = titleChanged, .clipboard_write = clipboardWrite, .notify = notify };
     }
     fn replyText(self: *const Spy) []const u8 {
         return self.replies[0..self.reply_len];
@@ -838,6 +952,60 @@ test "cursor position report goes to write_pty" {
     defer t2.deinit();
     t2.write("ab\x1b[6n");
     try std.testing.expectEqualStrings("\x1b[1;3R", spy2.replyText());
+}
+
+test "OSC 52 write reaches the clipboard callback, for the standard clipboard only" {
+    var spy: Spy = .{};
+    const t = try Terminal.init(std.testing.allocator, .{ .callbacks = spy.callbacks() });
+    defer t.deinit();
+    t.write("\x1b]52;c;aGVsbG8=\x07"); // "hello"
+    try std.testing.expectEqualStrings("hello", spy.clip[0..spy.clip_len]);
+    t.write("\x1b]52;p;d29ybGQ=\x07"); // the primary selection: macOS has none, so it is not written to the clipboard
+    try std.testing.expectEqual(@as(u32, 1), spy.clips);
+}
+
+test "OSC 52 write is refused by policy, and a read is never answered" {
+    var spy: Spy = .{};
+    const t = try Terminal.init(std.testing.allocator, .{ .callbacks = spy.callbacks(), .allow_clipboard_write = false });
+    defer t.deinit();
+    t.write("\x1b]52;c;aGVsbG8=\x07");
+    try std.testing.expectEqual(@as(u32, 0), spy.clips);
+    t.setClipboardWrite(true);
+    t.write("\x1b]52;c;aGVsbG8=\x07");
+    try std.testing.expectEqual(@as(u32, 1), spy.clips);
+    t.write("\x1b]52;c;?\x07"); // a program asking for the clipboard's contents
+    try std.testing.expectEqual(@as(usize, 0), spy.reply_len);
+}
+
+test "OSC 9 and OSC 777 raise a desktop notification" {
+    var spy: Spy = .{};
+    const t = try Terminal.init(std.testing.allocator, .{ .callbacks = spy.callbacks() });
+    defer t.deinit();
+    t.write("\x1b]9;Build done\x07");
+    try std.testing.expectEqualStrings("|Build done", spy.note[0..spy.note_len]);
+    t.write("\x1b]777;notify;Claude;Needs approval\x07");
+    try std.testing.expectEqualStrings("Claude|Needs approval", spy.note[0..spy.note_len]);
+    try std.testing.expectEqual(@as(u32, 2), spy.notes);
+}
+
+test "cleanText drops controls and bidi overrides, keeps Arabic, and cuts at a character boundary" {
+    var out: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("ab c", cleanText(&out, "a\x1bb\n\u{202e}c"));
+    try std.testing.expectEqualStrings("مرحبا\u{200f} 1", cleanText(&out, "مرحبا\u{200f} 1\x07")); // the direction mark stays
+    var small: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("aaa", cleanText(&small, "aaa\u{20ac}")); // the 3-byte character does not fit: dropped whole
+    try std.testing.expectEqualStrings("", cleanText(&small, "\x1b"));
+}
+
+test "hyperlinkAt finds the URI of an OSC 8 link, and nothing elsewhere" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write("\x1b]8;;https://example.com/a\x1b\\link\x1b]8;;\x1b\\ plain");
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("https://example.com/a", t.hyperlinkAt(1, 0, &buf));
+    try std.testing.expectEqualStrings("", t.hyperlinkAt(7, 0, &buf)); // "plain"
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("", t.hyperlinkAt(1, 0, &tiny)); // too long for the buffer: never a cut-off URL
 }
 
 test "a new terminal starts with its field defaults" {

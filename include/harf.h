@@ -26,6 +26,11 @@ typedef struct {
     void (*title)(void *ctx);
     void (*bell)(void *ctx);
     void (*exited)(void *ctx, int status);
+    /* OSC 52: UTF-8 text a program put on the clipboard (no NUL, borrowed for the call). Only called when the policy
+     * (harf_term_set_clipboard_write) allows it, and only for the standard clipboard. */
+    void (*clipboard_write)(void *ctx, const uint8_t *text, size_t len);
+    /* OSC 9 / 777: untrusted UTF-8 title (may be empty) and body, borrowed for the call. */
+    void (*notify)(void *ctx, const uint8_t *title, size_t title_len, const uint8_t *body, size_t body_len);
 } HarfTermCallbacks;
 
 /* argv: NULL-terminated program and arguments (argv[0] is the path), or NULL for the login shell.
@@ -88,6 +93,11 @@ int harf_term_focus(HarfTerm *t, int focused);
 /* A left-button selection gesture at a pixel of the grid (use it when harf_term_mouse returned 0).
  * phase: 0 press, 1 drag, 2 release. click_count: 1, 2 (word) or 3 (line). 0 = ok. */
 int harf_term_selection_event(HarfTerm *t, HarfPainter *p, int phase, int click_count, uint32_t mods, double x_px, double y_px);
+/* The OSC 8 hyperlink under a pixel of the grid: copies its URI (no NUL) into out and returns its length, or 0 if there is
+ * none or it does not fit cap. */
+size_t harf_term_hyperlink_at(HarfTerm *t, HarfPainter *p, double x_px, double y_px, uint8_t *out, size_t cap);
+/* Whether a program may write the clipboard with OSC 52 (1 yes, 0 no; the default is yes). Reading is never allowed. */
+void harf_term_set_clipboard_write(HarfTerm *t, int allow);
 /* The selected text as UTF-8 in logical order, or NULL if nothing is selected; *len is its length. Free with harf_free. */
 uint8_t *harf_term_selection_text(HarfTerm *t, size_t *len);
 void harf_free(void *p);
