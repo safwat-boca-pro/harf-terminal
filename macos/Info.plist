@@ -5,6 +5,7 @@
     <key>CFBundleName</key><string>Harf</string>
     <key>CFBundleDisplayName</key><string>Harf</string>
     <key>CFBundleIdentifier</key><string>app.harf.Harf</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleExecutable</key><string>Harf</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.0.1</string>
