@@ -88,6 +88,10 @@ pub const Wide = enum { narrow, wide, spacer_tail, spacer_head };
 /// One grid cell: its codepoints (base plus combining marks) and its width role.
 pub const Cell = struct { cps: []const u21, wide: Wide, style: Style = .{}, selected: bool = false };
 
+fn toCColor(rgb: Rgb) c.GhosttyColorRgb {
+    return .{ .r = rgb.r, .g = rgb.g, .b = rgb.b };
+}
+
 fn check(r: c.GhosttyResult) Error!void {
     if (r == c.GHOSTTY_SUCCESS) return;
     if (r == c.GHOSTTY_OUT_OF_MEMORY) return error.OutOfMemory;
@@ -194,6 +198,12 @@ fn notificationTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, n: [*c]const c.
     f(self.callbacks.ctx, title, body);
 }
 
+fn colorSchemeTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque, out: *c.GhosttyColorScheme) callconv(.c) bool {
+    const self: *Terminal = @ptrCast(@alignCast(ud.?));
+    out.* = if (self.dark_scheme) c.GHOSTTY_COLOR_SCHEME_DARK else c.GHOSTTY_COLOR_SCHEME_LIGHT;
+    return true;
+}
+
 fn titleTrampoline(_: c.GhosttyTerminal, ud: ?*anyopaque) callconv(.c) void {
     const self: *Terminal = @ptrCast(@alignCast(ud.?));
     if (self.callbacks.title_changed) |f| f(self.callbacks.ctx);
@@ -219,6 +229,10 @@ pub const Terminal = struct {
     mouse_encoder: c.GhosttyMouseEncoder,
     mouse_event: c.GhosttyMouseEvent,
     allow_clipboard_write: bool = true,
+    /// The library's own 256-color palette, read once: a theme sets 16 of its colors over it.
+    builtin_palette: [256]c.GhosttyColorRgb = undefined,
+    /// The system appearance the program is told about (CSI ? 996 n, mode 2031).
+    dark_scheme: bool = true,
     /// One cell in pixels (width, height) as of the last `resize`; 0 until then.
     cell_px: [2]u32 = .{ 0, 0 },
     /// Colors as of the last `update`.
@@ -252,6 +266,8 @@ pub const Terminal = struct {
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_RENDER_HOLD, @as(?*const anyopaque, @ptrCast(&renderHoldTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, @as(?*const anyopaque, @ptrCast(&clipboardWriteTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION, @as(?*const anyopaque, @ptrCast(&notificationTrampoline))));
+        try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_COLOR_SCHEME, @as(?*const anyopaque, @ptrCast(&colorSchemeTrampoline))));
+        try check(c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT, &self.builtin_palette));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_XTVERSION, @as(?*const anyopaque, @ptrCast(&xtversionTrampoline))));
         try check(c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_SIZE, @as(?*const anyopaque, @ptrCast(&sizeTrampoline))));
         var fg: c.GhosttyColorRgb = .{ .r = opts.default_fg.r, .g = opts.default_fg.g, .b = opts.default_fg.b };
@@ -419,6 +435,38 @@ pub const Terminal = struct {
         const ref = self.gridRef(c.GHOSTTY_POINT_TAG_VIEWPORT, at.col, at.row) orelse return "";
         var n: usize = 0;
         if (c.ghostty_grid_ref_hyperlink_uri(&ref, out.ptr, out.len, &n) != c.GHOSTTY_SUCCESS) return "";
+        return out[0..n];
+    }
+
+    /// A theme: the default foreground and background, the cursor color (null: the program's or the foreground), and the 16 ANSI
+    /// colors it sets (null keeps the built-in color). Everything else in the 256-color palette stays the library's own.
+    pub fn setTheme(self: *Terminal, fg: Rgb, bg: Rgb, cursor_color: ?Rgb, ansi: [16]?Rgb) void {
+        var f = toCColor(fg);
+        var b = toCColor(bg);
+        _ = c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &f);
+        _ = c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &b);
+        if (cursor_color) |cu| {
+            var cc = toCColor(cu);
+            _ = c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, &cc);
+        } else _ = c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, @as(?*const anyopaque, null));
+        var pal = self.builtin_palette;
+        for (ansi, 0..) |o, i| {
+            if (o) |col| pal[i] = toCColor(col);
+        }
+        _ = c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, &pal);
+    }
+
+    /// The system appearance changed. If the program asked to hear about it (mode 2031) and it differs from what it was last
+    /// told, returns the report to send it (written into `out`); otherwise an empty slice.
+    pub fn setScheme(self: *Terminal, dark: bool, out: *[16]u8) []const u8 {
+        const changed = dark != self.dark_scheme;
+        self.dark_scheme = dark;
+        if (!changed) return "";
+        var cfg: c.GhosttyTerminalModeConfig = .{ .mode = c.ghostty_mode_new(2031, false), .value = false };
+        _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_MODE, &cfg);
+        if (!cfg.value) return "";
+        var n: usize = 0;
+        if (c.ghostty_color_scheme_report_encode(if (dark) c.GHOSTTY_COLOR_SCHEME_DARK else c.GHOSTTY_COLOR_SCHEME_LIGHT, out, out.len, &n) != c.GHOSTTY_SUCCESS) return "";
         return out[0..n];
     }
 
@@ -1006,6 +1054,48 @@ test "hyperlinkAt finds the URI of an OSC 8 link, and nothing elsewhere" {
     try std.testing.expectEqualStrings("", t.hyperlinkAt(7, 0, &buf)); // "plain"
     var tiny: [4]u8 = undefined;
     try std.testing.expectEqualStrings("", t.hyperlinkAt(1, 0, &tiny)); // too long for the buffer: never a cut-off URL
+}
+
+test "setTheme changes the default colors, the 16 ANSI colors and what a program is told, and keeps the rest of the palette" {
+    var spy: Spy = .{};
+    const t = try Terminal.init(std.testing.allocator, .{ .callbacks = spy.callbacks() });
+    defer t.deinit();
+    _ = t.update();
+    const before_20 = t.paletteColor(20);
+    const before_2 = t.paletteColor(2);
+    var ansi: [16]?Rgb = @splat(null);
+    ansi[1] = .{ .r = 0xdc, .g = 0x32, .b = 0x2f };
+    t.setTheme(.{ .r = 0x83, .g = 0x94, .b = 0x96 }, .{ .r = 0x11, .g = 0x22, .b = 0x33 }, .{ .r = 0xff, .g = 0, .b = 0 }, ansi);
+    _ = t.update();
+    try std.testing.expectEqual(Rgb{ .r = 0x83, .g = 0x94, .b = 0x96 }, t.colors().fg);
+    try std.testing.expectEqual(Rgb{ .r = 0x11, .g = 0x22, .b = 0x33 }, t.colors().bg);
+    try std.testing.expectEqual(Rgb{ .r = 0xff, .g = 0, .b = 0 }, t.colors().cursor.?);
+    try std.testing.expectEqual(Rgb{ .r = 0xdc, .g = 0x32, .b = 0x2f }, t.paletteColor(1));
+    try std.testing.expectEqual(before_2, t.paletteColor(2)); // not set by the theme: the built-in color
+    try std.testing.expectEqual(before_20, t.paletteColor(20));
+    t.write("\x1b]11;?\x07"); // a program asking for the background (Codex does at start-up)
+    try std.testing.expectEqualStrings("\x1b]11;rgb:1111/2222/3333\x07", spy.replyText());
+    // setting a theme again starts from the built-in palette, not from the previous theme
+    t.setTheme(.{ .r = 1, .g = 1, .b = 1 }, .{ .r = 2, .g = 2, .b = 2 }, null, @splat(null));
+    _ = t.update();
+    try std.testing.expect(t.colors().cursor == null);
+    try std.testing.expect(!std.meta.eql(Rgb{ .r = 0xdc, .g = 0x32, .b = 0x2f }, t.paletteColor(1)));
+}
+
+test "the color scheme is answered to a query and reported on change only to a program that asked" {
+    var spy: Spy = .{};
+    const t = try Terminal.init(std.testing.allocator, .{ .callbacks = spy.callbacks() });
+    defer t.deinit();
+    t.write("\x1b[?996n");
+    try std.testing.expectEqualStrings("\x1b[?997;1n", spy.replyText()); // dark is the default
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("", t.setScheme(false, &buf)); // mode 2031 is off: nothing to tell
+    spy.reply_len = 0;
+    t.write("\x1b[?996n");
+    try std.testing.expectEqualStrings("\x1b[?997;2n", spy.replyText());
+    t.write("\x1b[?2031h");
+    try std.testing.expectEqualStrings("\x1b[?997;1n", t.setScheme(true, &buf));
+    try std.testing.expectEqualStrings("", t.setScheme(true, &buf)); // no change, no report
 }
 
 test "a new terminal starts with its field defaults" {

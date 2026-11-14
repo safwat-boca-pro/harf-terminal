@@ -583,6 +583,48 @@ func selfTest() -> Never {
     if win1.title != "T1" { fail("title is '\(win1.title)'") }
     if bells != 1 { fail("bell count is \(bells)") }
 
+    // 2i. Configuration, through the app's own path: a config file sets the font and the theme (the core is told, so a program's
+    // colour query gets the new colours), a key binding intercepts a key, a theme file is read, a bad line is a warning, and
+    // saving the file changes the settings with no restart (file watching).
+    do {
+        let tmp = NSTemporaryDirectory() + "harf-selftest-config-\(getpid())"
+        let fm = FileManager.default
+        try? fm.removeItem(atPath: tmp)
+        try? fm.createDirectory(atPath: tmp + "/themes", withIntermediateDirectories: true)
+        defer { try? fm.removeItem(atPath: tmp) }
+        func write(_ name: String, _ text: String, atomically: Bool = false) { try? text.write(toFile: tmp + "/" + name, atomically: atomically, encoding: .utf8) }
+        write("themes/mine", "background = #102030\nforeground = #a0b0c0\npalette = 1=#ff0000\n")
+        write("config", "font_size = 20\ntheme = mine\nclipboard_write = deny\nnotifications = off\nkeybind = option+left = send:X\nbogus line\n")
+        let plainCell = TerminalController(argv: ["/bin/sh", "-c", "sleep 1"], frame: NSSize(width: 700, height: 420))?.cellSizePt
+        Settings.shared.load(directory: tmp)
+        if Settings.shared.fontPt != 20 { fail("config: font size is \(Settings.shared.fontPt)") }
+        if Settings.shared.warnings.count != 1 || !Settings.shared.warnings[0].contains("line 6") { fail("config: warnings are \(Settings.shared.warnings)") }
+        if Settings.shared.notifications != 2 || Settings.shared.clipboardWrite { fail("config: notifications \(Settings.shared.notifications), clipboard \(Settings.shared.clipboardWrite)") }
+        let script = "stty raw -echo; printf R; head -c 1 | od -An -c"
+        guard let c = TerminalController(argv: ["/bin/sh", "-c", script], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the config session") }
+        if let plain = plainCell, !(c.cellSizePt.width > plain.width * 1.3) { fail("config: font_size = 20 did not enlarge the cell (\(c.cellSizePt) against \(plain))") }
+        guard let bg = c.defaultBackground() else { fail("config: no background") }
+        if abs(bg.redComponent - 0x10 / 255.0) > 0.01 || abs(bg.greenComponent - 0x20 / 255.0) > 0.01 || abs(bg.blueComponent - 0x30 / 255.0) > 0.01 { fail("config: the theme file's background is \(bg)") }
+        if !pump(5, until: { c.rowText(0).contains("R") }) { fail("config: child not ready '\(c.rowText(0))'") }
+        c.view.keyDown(with: keyEvent(123, "\u{F702}", [.option, .numericPad, .function]))   // bound: sends X, not the editing key's ESC b
+        if !pump(5, until: { (0..<3).contains { c.rowText($0).dropFirst().contains("X") } }) { fail("config: the binding sent '\((0..<3).map { c.rowText($0) })'") }
+        c.close()
+        // saving the file (in place, then replaced) is seen without a restart
+        write("config", "font_size = 11\ntheme = mine\n")
+        if !pump(5, until: { Settings.shared.fontPt == 11 }) { fail("config: an edit in place was not noticed (font size \(Settings.shared.fontPt))") }
+        write("config", "font_size = 13\ntheme = mine\n", atomically: true)
+        if !pump(5, until: { Settings.shared.fontPt == 13 }) { fail("config: a replaced file was not noticed (font size \(Settings.shared.fontPt))") }
+        write("themes/mine", "background = #405060\n")
+        let live = TerminalController(argv: ["/bin/sh", "-c", "sleep 3"], frame: NSSize(width: 700, height: 420))
+        if !pump(5, until: { (live?.defaultBackground()?.redComponent ?? 0) > 0.2 }) { fail("config: a changed theme file did not reach a running terminal") }
+        live?.close()
+        // back to the built-in defaults for the rest of the run
+        let empty = tmp + "/empty"
+        try? fm.createDirectory(atPath: empty, withIntermediateDirectories: true)
+        Settings.shared.load(directory: empty)
+        if Settings.shared.fontPt != 14 || !Settings.shared.clipboardWrite { fail("config: an empty directory did not give the defaults") }
+    }
+
     // 5. A failing shell keeps its window and says so.
     guard let bad = TerminalController(argv: ["/bin/sh", "-c", "echo boom; exit 3"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start failing session") }
     let win2 = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)

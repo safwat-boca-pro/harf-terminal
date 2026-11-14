@@ -58,6 +58,8 @@ pub extern fn CTFontCreateWithName(name: *const CFString, size: CGFloat, matrix:
 pub extern fn CTFontCreateUIFontForLanguage(ui_type: u32, size: CGFloat, language: ?*const CFString) ?*CTFont;
 pub const trait_italic: u32 = 1 << 0; // kCTFontTraitItalic
 pub const trait_bold: u32 = 1 << 1; // kCTFontTraitBold
+pub const trait_monospace: u32 = 1 << 10; // kCTFontTraitMonoSpace
+pub extern fn CTFontGetSymbolicTraits(font: *const CTFont) u32;
 pub extern fn CTFontCreateCopyWithSymbolicTraits(font: *const CTFont, size: CGFloat, matrix: ?*const anyopaque, value: u32, mask: u32) ?*CTFont;
 pub extern fn CTFontCreateForString(current: *const CTFont, string: *const CFString, range: CFRange) ?*CTFont;
 pub extern fn CTFontCopyFullName(font: *const CTFont) ?*const CFString;

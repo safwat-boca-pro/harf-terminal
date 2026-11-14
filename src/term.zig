@@ -517,6 +517,41 @@ pub const Session = struct {
         if (self.callbacks.notify) |f| f(self.callbacks.ctx, heading, body);
     }
 
+    /// Clear screen: the screen and the scrollback are emptied here, then Ctrl+L is typed so a shell redraws its prompt at the
+    /// top. A full-screen program (the alternate screen) owns its screen, so nothing happens then.
+    pub fn clearScreen(self: *Session) void {
+        {
+            const t = self.lock();
+            defer self.unlock();
+            if (t.onAlternateScreen()) return;
+            t.write("\x1b[H\x1b[2J\x1b[3J");
+        }
+        self.requestWake();
+        self.typeText("\x0c") catch {};
+    }
+
+    /// A theme (colors, see `vt.Terminal.setTheme`); the view is woken to redraw.
+    pub fn setTheme(self: *Session, fg: vt.Rgb, bg: vt.Rgb, cursor_color: ?vt.Rgb, ansi: [16]?vt.Rgb) void {
+        {
+            const t = self.lock();
+            defer self.unlock();
+            t.setTheme(fg, bg, cursor_color, ansi);
+        }
+        self.requestWake();
+    }
+
+    /// The system appearance changed: a program that asked (mode 2031) is told.
+    pub fn setScheme(self: *Session, dark: bool) void {
+        var buf: [16]u8 = undefined;
+        var n: usize = 0;
+        {
+            const t = self.lock();
+            defer self.unlock();
+            n = t.setScheme(dark, &buf).len;
+        }
+        if (n > 0) self.input(buf[0..n]) catch {};
+    }
+
     /// Changes whether a program may write the clipboard (config reload).
     pub fn setClipboardWrite(self: *Session, allow: bool) void {
         const t = self.lock();
@@ -825,6 +860,37 @@ test "key: a release reaches a program that asked for event types, and only that
     try std.testing.expect(!try l.key(126, 0, "", 0, .release));
     try std.testing.expect(try l.key(126, 0, "", 0, .press));
     try std.testing.expect(hexOf(l, "1b 5b 41"));
+}
+
+test "clearScreen empties the screen and the scrollback, types Ctrl+L, and leaves a full-screen program alone" {
+    const script = "seq 1 60; stty raw -echo; echo ready; dd bs=1 count=1 2>/dev/null | od -An -tx1";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    {
+        const t = s.lock();
+        defer s.unlock();
+        try std.testing.expect(t.scrollbackRows() > 0);
+    }
+    s.clearScreen();
+    try std.testing.expect(hexOf(s, "0c")); // the shell's prompt redraw key reached the child
+    const t = s.lock();
+    defer s.unlock();
+    try std.testing.expectEqual(@as(usize, 0), t.scrollbackRows());
+    var buf: [200]u8 = undefined;
+    for (0..t.size().rows) |r| try std.testing.expect(std.mem.indexOf(u8, t.rowText(@intCast(r), &buf), "ready") == null);
+
+    // the alternate screen belongs to the program: nothing is cleared and nothing is typed
+    const alt = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf '\\033[?1049hINALT'; stty raw -echo; echo; dd bs=1 count=1 2>/dev/null | od -An -tx1" } });
+    defer alt.deinit();
+    try std.testing.expect(hexOf(alt, "INALT"));
+    alt.clearScreen();
+    sleepMs(300);
+    try std.testing.expectEqual(@as(usize, 0), alt.pendingInput());
+    const at = alt.lock();
+    defer alt.unlock();
+    var b2: [200]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, at.rowText(0, &b2), "INALT") != null);
 }
 
 test "key: Ctrl letters follow the layout, not the physical key" {

@@ -6,7 +6,11 @@ import UserNotifications
 @MainActor
 enum Notifier {
     static func post(title: String, body: String, from window: NSWindow?) {
-        if NSApp.isActive, window?.isKeyWindow == true { return }
+        switch Settings.shared.notifications {
+        case 2: return                                                     // off
+        case 1: break                                                      // always
+        default: if NSApp.isActive, window?.isKeyWindow == true { return } // unfocused: the user is already looking at it
+        }
         guard Bundle.main.bundleIdentifier != nil else { return }   // not running as an app bundle: no notification center
         let heading = title.isEmpty ? "Harf" : title
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in   // asks once; later calls just answer

@@ -98,7 +98,9 @@ final class TerminalController {
     private var retainedTarget: Unmanaged<CallbackTarget>?
     private(set) var scale: CGFloat
     private var cellPx = (w: CGFloat(8), h: CGFloat(16))
-    private let fontPt: CGFloat = 14
+    private var fontPt: CGFloat { Settings.shared.fontPt }
+    /// The font the painter was made for, so a reload that changes only colors keeps the painter and its caches.
+    private var paintedFont = (family: "", pt: CGFloat(0), scale: CGFloat(0))
     private let inset: CGFloat = 6
     private(set) var gridSize = (cols: 0, rows: 0)
     /// Cell size and grid inset in points, for the self-test.
@@ -134,12 +136,46 @@ final class TerminalController {
         term = cstrs.withUnsafeBufferPointer { buf -> OpaquePointer? in
             let argvPtr = UnsafeMutablePointer(mutating: buf.baseAddress!)
             return argvPtr.withMemoryRebound(to: UnsafePointer<CChar>?.self, capacity: buf.count) { p in
-                harf_term_new(UInt16(size.cols), UInt16(size.rows), 1 << 20, argv == nil ? nil : p, &cb)
+                harf_term_new(UInt16(size.cols), UInt16(size.rows), Settings.shared.scrollbackBytes, argv == nil ? nil : p, &cb)
             }
         }
         guard term != nil else { return nil }
         gridSize = size
         view.controller = self
+        Settings.shared.register(self)
+        applyTheme()
+        if let t = term { harf_term_set_clipboard_write(t, Settings.shared.clipboardWrite ? 1 : 0) }
+    }
+
+    /// The configuration changed (or the font size did): a new font, theme and policies, and the grid refit to the new cell size.
+    func applySettings() {
+        guard let t = term else { return }
+        if paintedFont.family != Settings.shared.fontFamily || paintedFont.pt != fontPt { makePainter() }
+        applyTheme()
+        harf_term_set_clipboard_write(t, Settings.shared.clipboardWrite ? 1 : 0)
+        layoutChanged(force: true)
+    }
+
+    /// The theme for the system's current appearance goes to the core, which also tells a program that asked (mode 2031).
+    /// With no configuration loaded the terminal keeps its built-in dark colors.
+    func applyTheme() {
+        guard let t = term else { return }
+        if var theme = Settings.shared.theme() { _ = harf_term_set_theme(t, &theme) }
+        harf_term_set_scheme(t, Settings.shared.isDark ? 1 : 0)
+        view.needsDisplay = true
+    }
+
+    /// An action that works on this terminal. False if it is not one (the app handles it, or it does not exist).
+    func perform(_ action: String, arg: [UInt8]) -> Bool {
+        guard let t = term else { return false }
+        switch action {
+        case "copy": copySelection()
+        case "paste": if let s = NSPasteboard.general.string(forType: .string) { paste(s) }
+        case "clear": harf_term_clear(t)
+        case "send": _ = arg.withUnsafeBufferPointer { harf_term_input(t, $0.baseAddress, arg.count) }
+        default: return false
+        }
+        return true
     }
 
     /// Stops the session. Safe to call twice. No callback runs after it returns.
@@ -163,9 +199,17 @@ final class TerminalController {
 
     @discardableResult
     private func makePainter() -> Bool {
-        if let p = painter { harf_painter_free(p) }
-        painter = harf_painter_new(Float(fontPt * scale))
-        guard let p = painter else { return false }
+        let family = Settings.shared.fontFamily
+        let size = Float(fontPt * scale)
+        var made = harf_painter_new_font(family, size)
+        if made == nil {
+            if family != "Menlo" { FileHandle.standardError.write(Data("harf: font_family '\(family)' is not an installed monospaced font; using Menlo\n".utf8)) }
+            made = harf_painter_new(size)
+        }
+        guard let p = made else { return false }
+        if let old = painter { harf_painter_free(old) }
+        painter = p
+        paintedFont = (family, fontPt, scale)
         var m = HarfCellMetrics()
         harf_painter_metrics(p, &m)
         cellPx = (CGFloat(m.cell_w), CGFloat(m.cell_h))
@@ -180,14 +224,14 @@ final class TerminalController {
     }
 
     /// The view's size or backing scale changed: refit the grid and tell the session.
-    func layoutChanged(scale newScale: CGFloat? = nil) {
+    func layoutChanged(scale newScale: CGFloat? = nil, force: Bool = false) {
         guard let t = term else { return }
         if let s = newScale, s != scale {
             scale = s
             makePainter()
         }
         let size = fitGrid(view.bounds.size)
-        if size.cols != gridSize.cols || size.rows != gridSize.rows || newScale != nil {
+        if size.cols != gridSize.cols || size.rows != gridSize.rows || newScale != nil || force {
             gridSize = size
             harf_term_resize(t, UInt16(size.cols), UInt16(size.rows), UInt32(cellPx.w), UInt32(cellPx.h))
         }
@@ -428,7 +472,20 @@ final class TerminalView: NSView {
         return (text, event.characters(byApplyingModifiers: [])?.unicodeScalars.first?.value ?? 0)
     }
 
+    /// A key the configuration binds (Command shortcuts, `send:` remaps) runs its action and never reaches the program. This
+    /// runs before the main menu sees the key, so a binding wins over a menu shortcut.
+    private func runBinding(_ event: NSEvent) -> Bool {
+        guard let t = Trigger(event), let b = Settings.shared.bindings[t] else { return false }
+        if controller?.perform(b.action, arg: b.arg) == true { return true }   // copy, paste, clear, send: this terminal's own
+        return (NSApp.delegate as? AppDelegate)?.perform(b.action, b.arg, from: controller) ?? false
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        event.type == .keyDown && runBinding(event) ? true : super.performKeyEquivalent(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
+        if runBinding(event) { return }
         let k = keyText(event)
         handleKey(code: event.keyCode, mods: Self.harfMods(event.modifierFlags), characters: k.text, unshifted: k.unshifted,
                   isRepeat: event.isARepeat) { interpretKeyEvents([event]) }

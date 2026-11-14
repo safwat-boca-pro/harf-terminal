@@ -1,4 +1,5 @@
 import AppKit
+import CHarf
 
 /// Connects a controller's events to its window: title, bell, and what happens when the shell exits.
 @MainActor
@@ -28,22 +29,6 @@ final class WindowBinding: NSObject, NSWindowDelegate {
     }
 }
 
-@MainActor
-func installMainMenu() {
-    let main = NSMenu()
-    func add(_ title: String, _ items: [(String, Selector, String)]) {
-        let item = NSMenuItem()
-        main.addItem(item)
-        let menu = NSMenu(title: title)
-        for (t, sel, key) in items { menu.addItem(withTitle: t, action: sel, keyEquivalent: key) }
-        item.submenu = menu
-    }
-    add("Harf", [("Quit Harf", #selector(NSApplication.terminate(_:)), "q")])
-    add("Shell", [("Close Window", #selector(NSWindow.performClose(_:)), "w")])
-    add("Edit", [("Copy", #selector(TerminalView.copy(_:)), "c"), ("Paste", #selector(TerminalView.paste(_:)), "v")])
-    NSApp.mainMenu = main
-}
-
 /// The terminal's window, built the same way for the app and for the self-test.
 @MainActor
 func makeTerminalWindow(content: NSSize, view: NSView) -> NSWindow {
@@ -58,15 +43,88 @@ func makeTerminalWindow(content: NSSize, view: NSView) -> NSWindow {
     return window
 }
 
+/// What a menu item does: an action by name, as a key binding names it.
+final class ActionBox: NSObject {
+    let action: String
+    let arg: [UInt8]
+    init(_ action: String, _ arg: [UInt8] = []) {
+        self.action = action
+        self.arg = arg
+    }
+}
+
+/// The menus: title, then (item, action). Each item shows the shortcut the key bindings give its action.
+private let menuLayout: [(String, [(String, String)])] = [
+    ("Harf", [("Settings…", "open_config"), ("Reload Config", "reload_config"), ("Quit Harf", "quit")]),
+    ("Shell", [("Close", "close"), ("Clear", "clear")]),
+    ("Edit", [("Copy", "copy"), ("Paste", "paste")]),
+    ("View", [("Larger", "font_larger"), ("Smaller", "font_smaller"), ("Actual Size", "font_reset")]),
+]
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var binding: WindowBinding!
 
+    /// The terminal that has the keyboard, if one does.
+    func focusedController() -> TerminalController? {
+        (NSApp.keyWindow?.firstResponder as? TerminalView)?.controller
+    }
+
+    /// Runs an action named by a key binding or a menu item. Returns whether it was one.
+    @discardableResult
+    func perform(_ action: String, _ arg: [UInt8], from c: TerminalController?) -> Bool {
+        switch action {
+        case "quit": NSApp.terminate(nil)
+        case "open_config": Settings.shared.openConfigFile()
+        case "reload_config": Settings.shared.reload()
+        case "font_larger": Settings.shared.fontLarger()
+        case "font_smaller": Settings.shared.fontSmaller()
+        case "font_reset": Settings.shared.fontReset()
+        case "close": (c?.view.window ?? NSApp.keyWindow)?.performClose(nil)
+        default: return c?.perform(action, arg: arg) ?? false
+        }
+        return true
+    }
+
+    @objc func menuAction(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? ActionBox else { return }
+        perform(box.action, box.arg, from: focusedController())
+    }
+
+    /// Builds the menus from the key bindings, so a remapped shortcut shows in its menu.
+    func rebuildMenu() {
+        let main = NSMenu()
+        for (title, items) in menuLayout {
+            let top = NSMenuItem()
+            main.addItem(top)
+            let menu = NSMenu(title: title)
+            for (text, action) in items {
+                let mi = NSMenuItem(title: text, action: #selector(menuAction(_:)), keyEquivalent: "")
+                mi.target = self
+                mi.representedObject = ActionBox(action)
+                let shortcuts = Settings.shared.bindings.filter { $0.value.action == action && $0.key.key.unicodeScalars.count == 1 }
+                if let t = shortcuts.keys.min(by: { ($0.mods.nonzeroBitCount, $0.key) < ($1.mods.nonzeroBitCount, $1.key) }) {
+                    mi.keyEquivalent = t.key
+                    var mask: NSEvent.ModifierFlags = []
+                    if t.mods & UInt8(HARF_MOD_SHIFT) != 0 { mask.insert(.shift) }
+                    if t.mods & UInt8(HARF_MOD_CTRL) != 0 { mask.insert(.control) }
+                    if t.mods & UInt8(HARF_MOD_ALT) != 0 { mask.insert(.option) }
+                    if t.mods & UInt8(HARF_MOD_SUPER) != 0 { mask.insert(.command) }
+                    mi.keyEquivalentModifierMask = mask
+                }
+                menu.addItem(mi)
+            }
+            top.submenu = menu
+        }
+        NSApp.mainMenu = main
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         traceStep("applicationDidFinishLaunching")
-        installMainMenu()
-        traceStep("main menu installed")
+        rebuildMenu()
+        Settings.shared.load()   // before the first terminal exists, so its font, theme and scrollback are the configured ones
+        traceStep("main menu installed, configuration loaded")
         // Measurement hook (docs/perf.md): HARF_CONTENT_SIZE=WxH pins the window, e.g. 700x420 for the 80x24 class.
         var content = NSSize(width: 700, height: 420)
         if let s = ProcessInfo.processInfo.environment["HARF_CONTENT_SIZE"] {

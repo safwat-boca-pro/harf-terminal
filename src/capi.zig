@@ -4,6 +4,7 @@ const ct = @import("shape/ct.zig");
 const term = @import("term.zig");
 const vt = @import("vt.zig");
 const draw = @import("draw.zig");
+const config = @import("config.zig");
 
 /// Phase 0 smoke test. Returns 0x48415246 ("HARF").
 export fn harf_ping() u32 {
@@ -267,6 +268,11 @@ export fn harf_term_hyperlink_at(t: *HarfTerm, p: *draw.Painter, x_px: f64, y_px
     const cell = p.cellAt(g, x_px, y_px);
     const uri = g.hyperlinkAt(cell.col, cell.row, out[0..cap]);
     return uri.len;
+}
+
+/// Clear screen and scrollback, then type Ctrl+L so a shell redraws its prompt; does nothing on the alternate screen.
+export fn harf_term_clear(t: *HarfTerm) void {
+    t.session.clearScreen();
 }
 
 /// Whether a program may write the clipboard with OSC 52 (1 yes, 0 no). Reading it is never allowed.
@@ -570,6 +576,7 @@ test {
     _ = @import("rowlayout.zig");
     _ = @import("programs_test.zig");
     _ = @import("agents_spike_test.zig");
+    _ = @import("config.zig");
 }
 
 // ---- P4 gate measurement (HARF_BENCH=1): does drawing slow the parsing of a flood? ----
@@ -698,4 +705,152 @@ test "harf_term_dirty_rows reports changed rows, and a focus change dirties the 
     try std.testing.expectEqual(@as(u8, 0), out[5]);
     var tiny: [2]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 6), harf_term_dirty_rows(t, p, &tiny, tiny.len)); // a buffer too small to answer: the caller sees 6 > 2
+}
+
+// ---- Configuration (Phase 6): the file, themes and key bindings; the shell applies them ----
+
+/// Colors a theme sets. `palette_set` has bit i set when ANSI color i is given; the other colors stay the terminal's own.
+pub const HarfTheme = extern struct {
+    fg: [3]u8,
+    bg: [3]u8,
+    has_cursor: u8,
+    cursor: [3]u8,
+    palette_set: u16,
+    palette: [16][3]u8,
+};
+
+/// One key binding. `mods` uses the HARF_MOD_* bits; `key` is a lowercase character or a name (`left`, `return`, `f5`);
+/// `action` is the action's name (`new_tab`, `send`, ...); `arg` is the tab number as text for `goto_tab`, the bytes for `send`.
+pub const HarfKeybind = extern struct {
+    mods: u8,
+    arg_len: u8,
+    key: [16]u8,
+    action: [24]u8,
+    arg: [64]u8,
+};
+
+fn defaultConfigDir(buf: []u8) ?[]const u8 {
+    if (std.c.getenv("XDG_CONFIG_HOME")) |x| {
+        const v = std.mem.span(x);
+        if (v.len > 0) return std.fmt.bufPrint(buf, "{s}/harf", .{v}) catch null;
+    }
+    const home = std.c.getenv("HOME") orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/.config/harf", .{std.mem.span(home)}) catch null;
+}
+
+/// Reads the configuration in `dir` (a missing directory or file is an empty configuration), or in the default place
+/// (`$XDG_CONFIG_HOME/harf`, else `~/.config/harf`) when `dir` is NULL. Bad lines are warnings, never failures. Free with
+/// harf_config_free.
+export fn harf_config_load(dir: ?[*:0]const u8) ?*config.Config {
+    var buf: [1024]u8 = undefined;
+    const path = if (dir) |d| std.mem.span(d) else defaultConfigDir(&buf) orelse return null;
+    return config.load(std.heap.smp_allocator, path) catch null;
+}
+
+export fn harf_config_free(cfg: *config.Config) void {
+    cfg.deinit();
+}
+
+/// The directory the configuration was read from (NUL-terminated, valid until harf_config_free).
+export fn harf_config_dir(cfg: *config.Config) [*:0]const u8 {
+    return cfg.dir.ptr;
+}
+
+/// The text of a commented configuration file with every setting at its default (static, NUL-terminated).
+export fn harf_config_template() [*:0]const u8 {
+    return config.template;
+}
+
+export fn harf_config_font_family(cfg: *config.Config) [*:0]const u8 {
+    return cfg.font_family.ptr;
+}
+
+export fn harf_config_font_size(cfg: *config.Config) f32 {
+    return cfg.font_size;
+}
+
+export fn harf_config_scrollback_bytes(cfg: *config.Config) usize {
+    return cfg.scrollback_bytes;
+}
+
+export fn harf_config_clipboard_write(cfg: *config.Config) c_int {
+    return @intFromBool(cfg.clipboard_write);
+}
+
+/// 0 unfocused, 1 always, 2 off.
+export fn harf_config_notifications(cfg: *config.Config) c_int {
+    return @intFromEnum(cfg.notifications);
+}
+
+/// The theme for a dark (1) or light (0) system appearance.
+export fn harf_config_theme(cfg: *config.Config, dark: c_int, out: *HarfTheme) void {
+    const t = cfg.theme(dark != 0);
+    out.* = std.mem.zeroes(HarfTheme);
+    out.fg = .{ t.fg.r, t.fg.g, t.fg.b };
+    out.bg = .{ t.bg.r, t.bg.g, t.bg.b };
+    if (t.cursor) |c| {
+        out.has_cursor = 1;
+        out.cursor = .{ c.r, c.g, c.b };
+    }
+    for (t.palette, 0..) |p, i| if (p) |c| {
+        out.palette_set |= @as(u16, 1) << @intCast(i);
+        out.palette[i] = .{ c.r, c.g, c.b };
+    };
+}
+
+export fn harf_config_keybind_count(cfg: *config.Config) usize {
+    return cfg.keybinds.items.len;
+}
+
+/// Key binding `i` (0 on success, -1 if there is none). Later bindings replace earlier ones for the same trigger.
+export fn harf_config_keybind(cfg: *config.Config, i: usize, out: *HarfKeybind) c_int {
+    if (i >= cfg.keybinds.items.len) return -1;
+    const k = cfg.keybinds.items[i];
+    out.* = std.mem.zeroes(HarfKeybind);
+    out.mods = k.mods;
+    out.arg_len = @intCast(@min(k.arg.len, out.arg.len));
+    @memcpy(out.arg[0..out.arg_len], k.arg[0..out.arg_len]);
+    const key = k.key[0..@min(k.key.len, out.key.len - 1)];
+    @memcpy(out.key[0..key.len], key);
+    const name = @tagName(k.action);
+    @memcpy(out.action[0..name.len], name);
+    return 0;
+}
+
+export fn harf_config_warning_count(cfg: *config.Config) usize {
+    return cfg.warnings.items.len;
+}
+
+/// Warning `i` (NUL-terminated, valid until harf_config_free), or NULL.
+export fn harf_config_warning(cfg: *config.Config, i: usize) ?[*:0]const u8 {
+    if (i >= cfg.warnings.items.len) return null;
+    return cfg.warnings.items[i].ptr;
+}
+
+/// A theme's colors for this session: default foreground and background, cursor color, and the ANSI colors it sets. 0 = ok.
+export fn harf_term_set_theme(t: *HarfTerm, theme: *const HarfTheme) c_int {
+    var ansi: [16]?vt.Rgb = @splat(null);
+    for (0..16) |i| {
+        if (theme.palette_set & (@as(u16, 1) << @intCast(i)) != 0) ansi[i] = .{ .r = theme.palette[i][0], .g = theme.palette[i][1], .b = theme.palette[i][2] };
+    }
+    const cursor_color: ?vt.Rgb = if (theme.has_cursor != 0) .{ .r = theme.cursor[0], .g = theme.cursor[1], .b = theme.cursor[2] } else null;
+    t.session.setTheme(
+        .{ .r = theme.fg[0], .g = theme.fg[1], .b = theme.fg[2] },
+        .{ .r = theme.bg[0], .g = theme.bg[1], .b = theme.bg[2] },
+        cursor_color,
+        ansi,
+    );
+    return 0;
+}
+
+/// The system appearance, dark (1) or light (0): what `CSI ? 996 n` answers, and what a program that enabled mode 2031 is told
+/// when it changes.
+export fn harf_term_set_scheme(t: *HarfTerm, dark: c_int) void {
+    t.session.setScheme(dark != 0);
+}
+
+/// Like harf_painter_new in the font family `family` (UTF-8, NUL-terminated). NULL if the family is not installed or is not
+/// monospaced.
+export fn harf_painter_new_font(family: [*:0]const u8, size_px: f32) ?*draw.Painter {
+    return draw.Painter.initFamily(std.heap.smp_allocator, std.mem.span(family), size_px) catch null;
 }

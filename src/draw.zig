@@ -102,10 +102,17 @@ pub const Painter = struct {
     frame_key: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, size_px: f32) !*Painter {
-        const name = ct.cfString("Menlo") orelse return error.FontUnavailable;
+        return initFamily(gpa, "Menlo", size_px);
+    }
+
+    /// A painter in the font family `family`. CoreText substitutes a default font for a name it does not know, and a
+    /// proportional font would break the cell grid, so anything that is not monospaced is refused (`error.NotMonospace`).
+    pub fn initFamily(gpa: std.mem.Allocator, family: []const u8, size_px: f32) !*Painter {
+        const name = ct.cfString(family) orelse return error.FontUnavailable;
         defer ct.CFRelease(name);
         const font = ct.CTFontCreateWithName(name, size_px, null) orelse return error.FontUnavailable;
         errdefer ct.CFRelease(font);
+        if (ct.CTFontGetSymbolicTraits(font) & ct.trait_monospace == 0) return error.NotMonospace;
         const self = try gpa.create(Painter);
         const ch = [_]ct.UniChar{'M'};
         var g = [_]ct.CGGlyph{0};
@@ -731,6 +738,17 @@ const Canvas = struct {
         return false;
     }
 };
+
+test "initFamily accepts a monospaced font and refuses a proportional or unknown one" {
+    const gpa = std.testing.allocator;
+    const mono = try Painter.initFamily(gpa, "Menlo", 28);
+    mono.deinit();
+    const other = try Painter.initFamily(gpa, "Monaco", 28);
+    try std.testing.expect(other.metrics().cell_w > 0);
+    other.deinit();
+    try std.testing.expectError(error.NotMonospace, Painter.initFamily(gpa, "Helvetica", 28));
+    try std.testing.expectError(error.NotMonospace, Painter.initFamily(gpa, "NoSuchFontFamilyXYZ", 28));
+}
 
 const test_px: f32 = 28;
 
