@@ -106,6 +106,11 @@ int harf_term_selection_event(HarfTerm *t, HarfPainter *p, int phase, int click_
 /* The OSC 8 hyperlink under a pixel of the grid: copies its URI (no NUL) into out and returns its length, or 0 if there is
  * none or it does not fit cap. */
 size_t harf_term_hyperlink_at(HarfTerm *t, HarfPainter *p, double x_px, double y_px, uint8_t *out, size_t cap);
+/* The file path under a pixel (same convention): its length (0 = none, or it does not fit), and the :line and :col after it (0 when
+   absent). The file may not exist: the caller checks. */
+size_t harf_term_path_at(HarfTerm *t, HarfPainter *p, double x_px, double y_px, uint8_t *out, size_t cap, uint32_t *line, uint32_t *col);
+/* The plain http or https URL under a pixel: its length (0 = none, or it does not fit). */
+size_t harf_term_url_at(HarfTerm *t, HarfPainter *p, double x_px, double y_px, uint8_t *out, size_t cap);
 /* Starts a find for `needle` (UTF-8; ASCII letters match in either case) over the screen and scrollback; returns the number of
  * matches (an empty needle ends the find). Nothing is selected until harf_term_find_step. */
 size_t harf_term_find(HarfTerm *t, const uint8_t *needle, size_t len);

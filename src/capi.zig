@@ -335,6 +335,28 @@ export fn harf_term_hyperlink_at(t: *HarfTerm, p: *draw.Painter, x_px: f64, y_px
     return uri.len;
 }
 
+/// The file path under a pixel of the grid (device pixels, origin at its top-left): copies it (no NUL) into `out` and returns its
+/// length, or 0 if there is none or it does not fit `cap` (a cut-off path is never returned). `*line` and `*col` get the `:line`
+/// and `:col` that followed it (0 when absent). Whether the file exists is the caller's to check.
+export fn harf_term_path_at(t: *HarfTerm, p: *draw.Painter, x_px: f64, y_px: f64, out: [*]u8, cap: usize, line: *u32, col: *u32) usize {
+    const g = t.session.lock();
+    defer t.session.unlock();
+    const cell = p.cellAt(g, x_px, y_px);
+    const r = g.pathAt(cell.col, cell.row, out[0..cap]) orelse return 0;
+    line.* = r.line;
+    col.* = r.col;
+    return r.len;
+}
+
+/// The plain http or https URL under a pixel of the grid: copies it (no NUL) into `out` and returns its length, or 0 if there is
+/// none or it does not fit `cap`.
+export fn harf_term_url_at(t: *HarfTerm, p: *draw.Painter, x_px: f64, y_px: f64, out: [*]u8, cap: usize) usize {
+    const g = t.session.lock();
+    defer t.session.unlock();
+    const cell = p.cellAt(g, x_px, y_px);
+    return g.urlAt(cell.col, cell.row, out[0..cap]) orelse 0;
+}
+
 /// Clear the screen (and the scrollback if `scrollback` is not 0), then type Ctrl+L so a shell redraws its prompt. On the
 /// alternate screen nothing happens and it returns 0 (the key is the program's); otherwise 1.
 export fn harf_term_clear(t: *HarfTerm, scrollback: c_int) c_int {

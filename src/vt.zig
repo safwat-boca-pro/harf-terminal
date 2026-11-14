@@ -25,6 +25,38 @@ pub const Callbacks = struct {
     command: ?*const fn (ctx: ?*anyopaque, kind: CommandKind, exit_code: ?i32) void = null,
 };
 
+/// The most columns `pathAt` and `urlAt` look at in a row.
+const max_link_cols = 512;
+
+/// Where a file path is: the line and column a `:12:5` suffix names (0 when absent) and how many bytes of the caller's buffer it fills.
+pub const PathRef = struct { len: usize, line: u32, col: u32 };
+
+fn pathBoundary(cp: u21) bool {
+    return switch (cp) {
+        ' ', '\t', '"', '\'', '`', '<', '>', '(', ')', '[', ']', '{', '}', '|', ',', ';' => true,
+        else => false,
+    };
+}
+
+fn urlBoundary(cp: u21) bool {
+    return switch (cp) {
+        ' ', '\t', '"', '\'', '`', '<', '>' => true,
+        else => false,
+    };
+}
+
+fn startsWithNoCase(s: []const u8, prefix: []const u8) bool {
+    return s.len >= prefix.len and std.ascii.eqlIgnoreCase(s[0..prefix.len], prefix);
+}
+
+/// `rest:123` split into `rest` and 123: a colon and one to nine digits at the end, with something before the colon.
+fn splitNumber(s: []const u8) ?struct { rest: []const u8, num: u32 } {
+    var i = s.len;
+    while (i > 0 and std.ascii.isDigit(s[i - 1])) i -= 1;
+    if (i == s.len or s.len - i > 9 or i < 2 or s[i - 1] != ':') return null;
+    return .{ .rest = s[0 .. i - 1], .num = std.fmt.parseInt(u32, s[i..], 10) catch return null };
+}
+
 /// A paste over this many bytes is confirmed first (see `Terminal.pasteRisk`).
 pub const large_paste_bytes: usize = 100_000;
 
@@ -514,6 +546,111 @@ pub const Terminal = struct {
         var n: usize = 0;
         if (c.ghostty_grid_ref_hyperlink_uri(&ref, out.ptr, out.len, &n) != c.GHOSTTY_SUCCESS) return "";
         return out[0..n];
+    }
+
+    /// The run of cells around viewport cell (`col`, `row`) that `boundary` (on a cell's first codepoint) does not end, as UTF-8 in
+    /// `buf`, and the byte offset in it where the clicked cell's text starts. The second half of a wide character is the character.
+    /// Null if the cell is blank or a boundary, or the run does not fit `buf`.
+    fn tokenAt(self: *Terminal, col: u16, row: u16, comptime boundary: fn (u21) bool, buf: []u8) ?struct { text: []const u8, click: usize } {
+        const at = self.clampCell(col, row);
+        if (!self.update() or !self.selectRow(at.row)) return null;
+        var in_run: [max_link_cols]bool = @splat(false);
+        var spacer: [max_link_cols]bool = @splat(false);
+        const width: usize = @min(self.size().cols, max_link_cols);
+        if (width == 0) return null;
+        var cps: [16]u21 = undefined;
+        var i: usize = 0;
+        while (i < width and c.ghostty_render_state_row_cells_next(self.row_cells)) : (i += 1) {
+            const cl = self.readCell(&cps);
+            spacer[i] = cl.wide == .spacer_tail or cl.wide == .spacer_head;
+            in_run[i] = if (spacer[i]) i > 0 and in_run[i - 1] else cl.cps.len > 0 and !boundary(cl.cps[0]);
+        }
+        var click: usize = @min(at.col, width - 1);
+        while (click > 0 and spacer[click]) click -= 1;
+        if (!in_run[click]) return null;
+        var lo = click;
+        while (lo > 0 and in_run[lo - 1]) lo -= 1;
+        var hi = click;
+        while (hi + 1 < width and in_run[hi + 1]) hi += 1;
+        if (!self.selectRow(at.row)) return null;
+        var n: usize = 0;
+        var click_at: usize = 0;
+        var idx: usize = 0;
+        while (idx <= hi and c.ghostty_render_state_row_cells_next(self.row_cells)) : (idx += 1) {
+            if (idx < lo) continue;
+            const cl = self.readCell(&cps);
+            if (cl.wide == .spacer_tail or cl.wide == .spacer_head) continue;
+            if (idx == click) click_at = n;
+            for (cl.cps) |cp| {
+                const len = std.unicode.utf8CodepointSequenceLength(cp) catch continue;
+                if (n + len > buf.len) return null;
+                _ = std.unicode.utf8Encode(cp, buf[n..]) catch continue;
+                n += len;
+            }
+        }
+        return .{ .text = buf[0..n], .click = click_at };
+    }
+
+    /// The file path under a viewport cell and its `:line` and `:col` (0 when the text has none), copied into `out`: the run of cells
+    /// around the click that no quote, bracket, comma or space ends, minus trailing `.`, `:`, `!` and `?` (a sentence's or a compiler
+    /// message's). Null if there is no run, or the path does not fit `out` (a cut-off path is never returned). Whether the file
+    /// exists is the caller's to check.
+    pub fn pathAt(self: *Terminal, col: u16, row: u16, out: []u8) ?PathRef {
+        var buf: [1024]u8 = undefined;
+        const tok = self.tokenAt(col, row, pathBoundary, &buf) orelse return null;
+        var path = std.mem.trimEnd(u8, tok.text, ".:!?");
+        var line: u32 = 0;
+        var column: u32 = 0;
+        if (splitNumber(path)) |last| {
+            if (splitNumber(last.rest)) |first| {
+                path = first.rest;
+                line = first.num;
+                column = last.num;
+            } else {
+                path = last.rest;
+                line = last.num;
+            }
+        }
+        if (path.len == 0 or path.len > out.len) return null;
+        @memcpy(out[0..path.len], path);
+        return .{ .len = path.len, .line = line, .col = column };
+    }
+
+    /// The plain `http://` or `https://` URL under a viewport cell, copied into `out` (its length): from the last scheme at or
+    /// before the click to the end of the run that no space or quote ends, minus trailing punctuation and any closing bracket that
+    /// has no opening one inside the URL. Null if the click is before the URL's start, it is only a scheme, or it does not fit.
+    pub fn urlAt(self: *Terminal, col: u16, row: u16, out: []u8) ?usize {
+        var buf: [2048]u8 = undefined;
+        const tok = self.tokenAt(col, row, urlBoundary, &buf) orelse return null;
+        var start: ?usize = null;
+        var i: usize = 0;
+        while (i <= tok.click and i < tok.text.len) : (i += 1) {
+            if (startsWithNoCase(tok.text[i..], "https://") or startsWithNoCase(tok.text[i..], "http://")) start = i;
+        }
+        var url = tok.text[start orelse return null ..];
+        while (url.len > 0) {
+            const last = url[url.len - 1];
+            if (std.mem.indexOfScalar(u8, ".,;:!?", last) != null) {
+                url = url[0 .. url.len - 1];
+                continue;
+            }
+            if (last == ')' or last == ']' or last == '}') {
+                const open: u8 = switch (last) {
+                    ')' => '(',
+                    ']' => '[',
+                    else => '{',
+                };
+                if (std.mem.count(u8, url, &.{last}) > std.mem.count(u8, url, &.{open})) {
+                    url = url[0 .. url.len - 1];
+                    continue;
+                }
+            }
+            break;
+        }
+        const scheme_len: usize = if (startsWithNoCase(url, "https://")) 8 else 7;
+        if (url.len <= scheme_len or url.len > out.len) return null;
+        @memcpy(out[0..url.len], url);
+        return url.len;
     }
 
     /// A theme: the default foreground and background, the cursor color (null: the program's or the foreground), and the 16 ANSI
@@ -1228,6 +1365,74 @@ test "hyperlinkAt finds the URI of an OSC 8 link, and nothing elsewhere" {
     try std.testing.expectEqualStrings("", t.hyperlinkAt(7, 0, &buf)); // "plain"
     var tiny: [4]u8 = undefined;
     try std.testing.expectEqualStrings("", t.hyperlinkAt(1, 0, &tiny)); // too long for the buffer: never a cut-off URL
+}
+
+/// Writes `text` to a fresh terminal, then asks `pathAt` about column `col` of its first row.
+fn pathProbe(text: []const u8, col: u16, out: []u8) !?struct { path: []const u8, line: u32, col: u32 } {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write(text);
+    const r = t.pathAt(col, 0, out) orelse return null;
+    return .{ .path = out[0..r.len], .line = r.line, .col = r.col };
+}
+
+test "pathAt finds the path token under a cell and its line and column" {
+    var buf: [128]u8 = undefined;
+    const a = (try pathProbe("see src/main.zig:12:5: error", 5, &buf)).?;
+    try std.testing.expectEqualStrings("src/main.zig", a.path);
+    try std.testing.expectEqual(@as(u32, 12), a.line);
+    try std.testing.expectEqual(@as(u32, 5), a.col);
+    const b = (try pathProbe("open foo.txt, then", 6, &buf)).?;
+    try std.testing.expectEqualStrings("foo.txt", b.path);
+    try std.testing.expectEqual(@as(u32, 0), b.line);
+    try std.testing.expectEqualStrings("~/notes.md", (try pathProbe("(~/notes.md)", 4, &buf)).?.path);
+    const c7 = (try pathProbe("file.zig:7", 0, &buf)).?;
+    try std.testing.expectEqualStrings("file.zig", c7.path);
+    try std.testing.expectEqual(@as(u32, 7), c7.line);
+    try std.testing.expectEqual(@as(u32, 0), c7.col);
+    try std.testing.expectEqualStrings("/etc/hosts", (try pathProbe("cat /etc/hosts.", 9, &buf)).?.path); // a sentence's full stop is not the path's
+    try std.testing.expect((try pathProbe("see src/main.zig", 3, &buf)) == null); // on the space
+    try std.testing.expect((try pathProbe("see src/main.zig", 40, &buf)) == null); // past the text
+    // each CJK character takes two columns: the column of `a` is 5, not 3
+    const cjk = (try pathProbe("漢字 a/b.c:9", 5, &buf)).?;
+    try std.testing.expectEqualStrings("a/b.c", cjk.path);
+    try std.testing.expectEqual(@as(u32, 9), cjk.line);
+    // the second half of a wide character is the character: "漢字" is itself a token
+    try std.testing.expectEqualStrings("漢字", (try pathProbe("漢字 a/b.c:9", 3, &buf)).?.path);
+    // Arabic text before the path does not move the columns (the grid is in logical order)
+    const ar = (try pathProbe("مرحبا src/x.zig:3", 10, &buf)).?;
+    try std.testing.expectEqualStrings("src/x.zig", ar.path);
+    try std.testing.expectEqual(@as(u32, 3), ar.line);
+    var tiny: [3]u8 = undefined;
+    try std.testing.expect((try pathProbe("src/main.zig:1", 2, &tiny)) == null); // never a cut-off path
+}
+
+/// Like `pathProbe` for `urlAt`.
+fn urlProbe(text: []const u8, col: u16, out: []u8) !?[]const u8 {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    t.write(text);
+    const n = t.urlAt(col, 0, out) orelse return null;
+    return out[0..n];
+}
+
+test "urlAt finds a plain http or https URL under a cell" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("https://example.com/a?b=1&c=2", (try urlProbe("visit https://example.com/a?b=1&c=2. Then", 14, &buf)).?);
+    // a closing parenthesis belongs to the URL only while it is balanced
+    try std.testing.expectEqualStrings("https://en.wikipedia.org/wiki/Foo_(bar)", (try urlProbe("(https://en.wikipedia.org/wiki/Foo_(bar))", 20, &buf)).?);
+    try std.testing.expectEqualStrings("https://x.com", (try urlProbe("(see https://x.com)", 10, &buf)).?);
+    // a markdown link opens only from its URL part
+    try std.testing.expect((try urlProbe("[docs](https://x.com/y)", 2, &buf)) == null);
+    try std.testing.expectEqualStrings("https://x.com/y", (try urlProbe("[docs](https://x.com/y)", 14, &buf)).?);
+    try std.testing.expectEqualStrings("HTTP://EXAMPLE.COM/x", (try urlProbe("HTTP://EXAMPLE.COM/x", 8, &buf)).?);
+    // other schemes, a bare scheme, a space and a small buffer give nothing
+    try std.testing.expect((try urlProbe("see ftp://x.org/a", 10, &buf)) == null);
+    try std.testing.expect((try urlProbe("https://", 3, &buf)) == null);
+    try std.testing.expect((try urlProbe("file:///etc/passwd", 3, &buf)) == null);
+    try std.testing.expect((try urlProbe("see https://x.org", 3, &buf)) == null); // on the space
+    var tiny: [4]u8 = undefined;
+    try std.testing.expect((try urlProbe("https://example.com", 10, &tiny)) == null); // never a cut-off URL
 }
 
 test "setTheme changes the default colors, the 16 ANSI colors and what a program is told, and keeps the rest of the palette" {
