@@ -122,22 +122,30 @@ pub const Session = struct {
         _ = c.write(self.kick_pipe[1], "k", 1); // a full pipe means a wake-up is already pending
     }
 
-    /// Brings the viewport back to the live screen if it is scrolled up (typing, paste and keys do).
-    /// Not for the parser's replies: those run with the terminal lock held.
-    fn snapToBottom(self: *Session) void {
+    /// The user is typing (text, a key that sends bytes, or a paste): the selection goes away and the
+    /// viewport returns to the live screen if it is scrolled up. Not for the parser's replies: those run
+    /// with the terminal lock held.
+    fn userInput(self: *Session) void {
+        var changed = false;
         {
             const t = self.lock();
             defer self.unlock();
-            if (t.atBottom()) return;
-            t.scrollToBottom();
+            if (t.hasSelection()) {
+                t.clearSelection();
+                changed = true;
+            }
+            if (!t.atBottom()) {
+                t.scrollToBottom();
+                changed = true;
+            }
         }
-        self.requestWake();
+        if (changed) self.requestWake();
     }
 
     /// Typed text for the child: snaps the viewport to the bottom, then queues it like `input`.
     pub fn typeText(self: *Session, bytes: []const u8) !void {
         if (bytes.len == 0) return;
-        self.snapToBottom();
+        self.userInput();
         try self.input(bytes);
     }
 
@@ -284,14 +292,14 @@ pub const Session = struct {
             }
         }
         if (n == 0) return false;
-        self.snapToBottom();
+        self.userInput();
         try self.input(buf[0..n]);
         return true;
     }
 
     /// Queues pasted text, framed for the terminal's current paste mode.
     pub fn paste(self: *Session, text: []const u8) !void {
-        if (text.len > 0) self.snapToBottom();
+        if (text.len > 0) self.userInput();
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.gpa);
         {
@@ -869,4 +877,44 @@ test "focus: nothing is sent without the mode, but the flag still changes" {
     try s.setFocus(false);
     try std.testing.expect(!s.focused());
     try std.testing.expectEqual(@as(usize, 0), s.pendingInput());
+}
+
+const HasSelection = struct {
+    s: *Session,
+    fn now(self: HasSelection) bool {
+        const t = self.s.lock();
+        defer self.s.unlock();
+        return t.hasSelection();
+    }
+};
+
+fn selectFirstCells(s: *Session) void {
+    s.selection(0, 1, 0, 0); // press
+    s.selection(1, 1, 3, 0); // drag
+    s.selection(2, 1, 3, 0); // release
+}
+
+test "typing, keys and paste clear the selection; lone modifier keys and Cmd+C do not" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "echo hello world; exec cat" } });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "hello world" }, Row.ok));
+    const sel = HasSelection{ .s = s };
+    selectFirstCells(s);
+    try std.testing.expect(sel.now());
+    _ = try s.key(56, keys.Mods.shift, "", 0, .press); // Shift alone sends nothing: the selection stays
+    try std.testing.expect(sel.now());
+    _ = try s.key(8, keys.Mods.super, "", 0, .press); // Cmd+C belongs to the app: the selection stays
+    try std.testing.expect(sel.now());
+    try s.typeText("x");
+    try std.testing.expect(!sel.now());
+    selectFirstCells(s);
+    try std.testing.expect(sel.now());
+    _ = try s.key(126, 0, "", 0, .press); // an arrow key
+    try std.testing.expect(!sel.now());
+    selectFirstCells(s);
+    try s.typeText("\n"); // a new line
+    try std.testing.expect(!sel.now());
+    selectFirstCells(s);
+    try s.paste("p");
+    try std.testing.expect(!sel.now());
 }

@@ -26,7 +26,7 @@ Build and open: `macos/build-app.sh && open macos/.build/Harf.app`. Pictures fro
 **Selection and copy**
 - [ ] Drag over Latin text, Cmd+C, paste into another app: exact text. Double-click selects a word, triple-click a line.
 - [ ] Drag over Arabic text in reading order (right to left), Cmd+C, paste: the logical text. A left-to-right drag over an Arabic row selects the logical range between the two ends and may select very little (visual selection is Phase 7): tell me if that is too surprising.
-- [ ] Click once without dragging: the selection goes away. Cmd+C with nothing selected does nothing.
+- [ ] Click once without dragging: the selection goes away. Typing a character, Enter, an arrow key or a paste also clears it; Shift alone and Cmd+C do not. Cmd+C with nothing selected does nothing.
 - [ ] Select text, then run `clear` or scroll: the highlight follows the content when it scrolls; a program that rewrites the cells in place keeps the highlight until you click.
 - [ ] Resize the window while scrolled up and while text is selected.
 - [ ] Idle for a minute with the window focused: CPU stays at 0.
