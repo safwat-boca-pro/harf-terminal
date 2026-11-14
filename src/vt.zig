@@ -1644,6 +1644,19 @@ test "keypad enter sends a carriage return, like Return" {
     try std.testing.expectEqualStrings("\r", encFor(t, 76, 0, "\r", &buf));
 }
 
+test "paste: control bytes become spaces, so CR and LF are the only bytes that can act as Enter (the paste guard relies on it)" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    for ([_]bool{ false, true }) |bracketed| {
+        if (bracketed) t.write("\x1b[?2004h");
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(std.testing.allocator);
+        try t.encodePaste("a\x03b\x04c\x1b[31md\x7fe\x15f\x00g", &out, std.testing.allocator); // Ctrl-C, Ctrl-D, ESC, DEL, Ctrl-U, NUL
+        const body = if (bracketed) out.items["\x1b[200~".len .. out.items.len - "\x1b[201~".len] else out.items;
+        try std.testing.expectEqualStrings("a b c [31md e f g", body);
+    }
+}
+
 test "paste: CRLF is one Enter, a lone CR stays one" {
     const t = try Terminal.init(std.testing.allocator, .{});
     defer t.deinit();

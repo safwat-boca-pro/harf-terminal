@@ -631,6 +631,21 @@ func selfTest() -> Never {
 
         let s = pasteSummary(of: "line1\nline2\u{1b}[31m", risk: 1)
         if !s.title.contains("2 lines") || s.detail.contains("\u{1b}") || !s.detail.contains("line1") { fail("paste guard: the summary is '\(s.title)' / '\(s.detail)'") }
+        // The preview is the one place the user sees what will run, so text that reorders or hides itself must not: right-to-left
+        // overrides and isolates are shown as a dot; a joiner (Persian, emoji) is kept.
+        let bidi = pasteSummary(of: "echo hello \u{202E}~ fr- mr ;\u{2066}x\u{2069}\u{200F}", risk: 1)
+        if bidi.detail.unicodeScalars.contains(where: { [0x202E, 0x2066, 0x2069, 0x200F].contains($0.value) }) { fail("paste guard: bidi controls reached the preview") }
+        if !pasteSummary(of: "a\u{200D}b", risk: 1).detail.unicodeScalars.contains(where: { $0.value == 0x200D }) { fail("paste guard: a zero-width joiner must be kept") }
+        // Line breaks are what the program sees as Enter (LF, CR, CRLF), not every Unicode separator; a trailing one ends the last line.
+        if pasteSummary(of: "a\u{2028}b\u{0B}c", risk: 1).title.contains("lines") { fail("paste guard: U+2028 and VT are not line breaks for the program") }
+        if pasteSummary(of: "ls\n", risk: 1).title.contains("lines") { fail("paste guard: 'ls' plus its line break is one line") }
+        if !pasteSummary(of: "a\r\nb\rc\nd", risk: 1).title.contains("4 lines") { fail("paste guard: CRLF, CR and LF are one break each") }
+        // A 10 MB paste on one line is the very large case the guard exists for: the sheet must not wait on the whole text.
+        let huge = String(repeating: "abcdefghij", count: 1_000_000)
+        let began = Date()
+        let hs = pasteSummary(of: huge, risk: 2)
+        let took = Date().timeIntervalSince(began)
+        if took > 0.25 || !hs.title.contains("MB") { fail("paste guard: summarising 10 MB took \(took) s ('\(hs.title)')") }
     }
 
     // 4. Title and bell reach the window; a clean exit closes it.

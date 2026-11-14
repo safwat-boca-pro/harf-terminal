@@ -39,22 +39,43 @@ struct PasteSummary {
     var detail: String
 }
 
+/// Characters the paste sheet must not show as they are: controls (except tab), and the ones that reorder or hide the text around
+/// them (right-to-left marks, embeddings, overrides and isolates, line and paragraph separators). A joiner is kept: Persian and emoji need it.
+private func hiddenInPreview(_ s: Unicode.Scalar) -> Bool {
+    if s == "\t" { return false }
+    if s.properties.generalCategory == .control { return true }
+    switch s.value {
+    case 0x061C, 0x200E, 0x200F, 0x2028, 0x2029, 0x202A...0x202E, 0x2066...0x2069: return true
+    default: return false
+    }
+}
+
 /// The sheet's text for a paste of `text` that `harf_term_paste_check` flagged (`risk`: bit 1 would run lines, bit 2 very large): the
 /// size, the reason, and up to five lines of preview. The text is a program's or a web page's, so control characters are shown as a dot.
 func pasteSummary(of text: String, risk: Int32) -> PasteSummary {
-    var lines = text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).map(String.init)
-    if lines.count > 1, lines.last == "" { lines.removeLast() }   // a trailing line break ends the last line, it does not start one
+    // Line breaks are what the program sees as Enter (LF, CR, CRLF), counted over the bytes in one pass, and the preview is built
+    // from the first characters only: a 10 MB paste must not make the sheet wait on the whole text.
+    var breaks = 0
+    var previous: UInt8 = 0
+    for byte in text.utf8 {
+        if byte == 13 || (byte == 10 && previous != 13) { breaks += 1 }
+        previous = byte
+    }
+    let endsWithBreak = previous == 10 || previous == 13   // a trailing break ends the last line, it does not start one
+    let lineCount = max(1, breaks + (endsWithBreak ? 0 : 1))
     let size = ByteCountFormatter.string(fromByteCount: Int64(text.utf8.count), countStyle: .file)
-    let title = lines.count > 1 ? "Paste \(lines.count) lines (\(size))?" : "Paste \(size)?"
+    let title = lineCount > 1 ? "Paste \(lineCount) lines (\(size))?" : "Paste \(size)?"
     var reasons: [String] = []
     if risk & 1 != 0 { reasons.append("This program has not asked for bracketed paste, so each line runs as soon as it is pasted.") }
     if risk & 2 != 0 { reasons.append("This is a very large paste.") }
-    func shown(_ line: String) -> String {
-        let clean = String(String.UnicodeScalarView(line.unicodeScalars.map { $0.properties.generalCategory == .control && $0 != "\t" ? "\u{00B7}" : $0 }))
-        return clean.count > 80 ? String(clean.prefix(80)) + "…" : clean
+    func shown(_ line: Substring) -> String {
+        let scalars = Array(line.unicodeScalars.prefix(81)).map { hiddenInPreview($0) ? "\u{00B7}" : $0 }
+        let head = String(String.UnicodeScalarView(scalars.prefix(80)))
+        return scalars.count > 80 ? head + "…" : head
     }
-    var preview = lines.prefix(5).map(shown)
-    if lines.count > 5 { preview.append("…") }
+    let rows = text.prefix(1000).split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r" || $0 == "\r\n" })
+    var preview = rows.prefix(5).map(shown)
+    if lineCount > min(5, rows.count) { preview.append("…") }
     return PasteSummary(title: title, detail: (reasons + [""] + preview).joined(separator: "\n"))
 }
 
