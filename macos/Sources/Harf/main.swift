@@ -282,11 +282,17 @@ func selfTest() -> Never {
         for i in 0..<200 {
             let ch = String(letters[i % 26])
             let before = typed()
+            let marks = measureDirtyMarks
             let t0 = ProcessInfo.processInfo.systemUptime
             c.view.handleKey(code: 0, mods: 0, characters: ch, isRepeat: false) { c.sendText(ch) }
+            // The product path: key -> core -> PTY echo -> parse -> wake -> hop to the main thread -> wakeOnMain marks the
+            // view dirty (`markDirty`). We wait for that mark; we do not read the grid to decide the echo has arrived.
             let deadline = t0 + 2
-            while typed() == before && ProcessInfo.processInfo.systemUptime < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.0002)) }
+            while measureDirtyMarks == marks && ProcessInfo.processInfo.systemUptime < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.0002)) }
+            if measureDirtyMarks == marks { fail("keystroke \(i): the product's wake path never marked the view dirty within 2 s") }
+            // An off-screen window gets no display-link tick, so this stands in for it: draw once, now.
             c.view.cacheDisplay(in: c.view.bounds, to: rep)
+            if typed() != before + 1 { fail("keystroke \(i): the frame drawn after the wake does not show the echo") }
             samples.append((measureFrameEnd - t0) * 1000)
             _ = pump(0.01) { false }
         }
@@ -295,6 +301,15 @@ func selfTest() -> Never {
         let median = samples[samples.count / 2], p95 = samples[Int(Double(samples.count) * 0.95)], worst = samples[samples.count - 1]
         print(String(format: "selftest: keypress-to-draw at an idle prompt over %d keystrokes: median %.2f ms, p95 %.2f ms, max %.2f ms", samples.count, median, p95, worst))
         if median >= 10 { fail(String(format: "median keypress-to-draw latency is %.2f ms (budget 10 ms)", median)) }
+    }
+
+    // 1i. The app's window is an sRGB window: with the default color space AppKit keeps a second backing surface (about 5 MB)
+    // once the view has been redrawn. Nothing else in the self-test would notice that setting disappearing.
+    do {
+        guard let c = TerminalController(argv: ["/bin/sh", "-c", "sleep 2"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the window session") }
+        let w = makeTerminalWindow(content: NSSize(width: 700, height: 420), view: c.view)
+        if w.colorSpace != NSColorSpace.sRGB { fail("the terminal window's color space is \(String(describing: w.colorSpace?.localizedName)), not sRGB (costs about 5 MB of footprint)") }
+        c.close()
     }
 
     // 2. Typing (a letter, an Arabic letter, Return) goes through the view's own key path.

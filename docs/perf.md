@@ -320,21 +320,28 @@ Release build (`macos/build-app.sh`), Apple M1, macOS 27.0.1, 700x420 pt window,
 ### Keypress to pixel: budget under 10 ms
 
 `HARF_MEASURE=1 macos/.build/Harf.app/Contents/MacOS/Harf --selftest` (section 1h) types 200 letters at an idle `cat` prompt through
-`TerminalView.handleKey` (the code every key reaches after AppKit decodes the event) and times each from just before the call until
-the frame that shows the echo has finished (`measureFrameEnd`, set at the end of `TerminalController.draw`).
+`TerminalView.handleKey` (the code every key reaches after AppKit decodes the event). Each keystroke is timed from just before
+that call until the frame that shows the echo has finished (`measureFrameEnd`, set at the end of `TerminalController.draw`).
+**The path is the product's:** the check waits for the wake path (`wakeOnMain` -> `markDirty`) to mark the view dirty, and fails
+if it never does (an earlier version of this check read the grid directly and would have passed with that line deleted; fixed
+after review, and mutation-checked: removing the mark makes the self-test fail).
 
-| Metric | Result |
-|---|---|
-| Median | **4.73 ms** |
-| p95 | 5.52 ms |
-| Max | 6.48 ms |
+| Run | Median | p95 | Max |
+|---|---|---|---|
+| 1 | 3.94 ms | 4.80 ms | 6.09 ms |
+| 2 | 3.92 ms | 4.84 ms | 6.62 ms |
+| 3 | 3.95 ms | 4.72 ms | 6.14 ms |
+
+(The first version of this check, which skipped the wake hop, read 4.73 / 5.52 / 6.48 ms; a re-run during review read 5.84 / 7.84 / 12.87.
+Latency varies by a few ms with machine load.)
 
 What the number includes: handing the key to the core, the PTY round trip and the child's echo, parsing, the wake and the hop to
-the main thread, and a full-frame draw. It is conservative in one way (the timer also spans `cacheDisplay`'s bitmap setup before
-the draw starts) and leaves out two things: waiting for the display's next refresh (up to one frame, about 8 ms on average at
-60 Hz) and the compositor. Not measured: the same during a flood (a typed character is not distinguishable in a continuous
-stream without extra machinery), and real `NSEvent` delivery (`keyDown` goes through `interpretKeyEvents`, which needs an
-active window; the synthetic path starts one call later). The budget holds with margin for the part Harf controls.
+the main thread, and a full-frame draw (the draw is triggered by the check itself, standing in for the display link, because an
+off-screen window gets no display ticks). It leaves out the wait for the display's next refresh (up to one frame, about 8 ms on
+average at 60 Hz) and the compositor. **Whether the budget "under 10 ms keypress to pixel" holds is therefore not decided by
+this number:** about 4 ms in process plus about 8 ms of average refresh wait is about 12 ms at 60 Hz, over 10 ms; the budget needs
+a definition (in process, or to the display) before it can be called met. Not measured: the same during a flood, and real
+`NSEvent` delivery (`keyDown` goes through `interpretKeyEvents`, which needs an active window).
 
 ### Startup: budget under 100 ms to the first usable frame
 
@@ -359,3 +366,20 @@ below what any AppKit window reaches here**, so it cannot be met by changes to H
 
 `bench/idle.sh macos/.build/Harf.app 60`: window open at the prompt, 60 s sampled every 2 s: mean **0.01 percent**, max
 0.20 percent, cumulative CPU time 0:00.15 to 0:00.16 (0.01 s in 60 s). `phys_footprint` 22 MB.
+
+### Footprint depends on the machine's graphics state (found in review, 2026-11-14)
+
+The slice 4 footprint table above (25 to 26 MB in every state, nine runs) was taken in one machine state. Later the **same
+binary** read much higher: the previous commit's build (`47c559f`), measured again the same hour, gave 26, 26 in a first pair and
+then 29, 37, 37, 37, 37 MB (settled, 12 to 15 s); the working tree gave 36, 39, 39, 39, 32, 39 MB. In the high state the
+`footprint` breakdown differs from the low state in two lines only: "Owned physical footprint (unmapped)" is about 5 MB (the size
+of one window surface) and `IOAccelerator (graphics)` is 3.9 MB instead of 1.3 MB; `IOSurface` stays one 4976 KB surface and
+`Malloc Small` is unchanged. A **4K external display is online** in the high state (`system_profiler SPDisplaysDataType`); I did
+not record whether it was connected during the low-state runs, so this is a hypothesis, not a finding. Consequences:
+
+- The footprint of a window app on this machine moves by about 10 MB with graphics state outside Harf's code. "Met" for the 30 MB
+  target is true in the state I measured it and not true in the other.
+- The sRGB window color space still matters in the high state: with it removed the scrollback-full state read 40 MB, with it 30 MB.
+- `bench/footprint.sh` now exits 1 above 30 MB (`MAX_MB` to change), so a change can be checked; it also prints the breakdown, so the
+  state can be read off each run. Open: repeat the measurement with and without the external display, and decide what the
+  target means when graphics accounting alone can move it by 10 MB.

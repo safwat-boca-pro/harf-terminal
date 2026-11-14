@@ -3,6 +3,7 @@
 # 12 to 20 s after launch. Starts the binary itself and tracks that pid; it never looks a process up by name and
 # only ever kills the process it started.
 #
+# Exits 1 if the footprint is over the target (30 MB, or MAX_MB=<n> in the environment), so it can guard a change.
 # Usage: bench/footprint.sh [settle_seconds=15] [mode=settled|scrollback|flood]
 #   settled     an empty session at the shell prompt
 #   scrollback  the shell first prints 6000 lines (enough to fill the 1 MiB scrollback), then settles
@@ -36,5 +37,11 @@ sleep "$SETTLE"
 kill -0 "$PID" 2>/dev/null || { echo "Harf exited early" >&2; exit 1; }
 
 echo "mode=$MODE settle=${SETTLE}s pid=$PID machine=$(sysctl -n machdep.cpu.brand_string) macOS=$(sw_vers -productVersion) commit=$(git -C "$(dirname "$0")/.." rev-parse --short HEAD 2>/dev/null || echo ?)"
-footprint "$PID" 2>/dev/null | sed -n '2p;5,24p' 
+REPORT=$(footprint "$PID" 2>/dev/null)
+printf '%s\n' "$REPORT" | sed -n '2p;5,24p'
+MB=$(printf '%s\n' "$REPORT" | sed -n 's/.*Footprint: \([0-9][0-9]*\) MB.*/\1/p' | head -1)
+[ -n "$MB" ] || { echo "could not read the footprint from: $(printf '%s\n' "$REPORT" | head -3)" >&2; exit 1; }
+LIMIT=${MAX_MB:-30}
 echo "rss_kb=$(ps -o rss= -p "$PID" | tr -d ' ')  cputime=$(ps -o time= -p "$PID" | tr -d ' ')"
+if [ "$MB" -gt "$LIMIT" ]; then echo "FOOTPRINT OVER BUDGET: ${MB} MB > ${LIMIT} MB (mode $MODE)" >&2; exit 1; fi
+echo "footprint ${MB} MB is within ${LIMIT} MB"

@@ -23,6 +23,19 @@ fn skipUnless(name: []const u8) !void {
     }
 }
 
+extern "c" fn proc_name(pid: c_int, buffer: [*]u8, buffersize: u32) c_int;
+
+/// SIGKILLs `pid` only if it is a real process (not 0, 1 or a group) whose name is exactly `name`. A pid read from a file
+/// can be stale or reused; a test must never signal something it did not start.
+fn killIfNamed(pid: std.c.pid_t, name: []const u8) bool {
+    if (pid <= 1) return false;
+    var buf: [64]u8 = undefined;
+    const n = proc_name(pid, &buf, buf.len);
+    if (n <= 0) return false;
+    if (!std.mem.eql(u8, buf[0..@intCast(n)], name)) return false;
+    return std.c.kill(pid, .KILL) == 0;
+}
+
 fn sleepMs(ms: u32) void {
     const ts: std.c.timespec = .{ .sec = ms / 1000, .nsec = @as(isize, ms % 1000) * std.time.ns_per_ms };
     _ = std.c.nanosleep(&ts, null);
@@ -155,9 +168,9 @@ test "program: the alternate screen is restored after vim, less, and a killed vi
     var buf: [900]u8 = undefined;
     // vim quits normally, less quits normally, then a vim is killed with SIGKILL; the markers must come back each time
     const s = try run(&buf,
-        "P={s}/harf-pid-{d}; F={s}/harf-alt-{d}; seq 1 50 > $F; echo MARK1; echo MARK2; echo MARK3; sleep 1; " ++
+        "P={s}/harf-pid-{d}; rm -f $P; F={s}/harf-alt-{d}; seq 1 50 > $F; echo MARK1; echo MARK2; echo MARK3; sleep 1; " ++
             "vim -u NONE -N -n $F; echo AFTERVIM; sleep 1; less $F; echo AFTERLESS; sleep 1; " ++
-            "sh -c \"echo \\$\\$ > $P; exec vim -u NONE -N -n $F\"; printf '\\033[?1049l\\033[?1000l\\033[?25h'; echo AFTERKILL; rm -f $F $P; sleep 3",
+            "sh -c \"echo \\$\\$ > $P; exec vim -u NONE -N -n -c 'set mouse=a' $F\"; printf '\\033[?1049l\\033[?1000l\\033[?1002l\\033[?1003l\\033[?1006l\\033[?25h'; echo AFTERKILL; rm -f $F $P; sleep 3",
         .{ tmpDir(), std.c.getpid(), tmpDir(), std.c.getpid() });
     defer s.deinit();
     try std.testing.expect(waitHas(s, "MARK3", 10_000));
@@ -192,10 +205,25 @@ test "program: the alternate screen is restored after vim, less, and a killed vi
         if (n > 0) pid = std.fmt.parseInt(std.c.pid_t, std.mem.trim(u8, line[0..@intCast(n)], " \r\n"), 10) catch 0;
     }
     try std.testing.expect(pid > 1);
-    sleepMs(600); // let vim paint its screen
-    _ = std.c.kill(pid, .KILL);
+    sleepMs(800); // let vim paint its screen and turn on its mouse reporting
+    {
+        // before the kill vim owns the alternate screen and asked for the mouse
+        const t = s.lock();
+        defer s.unlock();
+        try std.testing.expect(t.onAlternateScreen());
+        try std.testing.expect(t.mouseTracking());
+    }
+    try std.testing.expect(killIfNamed(pid, "vim")); // only ever a process named vim; a stale pid file cannot hit anything else
     try std.testing.expect(waitHas(s, "AFTERKILL", 10_000));
     try std.testing.expect(screenHas(s, "MARK1"));
+    {
+        // The killed vim never cleaned up; the shell's reset (`ESC[?1049l` and the mouse modes vim may have set: 1000, 1002, 1003, 1006) must take the terminal out of the
+        // alternate screen and switch mouse reporting off. No terminal does this by itself after a SIGKILL.
+        const t = s.lock();
+        defer s.unlock();
+        try std.testing.expect(!t.onAlternateScreen());
+        try std.testing.expect(!t.mouseTracking());
+    }
     // nothing of any program's screens went into the scrollback of the primary screen
     const t = s.lock();
     defer s.unlock();
@@ -272,4 +300,17 @@ test "program: a resize storm while vim repaints ends with a correct grid" {
     }
     try s.input(":q!\r");
     try std.testing.expectEqual(@as(?u8, 0), waitExit(s, 10_000));
+}
+
+test "program tests only signal a process that has the name they expect" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sleep", "30" } });
+    defer s.deinit();
+    const pid = s.pid();
+    sleepMs(150);
+    try std.testing.expect(!killIfNamed(pid, "vim")); // wrong name: left alone
+    try std.testing.expect(std.c.kill(pid, @enumFromInt(0)) == 0); // still alive
+    try std.testing.expect(!killIfNamed(0, "vim")); // never a group or init
+    try std.testing.expect(!killIfNamed(1, "launchd")); // never init, even if the name matches
+    try std.testing.expect(killIfNamed(pid, "sleep")); // right name: signalled
+    try std.testing.expect(waitExit(s, 5_000) != null);
 }

@@ -43,6 +43,20 @@ func installMainMenu() {
     NSApp.mainMenu = main
 }
 
+/// The terminal's window, built the same way for the app and for the self-test.
+@MainActor
+func makeTerminalWindow(content: NSSize, view: NSView) -> NSWindow {
+    let window = NSWindow(contentRect: NSRect(origin: .zero, size: content), styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                          backing: .buffered, defer: false)
+    window.title = "Harf"
+    // The default (wide-gamut) window color space makes AppKit keep two backing surfaces once the view has been
+    // redrawn (about 5 MB more at 700x420 pt); sRGB keeps one. Measured in docs/perf.md (slice 4 attribution).
+    // Colors are also interpreted as sRGB, which is what the theme and ANSI palette are defined in.
+    window.colorSpace = .sRGB
+    window.contentView = view
+    return window
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
@@ -67,14 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         guard let c = TerminalController(argv: argv, frame: content, scale: scale) else { fatalError("cannot start the terminal") }
         traceStep("terminal controller created (core, painter, shell spawned)")
-        window = NSWindow(contentRect: NSRect(origin: .zero, size: content), styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                          backing: .buffered, defer: false)
-        window.title = "Harf"
-        // The default (wide-gamut) window color space makes AppKit keep two backing surfaces once the view has been
-        // redrawn (about 5 MB more at 700x420 pt); sRGB keeps one. Measured in docs/perf.md (slice 4 attribution).
-        // Colors are also interpreted as sRGB, which is what the theme and ANSI palette are defined in.
-        window.colorSpace = .sRGB
-        window.contentView = c.view
+        window = makeTerminalWindow(content: content, view: c.view)
         binding = WindowBinding(window: window, controller: c)
         window.center()
         traceStep("window built")

@@ -34,6 +34,7 @@ private let exitedCallback: @convention(c) (UnsafeMutableRawPointer?, Int32) -> 
 // HARF_TRACE=startup prints the time from process start to the end of the first frame. Both cost one environment
 // lookup at launch and nothing per frame when off.
 nonisolated(unsafe) var measureFrameEnd: Double = 0
+nonisolated(unsafe) var measureDirtyMarks = 0   // how many times the wake path has marked the view dirty (HARF_MEASURE only)
 private let measureFrames = ProcessInfo.processInfo.environment["HARF_MEASURE"] == "1"
 private let traceStartup = ProcessInfo.processInfo.environment["HARF_TRACE"] == "startup"
 nonisolated(unsafe) private var startupReported = false
@@ -253,7 +254,13 @@ final class TerminalController {
     fileprivate func wakeOnMain() {
         guard let t = term else { return }
         harf_term_wake_handled(t)   // re-arm before reading, so output arriving during the draw wakes us again
+        markDirty()
+    }
+
+    /// Asks AppKit to draw the view. The one place the wake path does it, so the latency check can see it happen.
+    private func markDirty() {
         view.needsDisplay = true
+        if measureFrames { measureDirtyMarks += 1 }
     }
 
     fileprivate func titleOnMain() {
