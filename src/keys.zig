@@ -115,6 +115,51 @@ pub fn isFunctional(key: c.GhosttyKey) bool {
     };
 }
 
+/// The character a text key types with no modifiers on a US layout, or 0 for other keys. The kitty
+/// keyboard protocol identifies Ctrl combinations by it (Ctrl+C is `ESC [ 99 ; 5 u`); using the
+/// physical key keeps Ctrl+C working on an Arabic layout.
+pub fn unshiftedCodepoint(key: c.GhosttyKey) u21 {
+    return switch (key) {
+        c.GHOSTTY_KEY_A...c.GHOSTTY_KEY_Z => @intCast('a' + (key - c.GHOSTTY_KEY_A)),
+        c.GHOSTTY_KEY_DIGIT_0...c.GHOSTTY_KEY_DIGIT_9 => @intCast('0' + (key - c.GHOSTTY_KEY_DIGIT_0)),
+        c.GHOSTTY_KEY_BACKQUOTE => '`',
+        c.GHOSTTY_KEY_BACKSLASH => '\\',
+        c.GHOSTTY_KEY_BRACKET_LEFT => '[',
+        c.GHOSTTY_KEY_BRACKET_RIGHT => ']',
+        c.GHOSTTY_KEY_COMMA => ',',
+        c.GHOSTTY_KEY_EQUAL => '=',
+        c.GHOSTTY_KEY_MINUS => '-',
+        c.GHOSTTY_KEY_PERIOD => '.',
+        c.GHOSTTY_KEY_QUOTE => '\'',
+        c.GHOSTTY_KEY_SEMICOLON => ';',
+        c.GHOSTTY_KEY_SLASH => '/',
+        c.GHOSTTY_KEY_SPACE => ' ',
+        else => 0,
+    };
+}
+
+/// Bytes zsh and readline already understand for the Option and Command editing keys (brief
+/// section 5), or null if `key` with `mods` is not one of them. Only exact combinations match.
+pub fn editorBytes(key: c.GhosttyKey, mods: u32) ?[]const u8 {
+    return switch (mods & 0xF) {
+        Mods.alt => switch (key) {
+            c.GHOSTTY_KEY_ARROW_LEFT => "\x1bb",
+            c.GHOSTTY_KEY_ARROW_RIGHT => "\x1bf",
+            c.GHOSTTY_KEY_BACKSPACE => "\x1b\x7f",
+            c.GHOSTTY_KEY_DELETE => "\x1bd",
+            else => null,
+        },
+        Mods.super => switch (key) {
+            c.GHOSTTY_KEY_ARROW_LEFT => "\x01",
+            c.GHOSTTY_KEY_ARROW_RIGHT => "\x05",
+            c.GHOSTTY_KEY_BACKSPACE => "\x15",
+            c.GHOSTTY_KEY_DELETE => "\x0b",
+            else => null,
+        },
+        else => null,
+    };
+}
+
 test "known and unknown keycodes" {
     try std.testing.expectEqual(@as(?c.GhosttyKey, c.GHOSTTY_KEY_ARROW_UP), fromMac(126));
     try std.testing.expectEqual(@as(?c.GhosttyKey, c.GHOSTTY_KEY_ENTER), fromMac(36));
@@ -131,4 +176,35 @@ test "letters are text keys, arrows are functional" {
     try std.testing.expect(!isFunctional(c.GHOSTTY_KEY_SPACE));
     try std.testing.expect(isFunctional(c.GHOSTTY_KEY_ARROW_UP));
     try std.testing.expect(isFunctional(c.GHOSTTY_KEY_ENTER));
+}
+
+test "unshifted codepoints of text keys" {
+    try std.testing.expectEqual(@as(u21, 'c'), unshiftedCodepoint(c.GHOSTTY_KEY_C));
+    try std.testing.expectEqual(@as(u21, 'a'), unshiftedCodepoint(c.GHOSTTY_KEY_A));
+    try std.testing.expectEqual(@as(u21, 'z'), unshiftedCodepoint(c.GHOSTTY_KEY_Z));
+    try std.testing.expectEqual(@as(u21, '0'), unshiftedCodepoint(c.GHOSTTY_KEY_DIGIT_0));
+    try std.testing.expectEqual(@as(u21, '9'), unshiftedCodepoint(c.GHOSTTY_KEY_DIGIT_9));
+    try std.testing.expectEqual(@as(u21, ' '), unshiftedCodepoint(c.GHOSTTY_KEY_SPACE));
+    try std.testing.expectEqual(@as(u21, '['), unshiftedCodepoint(c.GHOSTTY_KEY_BRACKET_LEFT));
+    try std.testing.expectEqual(@as(u21, 0), unshiftedCodepoint(c.GHOSTTY_KEY_ARROW_UP));
+    try std.testing.expectEqual(@as(u21, 0), unshiftedCodepoint(c.GHOSTTY_KEY_ENTER));
+}
+
+test "editor keys: Option and Command combinations (brief section 5)" {
+    const alt = Mods.alt;
+    const sup = Mods.super;
+    try std.testing.expectEqualStrings("\x1bb", editorBytes(c.GHOSTTY_KEY_ARROW_LEFT, alt).?);
+    try std.testing.expectEqualStrings("\x1bf", editorBytes(c.GHOSTTY_KEY_ARROW_RIGHT, alt).?);
+    try std.testing.expectEqualStrings("\x1b\x7f", editorBytes(c.GHOSTTY_KEY_BACKSPACE, alt).?);
+    try std.testing.expectEqualStrings("\x1bd", editorBytes(c.GHOSTTY_KEY_DELETE, alt).?);
+    try std.testing.expectEqualStrings("\x01", editorBytes(c.GHOSTTY_KEY_ARROW_LEFT, sup).?);
+    try std.testing.expectEqualStrings("\x05", editorBytes(c.GHOSTTY_KEY_ARROW_RIGHT, sup).?);
+    try std.testing.expectEqualStrings("\x15", editorBytes(c.GHOSTTY_KEY_BACKSPACE, sup).?);
+    try std.testing.expectEqualStrings("\x0b", editorBytes(c.GHOSTTY_KEY_DELETE, sup).?);
+    // anything else is not an editor key
+    try std.testing.expect(editorBytes(c.GHOSTTY_KEY_ARROW_LEFT, 0) == null);
+    try std.testing.expect(editorBytes(c.GHOSTTY_KEY_ARROW_LEFT, alt | Mods.shift) == null);
+    try std.testing.expect(editorBytes(c.GHOSTTY_KEY_ARROW_LEFT, alt | Mods.ctrl) == null);
+    try std.testing.expect(editorBytes(c.GHOSTTY_KEY_ARROW_UP, alt) == null);
+    try std.testing.expect(editorBytes(c.GHOSTTY_KEY_A, alt) == null);
 }

@@ -164,6 +164,9 @@ pub const Terminal = struct {
         // with the kitty keyboard protocol on, the encoder would send those as text.
         const text = if (isPrivateUse(utf8)) "" else if (std.mem.indexOfAny(u8, utf8, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x7f") != null) "" else utf8;
         _ = c.ghostty_key_event_set_utf8(self.key_event, .{ .ptr = text.ptr, .len = text.len });
+        // The kitty keyboard protocol names a key by its unshifted character; set it every call so
+        // a previous key's value never leaks into a function key.
+        _ = c.ghostty_key_event_set_unshifted_codepoint(self.key_event, @import("keys.zig").unshiftedCodepoint(key));
         var written: usize = 0;
         if (c.ghostty_key_encoder_encode(self.key_encoder, self.key_event, out.ptr, out.len, &written) != c.GHOSTTY_SUCCESS) return out[0..0];
         return out[0..written];
@@ -175,6 +178,13 @@ pub const Terminal = struct {
         if (len > utf8.len) return false;
         const cp = std.unicode.utf8Decode(utf8[0..len]) catch return false;
         return cp >= 0xE000 and cp <= 0xF8FF;
+    }
+
+    /// The kitty keyboard protocol flags the program has set (0 = legacy keys).
+    pub fn kittyFlags(self: *Terminal) u8 {
+        var flags: u8 = 0;
+        _ = c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, &flags);
+        return flags;
     }
 
     pub fn bracketedPaste(self: *Terminal) bool {
@@ -556,6 +566,30 @@ test "arrows and function keys with the kitty keyboard protocol on" {
     try std.testing.expectEqualStrings("\x1b[B", encFor(t, 125, 0, "\u{F701}", &buf));
     try std.testing.expectEqualStrings("\x1b[3~", encFor(t, 117, 0, "\u{F728}", &buf));
     try std.testing.expectEqualStrings("\x1b[C", encFor(t, 124, 0, "", &buf));
+}
+
+test "kitty keyboard flags follow the program's requests" {
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    try std.testing.expectEqual(@as(u8, 0), t.kittyFlags());
+    t.write("\x1b[>1u");
+    try std.testing.expectEqual(@as(u8, 1), t.kittyFlags());
+    t.write("\x1b[<u");
+    try std.testing.expectEqual(@as(u8, 0), t.kittyFlags());
+}
+
+test "ctrl letters under the kitty keyboard protocol (what Claude Code sets)" {
+    // Claude Code asks for flags 5 (disambiguate + report alternates). Without the key's
+    // unshifted codepoint the encoder produced no bytes at all, so Ctrl+C did nothing.
+    const t = try Terminal.init(std.testing.allocator, .{});
+    defer t.deinit();
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("\x03", encFor(t, 8, 2, "\x03", &buf)); // legacy mode
+    t.write("\x1b[>5u");
+    try std.testing.expectEqualStrings("\x1b[99;5u", encFor(t, 8, 2, "\x03", &buf)); // ctrl c
+    try std.testing.expectEqualStrings("\x1b[100;5u", encFor(t, 2, 2, "\x04", &buf)); // ctrl d
+    try std.testing.expectEqualStrings("\x1b[108;5u", encFor(t, 37, 2, "\x0c", &buf)); // ctrl l
+    try std.testing.expectEqualStrings("\x1b[A", encFor(t, 126, 0, "\u{F700}", &buf)); // arrows unchanged
 }
 
 test "ctrl c, enter, backspace, shift tab" {

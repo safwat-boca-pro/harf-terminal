@@ -154,6 +154,25 @@ func selfTest() -> Never {
         arrows.close()
     }
 
+    // 2c. Option and Command editing keys, and Ctrl+C under the keyboard flags Claude Code sets (5), as real key events.
+    func keyEvent(_ code: UInt16, _ chars: String, _ flags: NSEvent.ModifierFlags) -> NSEvent {
+        guard let ev = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil,
+                                        characters: chars, charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code) else { fail("cannot make key event") }
+        return ev
+    }
+    func expectBytes(_ name: String, prelude: String, count: Int, events: [NSEvent], contains: String) {
+        let script = "stty raw -echo; printf '\(prelude)'; printf R; head -c \(count) | od -An -tx1 | tr -s ' '"
+        guard let t = TerminalController(argv: ["/bin/sh", "-c", script], frame: NSSize(width: 700, height: 420)) else { fail("cannot start \(name)") }
+        if !pump(5, until: { t.rowText(0).contains("R") }) { fail("\(name): child not ready: '\(t.rowText(0))'") }
+        for ev in events { t.view.keyDown(with: ev) }
+        if !pump(5, until: { (0..<4).contains { t.rowText($0).contains(contains) } }) { fail("\(name): rows are '\((0..<4).map { t.rowText($0) }.joined(separator: "|"))', want '\(contains)'") }
+        t.close()
+    }
+    expectBytes("option+left, cmd+left", prelude: "", count: 3,
+                events: [keyEvent(123, "\u{F702}", [.option, .numericPad, .function]), keyEvent(123, "\u{F702}", [.command, .numericPad, .function])],
+                contains: "1b 62 01")
+    expectBytes("ctrl+c with kitty flags 5", prelude: "\\033[>5u", count: 7, events: [keyEvent(8, "\u{03}", [.control])], contains: "1b 5b 39 39 3b 35 75")
+
     // 3. Paste, bracketed or not, arrives as typed text.
     guard let pasting = TerminalController(argv: echo, frame: NSSize(width: 700, height: 420)) else { fail("cannot start paste session") }
     pasting.paste("x y")

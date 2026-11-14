@@ -314,3 +314,38 @@ test "visual order agrees with UAX #9" {
         }
     }
 }
+
+fn glyphAt(rl: RowLayout, lcol: u32) ?layout.Placed {
+    for (rl.placed) |p| if (p.lcol == lcol) return p;
+    return null;
+}
+
+test "brackets at an RTL level are drawn mirrored, at an LTR level as typed" {
+    const font = testFont();
+    defer ct.CFRelease(font);
+    var sh = Shaper.init(std.testing.allocator, font, test_cell_w);
+    defer sh.deinit();
+    const alloc = std.testing.allocator;
+    // LTR: "ab (c) de": "(" is column 3 and ")" is column 5, both as typed.
+    var ltr = (try sh.shape("ab (c) de", 9, false)).?;
+    defer ltr.deinit(alloc);
+    const open = glyphAt(ltr, 3).?;
+    const close = glyphAt(ltr, 5).?;
+    try std.testing.expect(open.gid != close.gid);
+    // RTL level: "ب (حمار) ب": "(" is column 2 and ")" column 7. Each swaps sides and takes the other glyph.
+    var rtl = (try sh.shape("ب (حمار) ب", 10, true)).?;
+    defer rtl.deinit(alloc);
+    const r_open = glyphAt(rtl, 2).?;
+    const r_close = glyphAt(rtl, 7).?;
+    try std.testing.expectEqual(close.gid, r_open.gid);
+    try std.testing.expectEqual(open.gid, r_close.gid);
+    try std.testing.expectEqual(close.font_id, r_open.font_id);
+    try std.testing.expect(r_open.x > r_close.x); // logical "(" is on the right
+    // Typed the other way round (the Arabic layout's Shift+9 is U+0029), at an LTR level nothing mirrors:
+    // ")" comes first and is drawn first, as the user typed it.
+    var typed = (try sh.shape(")حمار(", 6, false)).?;
+    defer typed.deinit(alloc);
+    try std.testing.expectEqual(close.gid, glyphAt(typed, 0).?.gid);
+    try std.testing.expectEqual(open.gid, glyphAt(typed, 5).?.gid);
+    try std.testing.expect(glyphAt(typed, 0).?.x < glyphAt(typed, 5).?.x);
+}

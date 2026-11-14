@@ -215,7 +215,10 @@ final class TerminalView: NSView {
     /// Function keys and Control combinations are encoded by the core; everything else is text.
     /// `text` is called only for text keys (it runs `interpretKeyEvents` in the real path).
     func handleKey(code: UInt16, mods: UInt32, characters: String, isRepeat: Bool, text: () -> Void) {
-        if mods & UInt32(HARF_MOD_SUPER) != 0 { return }   // Command shortcuts belong to the menu
+        if mods & UInt32(HARF_MOD_SUPER) != 0 {   // Command shortcuts belong to the menu; the core maps the editing keys
+            _ = controller?.sendKey(code: code, mods: mods, text: characters, action: isRepeat ? 2 : 0)
+            return
+        }
         if controller?.sendKey(code: code, mods: mods, text: characters, action: isRepeat ? 2 : 0) == true { return }
         text()
     }

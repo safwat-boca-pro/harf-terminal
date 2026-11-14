@@ -126,6 +126,20 @@ pub const Session = struct {
         if (!keys.isFunctional(k) and mods & keys.Mods.ctrl == 0) return false;
         var buf: [128]u8 = undefined;
         const t = self.lock();
+        const legacy = t.kittyFlags() == 0;
+        // Editor-style keys (brief section 5) are for programs that have not enabled the kitty
+        // protocol; once one has, it gets the full modifier encoding instead.
+        if (legacy and action != .release) {
+            if (keys.editorBytes(k, mods)) |seq| {
+                self.unlock();
+                try self.input(seq);
+                return true;
+            }
+            if (mods & keys.Mods.super != 0) { // other Command combinations belong to the app, not the shell
+                self.unlock();
+                return true;
+            }
+        }
         const bytes = t.encodeKey(k, mods, utf8, action, &buf);
         self.unlock();
         try self.input(bytes);
@@ -528,4 +542,31 @@ test "title copy" {
     try std.testing.expect(got);
     var one: [1]u8 = undefined;
     try std.testing.expectEqualStrings("h", s.title(&one));
+}
+
+fn hexOf(s: *Session, want: []const u8) bool {
+    return waitFor(10_000, Row{ .s = s, .want = want, .exact = false }, Row.ok);
+}
+
+test "key: Option and Command editing keys in legacy mode" {
+    const script = "stty raw -echo; echo ready; dd bs=1 count=7 2>/dev/null | od -An -tx1 | tr -s ' '";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    try std.testing.expect(try s.key(123, keys.Mods.alt, "", .press)); // Option+Left: ESC b
+    try std.testing.expect(try s.key(124, keys.Mods.alt, "", .press)); // Option+Right: ESC f
+    try std.testing.expect(try s.key(123, keys.Mods.super, "", .press)); // Cmd+Left: ^A
+    try std.testing.expect(try s.key(126, keys.Mods.super, "", .press)); // Cmd+Up: nothing for the shell
+    try std.testing.expect(try s.key(124, keys.Mods.super, "", .press)); // Cmd+Right: ^E
+    try std.testing.expect(try s.key(51, keys.Mods.super, "", .press)); // Cmd+Backspace: ^U
+    try std.testing.expect(hexOf(s, "1b 62 1b 66 01 05 15"));
+}
+
+test "key: Option+arrows send the full modifier encoding once the program asked for the kitty protocol" {
+    const script = "stty raw -echo; printf '\\033[>1u'; echo ready; dd bs=1 count=6 2>/dev/null | od -An -tx1 | tr -s ' '";
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", script } });
+    defer s.deinit();
+    try std.testing.expect(hexOf(s, "ready"));
+    try std.testing.expect(try s.key(123, keys.Mods.alt, "", .press)); // ESC [ 1 ; 3 D
+    try std.testing.expect(hexOf(s, "1b 5b 31 3b 33 44"));
 }

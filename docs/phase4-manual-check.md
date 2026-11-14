@@ -15,3 +15,5 @@ Only you can judge how it looks. Tell me what is off.
 - [ ] Run `claude` and type Arabic in its input box; its borders (box drawing) must not mirror.
 - [ ] Option+Left / Option+Right over Arabic text: moves by the shell's logical words (Decision 5); say if it feels wrong.
 - [ ] Idle: leave the window alone for a minute; CPU stays at 0.
+- [ ] Ctrl+C at the zsh prompt (cancels the line) and in `claude` (first press warns, second exits); Ctrl+D, Ctrl+L, Ctrl+R in both.
+- [ ] Option+Left / Right at the zsh prompt move by word; Option+Backspace deletes a word; Cmd+Left / Right go to line start / end; Cmd+Backspace deletes to line start. Inside `claude` the same keys send the kitty modifier encoding instead.
