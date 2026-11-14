@@ -540,8 +540,14 @@ fn benchNow() u64 {
 
 /// Seconds for a child to print about 22 MB (`seq 1 3000000`) and have it all parsed, with or without a thread drawing
 /// the whole screen continuously. Returns the elapsed seconds and the number of frames drawn meanwhile.
-fn floodSeconds(drawing: bool) !struct { secs: f64, frames: u32 } {
-    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "seq 1 3000000", null };
+const FloodResult = struct { secs: f64, frames: u32 };
+
+fn floodSeconds(drawing: bool) !FloodResult {
+    return floodCommand(drawing, "seq 1 3000000");
+}
+
+fn floodCommand(drawing: bool, cmd: [*:0]const u8) !FloodResult {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd, null };
     const t = harf_term_new(80, 24, 1 << 20, &argv, null) orelse return error.TermNotCreated;
     defer harf_term_free(t);
     const p = harf_painter_new(28) orelse return error.NoPainter;
@@ -569,5 +575,21 @@ test "bench: flood parse throughput with and without continuous drawing (HARF_BE
         std.debug.print("BENCH flood 22 MB: no drawing {d:.2} s ({d:.0} MB/s) | drawing {d:.2} s ({d:.0} MB/s, {d} frames, {d:.0} frames/s) | slowdown {d:.2}x\n", .{
             quiet.secs, 22.0 / quiet.secs, busy.secs, 22.0 / busy.secs, busy.frames, @as(f64, @floatFromInt(busy.frames)) / busy.secs, busy.secs / quiet.secs,
         });
+    }
+}
+
+test "bench: which loads are slow (HARF_BENCH=1)" {
+    if (std.c.getenv("HARF_BENCH") == null) return error.SkipZigTest;
+    const Case = struct { name: []const u8, cmd: [*:0]const u8, mb: f64 };
+    const cases = [_]Case{
+        .{ .name = "seq 1 3000000 (a line per write)", .cmd = "seq 1 3000000", .mb = 22.9 },
+        .{ .name = "yes | head -c 100MB (full lines, block writes)", .cmd = "yes 'flood flood flood flood flood flood flood flood flood flood flood flood flood' | head -c 100000000", .mb = 100.0 },
+        .{ .name = "head -c 100MB /dev/zero | tr (no newlines)", .cmd = "head -c 100000000 /dev/zero | tr '\\\\0' 'x'", .mb = 100.0 },
+        .{ .name = "yes | head -c 100MB | cat (a pipe stage)", .cmd = "yes 'abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij' | head -c 100000000 | cat", .mb = 100.0 },
+    };
+    std.debug.print("\n", .{});
+    for (cases) |cs| {
+        const r = try floodCommand(false, cs.cmd);
+        std.debug.print("BENCH {s}: {d:.2} s = {d:.1} MB/s\n", .{ cs.name, r.secs, cs.mb / r.secs });
     }
 }

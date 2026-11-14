@@ -266,3 +266,49 @@ baseline; three runs per state.
 because it holds many sessions); no growth. What changes for the eye: the window is now an sRGB window, so colors are
 interpreted as sRGB (what the theme and the ANSI palette are defined in) instead of in the display's wide-gamut space; the
 `docs/slice3` and `docs/phase4` pictures, which are rendered into a bitmap, regenerate byte-identical.
+
+## Slice 4: throughput (2026-11-14)
+
+**Question.** Is the 3 MB/s the Zig flood benchmark showed (a 22 MB `seq`) a Harf problem?
+
+**Answer: no. It is the PTY, and the child's write pattern.** The same commands through a bare reader (Python `pty`: `os.read(fd, 65536)`
+in a loop, no parsing at all) versus through Harf's `Session` (no drawing), ReleaseFast, Apple M1, macOS 27.0.1, one run each:
+
+| Load | Bare reader | Harf `Session` | Bytes per `read` (bare) |
+|---|---|---|---|
+| `seq 1 3000000` (22.9 MB, a line per write) | 7.54 s, 4.3 MB/s | 7.59 s, 3.0 MB/s | 13 |
+| `yes \| head -c 100MB` (full lines) | 3.10 s, 31 MB/s | 3.07 s, 33 MB/s | 99 |
+| `head -c 100MB /dev/zero \| tr` (no newlines) | 6.59 s, 14.5 MB/s | 8.15 s, 12.3 MB/s | 1023 |
+| `yes \| head -c 100MB \| cat` (large block writes) | 0.71 s, 136 MB/s | 0.99 s, 101 MB/s | 1023 |
+
+- A terminal that parses nothing is exactly as slow on the first two rows, so those loads are limited by the child's writes
+  through the PTY (a tty is line-buffered: `seq` makes 2.5 million writes). On large block writes the PTY delivers about 1 KB
+  per `read` on macOS whatever the writer does, and a bare reader tops out near 136 MB/s.
+- Where Harf adds anything it is 1.24x to 1.39x a bare reader (parsing, one lock and one wake per read), on loads that already
+  run at 100 MB/s or more.
+- A real 100 MB `yes | head -c` flood through the full app (window drawing) took about 4 s.
+
+**Tried and dropped: draining the PTY before locking.** Reading everything available (up to 64 KB) before taking the lock once
+did not move the numbers beyond run-to-run noise (same session: 8.30 vs 8.99 s, 3.40 vs 3.45 s, 8.56 vs 9.15 s, 1.28 vs 1.19 s;
+the machine itself varied by 20 percent between sessions). By the rule that a fix must beat its spread it was reverted.
+
+**`vtebench` 0.3.1** (built from source in the scratchpad), run inside the app at 80x24 with `--max-secs 4 --max-samples 20`,
+window drawing, 20 samples each; time per sample (each sample is at least 1 MiB of output):
+
+| Benchmark | Mean | Median | p90 |
+|---|---|---|---|
+| dense_cells | 18.4 ms | 18 | 23 |
+| medium_cells | 19.3 ms | 18 | 24 |
+| sync_medium_cells | 18.3 ms | 18 | 24 |
+| unicode | 10.1 ms | 10 | 16 |
+| scrolling | 37.0 ms | 35 | 46 |
+| scrolling_bottom_region | 37.5 ms | 36 | 47 |
+| scrolling_bottom_small_region | 37.6 ms | 37 | 44 |
+| scrolling_top_region | 39.9 ms | 38 | 50 |
+| scrolling_top_small_region | 38.5 ms | 38 | 47 |
+| scrolling_fullscreen | 49.5 ms | 47 | 62 |
+
+These are absolute numbers; no other terminal was run on this machine, so there is no comparison yet (the brief asks for
+"competitive"; comparing needs the other terminals installed and is done only if the owner asks). For scale, one sample of at
+least 1 MiB in about 18 to 50 ms is 20 to 55 MiB/s end to end including drawing, against 186 to 448 MB/s for parsing alone in
+the Phase 3 spike.

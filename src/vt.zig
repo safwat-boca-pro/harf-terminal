@@ -1358,3 +1358,58 @@ test "cells know whether they are selected" {
     try std.testing.expect(cellOf(t, 0, 3, &buf).selected);
     try std.testing.expect(!cellOf(t, 0, 5, &buf).selected);
 }
+
+const chunk_stream =
+    "plain ascii and digits 0123456789\r\n" ++
+    "two-byte \u{e9}\u{e8}\u{fc} three-byte \u{20ac}\u{2713} four-byte \u{1F600}\u{1F468}\r\n" ++
+    "\x1b[1;31mbold red\x1b[0m \x1b[4:3mcurly\x1b[0m \x1b[38;2;10;20;30mtruecolor\x1b[0m\r\n" ++
+    "\x1b]0;a window title\x07\x1b]2;second title\x1b\\" ++
+    "\u{645}\u{64F}\u{62D}\u{64E}\u{645}\u{64E}\u{651}\u{62F} \u{644}\u{627} \u{628}\u{64A}\u{62A}\u{64A}\r\n" ++ // tashkeel, lam-alef
+    "\u{65E5}\u{672C}\u{8A9E} wide\r\n" ++
+    "a\u{301} e\u{308} combining\r\n" ++
+    "\x1b[5;3Hcursor moved \x1b[2K\x1b[3Aup\x1b[?25l\x1b[2J\x1b[Hafter clear\r\nline two\x1b[1;1H";
+
+/// A grid fingerprint: every row's text, the cursor and the title, and per cell the style flags and colors.
+fn fingerprint(t: *Terminal, out: *std.ArrayList(u8), gpa: std.mem.Allocator) !void {
+    _ = t.update();
+    var buf: [256]u8 = undefined;
+    var cps: [16]u21 = undefined;
+    const sz = t.size();
+    for (0..sz.rows) |r| {
+        try out.appendSlice(gpa, t.rowText(@intCast(r), &buf));
+        try out.append(gpa, '\n');
+        _ = t.selectRow(@intCast(r));
+        for (0..sz.cols) |col| {
+            const cell = t.cellInRow(@intCast(col), &cps);
+            const st = cell.style;
+            try out.print(gpa, "{d}:{x}:{any}:{any};", .{ @intFromEnum(cell.wide), st.flags, st.fg, st.bg });
+        }
+        try out.append(gpa, '\n');
+    }
+    try out.print(gpa, "cursor {any} title '{s}'\n", .{ t.cursor(), t.title() });
+}
+
+test "chunking does not change the grid" {
+    const gpa = std.testing.allocator;
+    var whole_fp: std.ArrayList(u8) = .empty;
+    defer whole_fp.deinit(gpa);
+    {
+        const t = try Terminal.init(gpa, .{ .cols = 40, .rows = 12 });
+        defer t.deinit();
+        t.write(chunk_stream);
+        try fingerprint(t, &whole_fp, gpa);
+    }
+    for ([_]usize{ 1, 2, 3, 7, 13, 64, 4096, 65536 }) |chunk| {
+        var fp: std.ArrayList(u8) = .empty;
+        defer fp.deinit(gpa);
+        const t = try Terminal.init(gpa, .{ .cols = 40, .rows = 12 });
+        defer t.deinit();
+        var i: usize = 0;
+        while (i < chunk_stream.len) : (i += chunk) t.write(chunk_stream[i..@min(i + chunk, chunk_stream.len)]);
+        try fingerprint(t, &fp, gpa);
+        std.testing.expectEqualStrings(whole_fp.items, fp.items) catch |e| {
+            std.debug.print("chunk size {d} changed the grid\n", .{chunk});
+            return e;
+        };
+    }
+}
