@@ -244,16 +244,26 @@ pub const Painter = struct {
         ct.CGContextFillRect(ctx, .{ .origin = .{ .x = x, .y = y }, .size = .{ .width = w, .height = h } });
     }
 
-    /// The highlight, if it is on `row`: a translucent tint of its color over the cells and a solid line along their bottom.
-    fn drawHighlight(self: *Painter, ctx: *ct.CGContext, row: u16, top: f64, cw: f64, ch: f64) void {
+    /// The highlight, if it is on `row`: a translucent tint of its color over the cells and a solid line along their bottom. A shaped
+    /// row passes its layout, so the tint follows the boxes the cells are drawn in (a plain row's cells are on the grid).
+    fn drawHighlight(self: *Painter, ctx: *ct.CGContext, row: u16, top: f64, cw: f64, ch: f64, layout: ?*const rowlayout.RowLayout) void {
         const h = self.highlight orelse return;
         if (h.row != row) return;
-        const x = cw * @as(f64, @floatFromInt(h.lo));
-        const w = cw * @as(f64, @floatFromInt(h.hi - h.lo + 1));
+        var x0 = cw * @as(f64, @floatFromInt(h.lo));
+        var x1 = cw * @as(f64, @floatFromInt(h.hi + 1));
+        if (layout) |rl| {
+            x0 = std.math.inf(f64);
+            x1 = -std.math.inf(f64);
+            for (h.lo..@as(usize, h.hi) + 1) |col| {
+                const bx = rl.cellBox(@intCast(col), @floatCast(cw));
+                x0 = @min(x0, bx.x0);
+                x1 = @max(x1, bx.x1);
+            }
+        }
         const color = rgb(h.color);
         ct.CGContextSetRGBFillColor(ctx, color[0], color[1], color[2], 0.30);
-        ct.CGContextFillRect(ctx, .{ .origin = .{ .x = x, .y = top }, .size = .{ .width = w, .height = ch } });
-        fill(ctx, x, top + ch - @as(f64, self.line_px), w, @as(f64, self.line_px), color);
+        ct.CGContextFillRect(ctx, .{ .origin = .{ .x = x0, .y = top }, .size = .{ .width = x1 - x0, .height = ch } });
+        fill(ctx, x0, top + ch - @as(f64, self.line_px), x1 - x0, @as(f64, self.line_px), color);
     }
 
     fn drawCell(self: *Painter, ctx: *ct.CGContext, cps: []const u21, face: u2, x: f64, baseline: f64, color: [3]f64) void {
@@ -662,7 +672,7 @@ pub const Painter = struct {
                     const bx = rl.cellBox(@intCast(col), m.cell_w);
                     self.drawLines(ctx, st, colorsAt(cells, col, d), bx.x0, bx.x1 - bx.x0, top);
                 }
-                self.drawHighlight(ctx, row, top, cw, ch);
+                self.drawHighlight(ctx, row, top, cw, ch, rl);
                 if (cur) |c| if (c.visible and c.row == row and c.col < size.cols) {
                     const sp = rl.span(c.col, m.cell_w);
                     const bw: f64 = sp.x1 - sp.x0;
@@ -707,7 +717,7 @@ pub const Painter = struct {
                 if (st.underline() == .none and st.flags & vt.Style.Flag.strikethrough == 0) continue;
                 self.drawLines(ctx, st, colorsAt(cells, ci, d), cw * @as(f64, @floatFromInt(ci)), cw, top);
             }
-            self.drawHighlight(ctx, row, top, cw, ch);
+            self.drawHighlight(ctx, row, top, cw, ch, null);
         }
         const c = cur orelse return;
         if (cursor_drawn or !c.visible or c.row < first_row or c.row > last or c.col >= size.cols) return;
@@ -1005,6 +1015,28 @@ test "a highlight tints its cells once, however many times the row is drawn" {
     p.highlight = null;
     p.drawRows(s.t, s.cv.ctx, 0, 1);
     try std.testing.expect(s.cv.isBg(3 * cw, 0)); // and gone when cleared
+}
+
+test "a highlight on a shaped row follows the layout's cell boxes" {
+    const p = try Painter.init(std.testing.allocator, test_px);
+    defer p.deinit();
+    const s = try testScreen(p, 20, 1, 20, "مرحبا abc");
+    defer s.t.deinit();
+    defer s.cv.deinit();
+    const rl = (try testLayout(p, s.t, 0)) orelse return error.TestExpectedShaped;
+    const m = p.metrics();
+    const ch: usize = @intFromFloat(m.cell_h);
+    // the line along the bottom of a tinted cell: inside the span it is ink, next to it it is background
+    const bottom = struct {
+        fn at(cv: Canvas, x: f64, y: usize) bool {
+            return cv.isBg(@intFromFloat(x), y);
+        }
+    }.at;
+    p.highlight = .{ .row = 0, .lo = 6, .hi = 8, .color = .{ .r = 0, .g = 0, .b = 255 } };
+    p.drawRows(s.t, s.cv.ctx, 0, 0);
+    for (6..9) |col| try std.testing.expect(!bottom(s.cv, rl.cellBox(@intCast(col), m.cell_w).x0 + 1, ch - 1));
+    try std.testing.expect(bottom(s.cv, rl.cellBox(5, m.cell_w).x0 + 1, ch - 1)); // the space before it
+    try std.testing.expect(bottom(s.cv, rl.cellBox(12, m.cell_w).x0 + 1, ch - 1)); // a cell further on (not the cursor's, at column 9)
 }
 
 test "arabic word is joined" {

@@ -698,6 +698,18 @@ func selfTest() -> Never {
         var urls: [URL] = []
         pc.openPath = { paths.append($0) }
         pc.openURL = { urls.append($0) }
+        // a device and a FIFO exist and are not directories, but they are not files: opening them would read forever
+        try? FileManager.default.removeItem(atPath: dir + "/pipe")
+        if mkfifo(dir + "/pipe", 0o644) != 0 { fail("cannot make a FIFO") }
+        guard let dev = TerminalController(argv: ["/bin/sh", "-c", "printf '/dev/null pipe\\n'; sleep 5"], frame: NSSize(width: 700, height: 420), cwd: dir) else { fail("cannot start the device session") }
+        if !pump(5, until: { dev.rowText(0).contains("pipe") }) { fail("path click: row 0 is '\(dev.rowText(0))'") }
+        if dev.pathTarget(at: NSPoint(x: dev.insetPt + cell.width * 2.5, y: dev.insetPt + cell.height * 0.5)) != nil { fail("path click: /dev/null was offered as a file") }
+        if dev.pathTarget(at: NSPoint(x: dev.insetPt + cell.width * 12.5, y: dev.insetPt + cell.height * 0.5)) != nil { fail("path click: a FIFO was offered as a file") }
+        dev.close()
+        // command mode runs through a POSIX login shell: fish, tcsh and the like have no "$@", so they are not used
+        if editorShell(env: "/opt/homebrew/bin/fish") != "/bin/zsh" || editorShell(env: nil) != "/bin/zsh" { fail("editor: a non-POSIX or missing SHELL must give /bin/zsh") }
+        if editorShell(env: "/bin/bash") != "/bin/bash" || editorShell(env: "/usr/local/bin/zsh") != "/usr/local/bin/zsh" { fail("editor: a POSIX SHELL is kept") }
+
         click(5, [])
         if !paths.isEmpty { fail("path click: a plain click opened a path") }
         click(5, .command)
@@ -721,6 +733,19 @@ func selfTest() -> Never {
             guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { fail("cannot read a pixel") }
             return [Int(color.redComponent * 255), Int(color.greenComponent * 255), Int(color.blueComponent * 255)]
         }
+        // hover belongs to the view: Command pressed with the pointer elsewhere, a new painter, and the window losing key all clear it
+        pc.setHover(pc.hoverLink(at: at(5)))
+        pc.updateHover(command: true, at: NSPoint(x: -500, y: -500))
+        if pc.hover != nil { fail("hover: a pointer outside the view kept (or made) a highlight") }
+        pc.setHover(pc.hoverLink(at: at(5)))
+        Settings.shared.fontLarger()
+        if pc.hover != nil { fail("hover: the highlight outlived the painter that drew it") }
+        Settings.shared.fontReset()
+        pc.setHover(pc.hoverLink(at: at(5)))
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: win)
+        _ = pump(0.3) { false }
+        if pc.hover != nil { fail("hover: the highlight stayed after the window lost key") }
+        pc.setHover(nil)
         let before = bottomEdge(8), other = bottomEdge(20)
         pc.setHover(pc.hoverLink(at: at(5)))
         let lit = bottomEdge(8)

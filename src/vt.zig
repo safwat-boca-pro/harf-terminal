@@ -160,15 +160,21 @@ pub fn markUrls(cells: []Cell, color: Rgb) void {
     }
 }
 
-/// The URL a click at byte `click` of `text` is on: from the last `http://` or `https://` at or before the click to `urlEndFrom`.
+/// The URL a click at byte `click` of `text` is on, found the way `markUrls` colors them: scheme starts are taken in order and each URL
+/// runs to its `urlEndFrom`, so a URL inside another URL is part of the outer one. Null if the click is on no URL.
 fn urlExtent(text: []const u8, click: usize) ?struct { start: usize, end: usize } {
-    var start: ?usize = null;
     var i: usize = 0;
-    while (i <= click and i < text.len) : (i += 1) {
-        if (startsWithNoCase(text[i..], "https://") or startsWithNoCase(text[i..], "http://")) start = i;
+    while (i < text.len) {
+        if (startsWithNoCase(text[i..], "https://") or startsWithNoCase(text[i..], "http://")) {
+            if (urlEndFrom(text, i)) |end| {
+                if (click < end) return if (click >= i) .{ .start = i, .end = end } else null;
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
     }
-    const s = start orelse return null;
-    return .{ .start = s, .end = urlEndFrom(text, s) orelse return null };
+    return null;
 }
 
 fn startsWithNoCase(s: []const u8, prefix: []const u8) bool {
@@ -1565,6 +1571,10 @@ test "urlAt finds a plain http or https URL under a cell" {
     try std.testing.expect((try urlProbe("[docs](https://x.com/y)", 2, &buf)) == null);
     try std.testing.expectEqualStrings("https://x.com/y", (try urlProbe("[docs](https://x.com/y)", 14, &buf)).?);
     try std.testing.expectEqualStrings("HTTP://EXAMPLE.COM/x", (try urlProbe("HTTP://EXAMPLE.COM/x", 8, &buf)).?);
+    // a URL inside a URL is part of the outer one, wherever it is clicked (the coloring paints it as one)
+    const nested = "go https://a.org/x?r=https://b.org/y ok";
+    try std.testing.expectEqualStrings("https://a.org/x?r=https://b.org/y", (try urlProbe(nested, 30, &buf)).?);
+    try std.testing.expectEqualStrings("https://a.org/x?r=https://b.org/y", (try urlProbe(nested, 8, &buf)).?);
     // other schemes, a bare scheme, a space and a small buffer give nothing
     try std.testing.expect((try urlProbe("see ftp://x.org/a", 10, &buf)) == null);
     try std.testing.expect((try urlProbe("https://", 3, &buf)) == null);

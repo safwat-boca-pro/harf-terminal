@@ -314,6 +314,8 @@ final class TerminalController {
         guard let p = made else { return false }
         if let old = painter { harf_painter_free(old) }
         painter = p
+        hover = nil   // the new painter has no highlight, and the pointing hand would outlive its tint
+        view.window?.invalidateCursorRects(for: view)
         paintedFont = (family, fontPt, scale)
         var m = HarfCellMetrics()
         harf_painter_metrics(p, &m)
@@ -554,8 +556,9 @@ final class TerminalController {
         var path = (String(decoding: buf[0..<n], as: UTF8.self) as NSString).expandingTildeInPath
         if !path.hasPrefix("/") { path = (currentDirectory() ?? NSHomeDirectory()) + "/" + path }
         let url = URL(fileURLWithPath: path).standardizedFileURL
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else { return nil }
+        // a regular file, after following links: not a directory, and not a device or FIFO (`2>/dev/null` would offer /dev/null, and
+        // opening /dev/zero in an editor never ends)
+        guard (try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { return nil }
         return PathTarget(url: url, line: Int(line), col: Int(col))
     }
 
@@ -598,7 +601,9 @@ final class TerminalController {
 
     /// Command held (or let go) with the pointer at `p`: the link under it is tinted only while Command is down.
     func updateHover(command: Bool, at p: NSPoint) {
-        setHover(command ? hoverLink(at: p) : nil)
+        // flagsChanged goes to the key view wherever the pointer is, and the core clamps a pixel to the nearest cell: outside the view
+        // there is nothing under the pointer
+        setHover(command && view.bounds.contains(p) ? hoverLink(at: p) : nil)
     }
 
     /// Where the pointing hand shows, in view points.
@@ -867,7 +872,11 @@ final class TerminalView: NSView {
         let nc = NotificationCenter.default
         func watch(_ name: Notification.Name, key: Bool) -> NSObjectProtocol {
             nc.addObserver(forName: name, object: w, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.windowIsKey = key; self?.syncFocus() }
+                MainActor.assumeIsolated {
+                    self?.windowIsKey = key
+                    if !key { self?.controller?.setHover(nil) }   // Command-Tab away: no key event will say it was let go
+                    self?.syncFocus()
+                }
             }
         }
         focusObservers = [watch(NSWindow.didBecomeKeyNotification, key: true), watch(NSWindow.didResignKeyNotification, key: false)]

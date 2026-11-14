@@ -78,6 +78,13 @@ func chooseEditor() {
 
 private func warn(_ what: String) { FileHandle.standardError.write(Data("harf: editor: \(what)\n".utf8)) }
 
+/// The shell command mode runs through: `$SHELL` if it is a POSIX shell (the command goes in as `exec "$@"`, which fish, tcsh and
+/// nushell do not understand), else /bin/zsh.
+func editorShell(env: String?) -> String {
+    guard let env, ["zsh", "bash", "sh", "dash", "ksh"].contains((env as NSString).lastPathComponent) else { return "/bin/zsh" }
+    return env
+}
+
 /// Opens `target` as `Settings.shared.editor` says. Failures to start an editor are written to stderr.
 @MainActor
 func launchEditor(_ target: PathTarget) {
@@ -97,7 +104,10 @@ func launchEditor(_ target: PathTarget) {
     case .command(let argv):
         // through the login shell so the user's PATH finds `code` and friends; the words are arguments to `exec`, never a command line
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
+        process.executableURL = URL(fileURLWithPath: editorShell(env: ProcessInfo.processInfo.environment["SHELL"]))
+        process.terminationHandler = { p in
+            if p.terminationStatus != 0 { warn("\(argv[0]) exited with status \(p.terminationStatus) (is it in your PATH?)") }
+        }
         process.arguments = ["-l", "-c", "exec \"$@\"", "harf"] + argv
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice

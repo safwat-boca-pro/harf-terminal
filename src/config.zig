@@ -382,18 +382,29 @@ pub fn setKey(gpa: Allocator, text: []const u8, key: []const u8, value: []const 
 /// `setKey` on the config file at `path` (created if missing). The new text is written beside the file and renamed over it, so a
 /// reader (the config watcher) never sees half a file.
 pub fn setKeyInFile(gpa: Allocator, path: [:0]const u8, key: []const u8, value: []const u8) !void {
-    const old = readFile(gpa, path);
+    // A config that is a symlink (a dotfiles repo) is changed where it points, and stays a link; the file keeps its mode.
+    var real_buf: [1100]u8 = undefined;
+    const real: [:0]const u8 = if (realpath(path.ptr, &real_buf)) |r| std.mem.span(r) else path;
+    var st: std.c.Stat = undefined;
+    const have_mode = std.c.stat(real.ptr, &st) == 0;
+    const old = readFile(gpa, real);
     defer if (old) |o| gpa.free(o);
     const text = try setKey(gpa, old orelse "", key, value);
     defer gpa.free(text);
     var tmp_buf: [1100]u8 = undefined;
-    const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}.harf-tmp", .{path}, 0);
-    try writeFile(tmp, text);
-    if (std.c.rename(tmp.ptr, path.ptr) != 0) {
+    const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}.harf-tmp", .{real}, 0);
+    writeFile(tmp, text) catch |e| {
+        _ = std.c.unlink(tmp.ptr);
+        return e;
+    };
+    if (have_mode) _ = std.c.chmod(tmp.ptr, @intCast(st.mode & 0o7777));
+    if (std.c.rename(tmp.ptr, real.ptr) != 0) {
         _ = std.c.unlink(tmp.ptr);
         return error.CannotWrite;
     }
 }
+
+extern "c" fn realpath(noalias path: [*:0]const u8, noalias resolved: [*]u8) ?[*:0]u8;
 
 const ColorResult = enum { ok, bad, not_a_color };
 
@@ -830,6 +841,28 @@ test "setKeyInFile creates the file, then rewrites the line" {
     const b = readFile(testing.allocator, path).?;
     defer testing.allocator.free(b);
     try testing.expectEqualStrings("editor = second\n", b);
+}
+
+test "setKeyInFile writes through a symlink and keeps it, and keeps the file's mode" {
+    const tmp = if (std.c.getenv("TMPDIR")) |d| std.mem.trimEnd(u8, std.mem.span(d), "/") else "/tmp";
+    var target_buf: [300]u8 = undefined;
+    const target = try std.fmt.bufPrintSentinel(&target_buf, "{s}/harf-setkey-target-{d}", .{ tmp, std.c.getpid() }, 0);
+    var link_buf: [300]u8 = undefined;
+    const link = try std.fmt.bufPrintSentinel(&link_buf, "{s}/harf-setkey-link-{d}", .{ tmp, std.c.getpid() }, 0);
+    defer _ = std.c.unlink(target.ptr);
+    defer _ = std.c.unlink(link.ptr);
+    try writeFile(target, "font_size = 15\n");
+    _ = std.c.chmod(target.ptr, 0o600);
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink(target.ptr, link.ptr)); // a dotfiles repo's config
+    try setKeyInFile(testing.allocator, link, "editor", "x");
+    var rl_buf: [300]u8 = undefined;
+    try testing.expect(std.c.readlink(link.ptr, &rl_buf, rl_buf.len) > 0); // still a link
+    const through = readFile(testing.allocator, target).?; // and the file it points to is the one that changed
+    defer testing.allocator.free(through);
+    try testing.expectEqualStrings("font_size = 15\neditor = x\n", through);
+    var st: std.c.Stat = undefined;
+    try testing.expectEqual(@as(c_int, 0), std.c.stat(target.ptr, &st));
+    try testing.expectEqual(@as(u32, 0o600), @as(u32, st.mode) & 0o777);
 }
 
 test "load reads config and themes from a directory, and a missing directory is an empty config" {
