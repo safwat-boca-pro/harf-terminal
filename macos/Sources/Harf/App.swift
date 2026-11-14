@@ -1,48 +1,6 @@
 import AppKit
 import CHarf
 
-/// Connects a controller's events to its window: title, bell, and what happens when the shell exits.
-@MainActor
-final class WindowBinding: NSObject, NSWindowDelegate {
-    let window: NSWindow
-    let controller: TerminalController
-    private(set) var closed = false
-
-    init(window: NSWindow, controller: TerminalController) {
-        self.window = window
-        self.controller = controller
-        super.init()
-        window.delegate = self
-        controller.onTitle = { [weak window] in window?.title = $0 }
-        controller.onBell = { NSSound.beep() }
-        controller.onNotify = { [weak controller] title, body in Notifier.post(title: title, body: body, focused: controller?.hasKeyboard() ?? false) }
-        controller.onExit = { [weak self] status in
-            guard let self else { return }
-            // A clean exit closes the window. A failure keeps it, so the last output stays readable.
-            if status == 0 { self.window.close() } else { self.window.title = "Harf (exited (\(status)))" }
-        }
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        closed = true
-        controller.close()
-    }
-}
-
-/// The terminal's window, built the same way for the app and for the self-test.
-@MainActor
-func makeTerminalWindow(content: NSSize, view: NSView) -> NSWindow {
-    let window = NSWindow(contentRect: NSRect(origin: .zero, size: content), styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                          backing: .buffered, defer: false)
-    window.title = "Harf"
-    // The default (wide-gamut) window color space makes AppKit keep two backing surfaces once the view has been
-    // redrawn (about 5 MB more at 700x420 pt); sRGB keeps one. Measured in docs/perf.md (slice 4 attribution).
-    // Colors are also interpreted as sRGB, which is what the theme and ANSI palette are defined in.
-    window.colorSpace = .sRGB
-    window.contentView = view
-    return window
-}
-
 /// What a menu item does: an action by name, as a key binding names it.
 final class ActionBox: NSObject {
     let action: String
@@ -117,8 +75,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "find_next", "find_prev":
             if let pane, pane.isFindOpen { pane.findStep(older: action == "find_next") } else { pane?.showFind() }
         case "copy", "paste":
-            // the find field has the keyboard: it is the one to copy from and paste into
-            if let text = NSApp.keyWindow?.firstResponder as? NSTextView {
+            // the find field has the keyboard: it is the one to paste into, and to copy from when the user selected something in
+            // it. Otherwise Cmd+C copies the terminal's selection, which is where the current find match is.
+            if let text = (c?.view.window ?? NSApp.keyWindow)?.firstResponder as? NSTextView, action == "paste" || text.selectedRange.length > 0 {
                 if action == "copy" { text.copy(nil) } else { text.paste(nil) }
             } else if let c { return c.perform(action, arg: arg) } else { return pane?.controller.perform(action, arg: arg) ?? false }
         default: return c?.perform(action, arg: arg) ?? pane?.controller.perform(action, arg: arg) ?? false
@@ -162,8 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         traceStep("applicationDidFinishLaunching")
-        rebuildMenu()
-        Settings.shared.load()   // before the first terminal exists, so its font, theme and scrollback are the configured ones
+        Settings.shared.load()   // before the first terminal exists, so its font, theme and scrollback are the configured ones; it builds the menu
         traceStep("main menu installed, configuration loaded")
         // Measurement hook (docs/perf.md): HARF_CONTENT_SIZE=WxH pins the window, e.g. 700x420 for the 80x24 class.
         var content = NSSize(width: 700, height: 420)

@@ -115,7 +115,7 @@ final class TerminalController {
     var onNotify: (String, String) -> Void = { _, _ in }
     /// The view became the first responder (the window's title follows the focused pane).
     var onFocus: () -> Void = {}
-    /// Where OSC 52 writes go (the self-test points it at a private pasteboard).
+    /// Where OSC 52 writes and Cmd+C copies go (the self-test points it at a private pasteboard).
     var clipboard: NSPasteboard = .general
     /// May a program change the clipboard right now? Only while the user is typing into this very terminal (`hasKeyboard`): a
     /// program in another window, tab or split pane must not replace what the user copied (paste-jacking). The self-test
@@ -124,10 +124,13 @@ final class TerminalController {
 
     /// True while the app is active, its window is key, and this terminal's pane (its find field counts) has the keyboard, not a
     /// sibling pane or another tab. A terminal with no pane around it is its window's only terminal.
-    func hasKeyboard() -> Bool {
-        guard NSApp.isActive, let window = view.window, window.isKeyWindow else { return false }
+    func hasKeyboard() -> Bool { NSApp.isActive && view.window?.isKeyWindow == true && paneIsFirstResponder }
+
+    /// This terminal's pane (its find field counts) holds its window's first responder. A terminal with no pane around it is
+    /// its window's only terminal. The cursor and focus reports follow this, so one pane per window looks focused.
+    var paneIsFirstResponder: Bool {
         guard let pane = enclosingPane(of: view) else { return true }
-        return enclosingPane(of: window.firstResponder) === pane
+        return enclosingPane(of: view.window?.firstResponder) === pane
     }
 
     /// `argv` nil runs the login shell. `frame` is the view's initial size in points.
@@ -316,10 +319,11 @@ final class TerminalController {
     }
 
     /// Cmd+C: the selection goes to the pasteboard; nothing selected does nothing.
-    func copySelection(to pasteboard: NSPasteboard = .general) {
+    func copySelection(to pasteboard: NSPasteboard? = nil) {
         guard let s = selectedText() else { return }
-        pasteboard.clearContents()
-        pasteboard.setString(s, forType: .string)
+        let pb = pasteboard ?? clipboard
+        pb.clearContents()
+        pb.setString(s, forType: .string)
     }
 
     /// The terminal's default background right now (a program's OSC 11 changes it).
@@ -338,7 +342,7 @@ final class TerminalController {
         return (Int(cols), Int(rows))
     }
 
-    /// The window became key (true) or resigned (false).
+    /// This terminal gained (true) or lost (false) the keyboard: the cursor look follows, and so does a program that asked for focus events.
     func setFocus(_ on: Bool) {
         guard let t = term else { return }
         _ = harf_term_focus(t, on ? 1 : 0)
@@ -411,7 +415,11 @@ final class TerminalController {
         // Only the dimension the program changed is resized, so a window dragged to an odd height keeps it.
         let size = NSSize(width: CGFloat(g.cols) * cellPx.w / scale + 2 * inset,
                           height: rowsChanged ? CGFloat(g.rows) * cellPx.h / scale + 2 * inset : view.bounds.height)
-        if let w = view.window { w.setContentSize(size) } else { view.setFrameSize(size) }   // either one ends in layoutChanged
+        guard let w = view.window else { return view.setFrameSize(size) }   // ends in layoutChanged
+        // Only a terminal that fills its window can resize it. A pane in a split keeps its share (the window is not resized to one
+        // pane's grid) and the next ordinary resize refits the grid.
+        // ponytail: a program that asks for 132 columns in a narrow split is clipped, not given more room.
+        if w.contentView === (enclosingPane(of: view) ?? view) { w.setContentSize(size) }   // ends in layoutChanged
     }
 
     /// Asks AppKit to draw the view. The one place the wake path does it, so the latency check can see it happen.
@@ -635,23 +643,46 @@ final class TerminalView: NSView {
     }
 
     private var focusObservers: [NSObjectProtocol] = []
+    private var firstResponderWatch: NSKeyValueObservation?
+    /// From the window's key notifications (the self-test posts them for a window that is not really key).
+    private var windowIsKey = false
 
-    /// The cursor is hollow while the window is not key, and a program that asked hears focus in and out.
+    /// Focus is the key window's keyboard focus, and it belongs to one pane: the cursor is hollow in the others, and only the
+    /// program in the focused pane hears focus in and out (mode 1004).
+    private func syncFocus() { controller?.setFocus(windowIsKey && controller?.paneIsFirstResponder == true) }
+
+    private var focusSyncPending = false
+
+    /// The first responder changed. AppKit passes through states in which no pane has it (a find field's editor leaves the view
+    /// tree while it is still the first responder), and a program must not hear focus out and in for that, so the sync waits for
+    /// the end of the run-loop turn, when the keyboard has settled.
+    private func syncFocusSoon() {
+        guard !focusSyncPending else { return }
+        focusSyncPending = true
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.focusSyncPending = false; self?.syncFocus() }
+        }
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         for o in focusObservers { NotificationCenter.default.removeObserver(o) }
         focusObservers = []
+        firstResponderWatch = nil
         guard let w = window else { return }
         let nc = NotificationCenter.default
-        focusObservers = [
-            nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: w, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.controller?.setFocus(true) }
-            },
-            nc.addObserver(forName: NSWindow.didResignKeyNotification, object: w, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.controller?.setFocus(false) }
-            },
-        ]
-        controller?.setFocus(w.isKeyWindow)
+        func watch(_ name: Notification.Name, key: Bool) -> NSObjectProtocol {
+            nc.addObserver(forName: name, object: w, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.windowIsKey = key; self?.syncFocus() }
+            }
+        }
+        focusObservers = [watch(NSWindow.didBecomeKeyNotification, key: true), watch(NSWindow.didResignKeyNotification, key: false)]
+        // Every way the keyboard moves between panes (a click, Cmd+[ and Cmd+], a split, a close, the find bar) changes this.
+        firstResponderWatch = w.observe(\.firstResponder, options: []) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.syncFocusSoon() }
+        }
+        windowIsKey = w.isKeyWindow
+        syncFocus()
     }
 
     deinit {

@@ -312,10 +312,10 @@ func selfTest() -> Never {
     // 1i. The app's window is an sRGB window: with the default color space AppKit keeps a second backing surface (about 5 MB)
     // once the view has been redrawn. Nothing else in the self-test would notice that setting disappearing.
     do {
-        guard let c = TerminalController(argv: ["/bin/sh", "-c", "sleep 2"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the window session") }
-        let w = makeTerminalWindow(content: NSSize(width: 700, height: 420), view: c.view)
+        guard let wc = WindowController(argv: ["/bin/sh", "-c", "sleep 2"], content: NSSize(width: 700, height: 420), cwd: nil) else { fail("cannot start the window session") }
+        let w = wc.window
         if w.colorSpace != NSColorSpace.sRGB { fail("the terminal window's color space is \(String(describing: w.colorSpace?.localizedName)), not sRGB (costs about 5 MB of footprint)") }
-        c.close()
+        w.close()
     }
 
     // 1j. A program that switches the terminal to 132 columns (DECCOLM) gets a window that fits them, and the window follows
@@ -323,8 +323,8 @@ func selfTest() -> Never {
     do {
         // The first second is for the window to finish its own refit, which would otherwise reset the grid under the program.
         let script = "sleep 1; printf '\\033[?40h\\033[?3h'; printf wide; sleep 3; printf '\\033[?3l'; printf narrow; sleep 3"
-        guard let c = TerminalController(argv: ["/bin/sh", "-c", script], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the DECCOLM session") }
-        let w = makeTerminalWindow(content: NSSize(width: 700, height: 420), view: c.view)
+        guard let wc = WindowController(argv: ["/bin/sh", "-c", script], content: NSSize(width: 700, height: 420), cwd: nil) else { fail("cannot start the DECCOLM session") }
+        let c = wc.allPanes[0].controller
         func fits(_ cols: Int) -> Bool {
             let want = CGFloat(cols) * c.cellSizePt.width + 2 * c.insetPt
             return abs(c.view.bounds.width - want) < 1 && c.gridSize.cols == cols && c.coreGrid().cols == cols
@@ -334,8 +334,22 @@ func selfTest() -> Never {
         _ = pump(0.3) { false }
         if !fits(132) { fail("DECCOLM: the 132-column fit did not hold (view \(c.view.bounds.width) pt, grid \(c.gridSize), core \(c.coreGrid()))") }
         if !pump(5, until: { fits(80) && c.rowText(0).contains("narrow") }) { fail("DECCOLM: back to 80 columns, the window is \(c.view.bounds.width) pt wide, grid \(c.gridSize), core \(c.coreGrid())") }
-        c.close()
-        _ = w
+        wc.window.close()
+    }
+
+    // 1j2. In a split the window does not follow one pane's grid: the pane keeps its share (before this the window was resized to the
+    // 132 columns of one pane and squeezed the other).
+    do {
+        setenv("SHELL", "/bin/sh", 1)   // a split starts the login shell: keep the user's own startup files out of the test
+        let script = "sleep 1; printf '\\033[?40h\\033[?3h'; printf wide; sleep 3"
+        guard let wc = WindowController(argv: ["/bin/sh", "-c", script], content: NSSize(width: 700, height: 420), cwd: nil) else { fail("cannot start the DECCOLM split session") }
+        wc.split(wc.allPanes[0], vertical: true)
+        let c = wc.allPanes[0].controller
+        let before = wc.window.contentView?.bounds.size
+        if !pump(5, until: { c.coreGrid().cols == 132 }) { fail("DECCOLM in a split: the core never went to 132 columns (grid \(c.coreGrid()))") }
+        _ = pump(1.0) { false }   // time for a window resize, if one were wrongly made
+        if wc.window.contentView?.bounds.size != before { fail("DECCOLM in a split: the window changed from \(String(describing: before)) to \(String(describing: wc.window.contentView?.bounds.size))") }
+        wc.window.close()
     }
 
     // 1k. Dirty rows, through the view: a bitmap that is updated only with the rectangles the wake path invalidates, each drawn by the
@@ -518,7 +532,9 @@ func selfTest() -> Never {
 
     // 2f. Window focus reaches a program that asked for focus events (mode 1004).
     do {
-        let script = "stty raw -echo; printf '\\033[?1004h'; printf R; head -c 6 | od -An -tx1 | tr -s ' '"
+        // The first half second is for the view to join its window: a session starts "focused", and attaching an unfocused window
+        // tells a program that has already asked for focus events "out", ahead of the "in" and "out" this test looks for.
+        let script = "sleep 0.5; stty raw -echo; printf '\\033[?1004h'; printf R; head -c 6 | od -An -tx1 | tr -s ' '"
         guard let f = TerminalController(argv: ["/bin/sh", "-c", script], frame: NSSize(width: 700, height: 420)) else { fail("cannot start focus session") }
         let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
         win.contentView = f.view
@@ -573,14 +589,11 @@ func selfTest() -> Never {
     pasting.close()
 
     // 4. Title and bell reach the window; a clean exit closes it.
-    guard let sig = TerminalController(argv: ["/bin/sh", "-c", "printf '\\033]0;T1\\007\\007'"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start title session") }
-    let win1 = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
-    win1.contentView = sig.view
+    guard let wc1 = WindowController(argv: ["/bin/sh", "-c", "printf '\\033]0;T1\\007\\007'"], content: NSSize(width: 700, height: 420), cwd: nil) else { fail("cannot start title session") }
     var bells = 0
-    let bind1 = WindowBinding(window: win1, controller: sig)
-    sig.onBell = { bells += 1 }
-    if !pump(5, until: { bind1.closed }) { fail("a clean exit did not close the window") }
-    if win1.title != "T1" { fail("title is '\(win1.title)'") }
+    wc1.allPanes[0].controller.onBell = { bells += 1 }
+    if !pump(5, until: { wc1.closed }) { fail("a clean exit did not close the window") }
+    if wc1.window.title != "T1" { fail("title is '\(wc1.window.title)'") }
     if bells != 1 { fail("bell count is \(bells)") }
 
     // 2i. Configuration, through the app's own path: a config file sets the font and the theme (the core is told, so a program's
@@ -744,17 +757,88 @@ func selfTest() -> Never {
         wc.window.close()
     }
 
+    // 2m. Cmd+C while the find bar is open copies the match, which is the terminal's selection. The find field has the keyboard and
+    // nothing selected in it, so before this the copy went to the field and copied nothing.
+    do {
+        guard let wc = WindowController(argv: ["/bin/sh", "-c", "echo hay needle stack; sleep 30"], content: NSSize(width: 700, height: 420), cwd: nil) else { fail("cannot make the find-copy window") }
+        let pane = wc.allPanes[0]
+        let pb = NSPasteboard(name: NSPasteboard.Name("harf.selftest.findcopy.\(getpid())"))
+        pb.clearContents()
+        pane.controller.clipboard = pb
+        if !pump(5, until: { pane.controller.rowText(0).contains("needle") }) { fail("find copy: the output never arrived") }
+        pane.showFind()
+        pane.findChanged("needle")
+        guard let field = wc.window.firstResponder as? NSTextView else { fail("find copy: the find field should have the keyboard") }
+        if field.selectedRange.length != 0 { fail("find copy: nothing should be selected in the find field") }
+        if pane.controller.selectedText() != "needle" { fail("find copy: the match is not the terminal's selection ('\(String(describing: pane.controller.selectedText()))')") }
+        let d = AppDelegate()
+        if !d.perform("copy", [], from: pane.controller) { fail("find copy: the copy was not handled") }
+        if pb.string(forType: .string) != "needle" { fail("find copy: the clipboard holds '\(String(describing: pb.string(forType: .string)))', not the match") }
+        pb.clearContents()
+        wc.window.close()
+    }
+
+    // 2n. Focus (the cursor, and focus in and out for a program that asked, mode 1004) follows the pane that has the keyboard, not
+    // every pane of the key window. Before this every pane was told it had focus when the window became key, and nobody heard
+    // the keyboard move between panes. The find bar belongs to its pane: opening and closing it must not look like a focus change.
+    do {
+        setenv("SHELL", "/bin/sh", 1)
+        let watch = "stty raw -echo; printf '\\033[?1004h'; echo READY; head -c 6 | od -An -tx1 | tr -s ' '; sleep 30"
+        // Both programs are typed into a shell after the panes are in the window: a program that asked for focus events before its
+        // view was attached would be told "out" by the attaching, ahead of what this test looks for.
+        guard let wc = WindowController(argv: nil, content: NSSize(width: 700, height: 420), cwd: nil) else { fail("cannot make the pane focus window") }
+        let first = wc.allPanes[0]
+        wc.split(first, vertical: true)
+        let second = wc.allPanes[1]
+        first.controller.sendText("\(watch)\n")
+        second.controller.sendText("\(watch)\n")
+        func ready(_ p: TerminalPane) -> Bool { (0..<p.controller.gridSize.rows).contains { p.controller.rowText($0).contains("READY") && !p.controller.rowText($0).contains("echo") } }
+        func heard(_ p: TerminalPane) -> Bool { (0..<p.controller.gridSize.rows).contains { p.controller.rowText($0).contains("1b 5b 49 1b 5b 4f") } }   // in, then out
+        if !pump(8, until: { ready(first) && ready(second) }) { fail("pane focus: the two panes never became ready") }
+        // the window becomes key with the keyboard in the second pane: only that program hears focus in
+        wc.window.makeFirstResponder(second.controller.view)
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: wc.window)
+        _ = pump(0.3) { false }   // the notification is delivered on the run loop; the keyboard moves only after it
+        // the keyboard moves to the first pane: the second hears focus out (its six bytes are in, out), the first hears focus in
+        wc.window.makeFirstResponder(first.controller.view)
+        if !pump(5, until: { heard(second) }) { fail("pane focus: the pane that lost the keyboard did not hear focus out after focus in") }
+        _ = pump(0.3) { false }
+        if heard(first) { fail("pane focus: the first pane heard focus out before it lost the keyboard") }
+        // its find bar takes the keyboard and gives it back: that is still the same pane, so its program hears nothing
+        first.showFind()
+        first.hideFind()
+        _ = pump(0.5) { false }
+        if heard(first) { fail("pane focus: opening and closing the find bar looked like a focus change to the program") }
+        // the keyboard leaves the first pane: now its program hears focus out
+        wc.window.makeFirstResponder(second.controller.view)
+        if !pump(5, until: { heard(first) }) { fail("pane focus: the first pane never heard focus in then out") }
+        wc.window.close()
+    }
+
+    // 2o. First run: Cmd+, on a machine with no config directory creates it, and what the user then saves is noticed (nothing was
+    // being watched, because the directory did not exist when the configuration was read).
+    do {
+        let tmp = NSTemporaryDirectory() + "harf-selftest-firstrun-\(getpid())"
+        let fm = FileManager.default
+        try? fm.removeItem(atPath: tmp)
+        Settings.shared.load(directory: tmp + "/harf")   // does not exist yet
+        let path = Settings.shared.ensureConfigFile()
+        if path != tmp + "/harf/config" || !fm.fileExists(atPath: path) { fail("first run: the config file is '\(path)', exists \(fm.fileExists(atPath: path))") }
+        try? "font_size = 22\n".write(toFile: path, atomically: false, encoding: .utf8)
+        if !pump(5, until: { Settings.shared.fontPt == 22 }) { fail("first run: a file saved in the new config directory was not noticed (font size \(Settings.shared.fontPt))") }
+        Settings.shared.load(directory: tmp + "/none")   // back to the defaults for what follows
+        try? fm.removeItem(atPath: tmp)
+    }
+
     // 5. A failing shell keeps its window and says so.
-    guard let bad = TerminalController(argv: ["/bin/sh", "-c", "echo boom; exit 3"], frame: NSSize(width: 700, height: 420)) else { fail("cannot start failing session") }
-    let win2 = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 420), styleMask: [.titled], backing: .buffered, defer: false)
-    win2.contentView = bad.view
-    let bind2 = WindowBinding(window: win2, controller: bad)
+    guard let wc2 = WindowController(argv: ["/bin/sh", "-c", "echo boom; exit 3"], content: NSSize(width: 700, height: 420), cwd: nil) else { fail("cannot start failing session") }
+    let bad = wc2.allPanes[0].controller
     if !pump(5, until: { bad.exitStatus == 3 }) { fail("exit status is \(String(describing: bad.exitStatus))") }
     _ = pump(0.2) { false }
-    if bind2.closed { fail("exit status 3 closed the window") }
-    if !win2.title.contains("exited (3)") { fail("title is '\(win2.title)'") }
+    if wc2.closed { fail("exit status 3 closed the window") }
+    if !wc2.window.title.contains("exited (3)") { fail("title is '\(wc2.window.title)'") }
     if !bad.rowText(0).contains("boom") { fail("row 0 is '\(bad.rowText(0))'") }
-    bad.close()
+    wc2.window.close()
 
     for p in tempScripts { try? FileManager.default.removeItem(atPath: p) }
     print("selftest ok")

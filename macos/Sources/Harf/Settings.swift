@@ -78,6 +78,7 @@ final class Settings {
         if let newDirectory { directory = newDirectory }
         if let old = config { harf_config_free(old) }
         config = harf_config_load(directory)
+        defer { (NSApp.delegate as? AppDelegate)?.rebuildMenu() }   // also when there is no config: the menu must exist
         guard let cfg = config else { return }
         fontFamily = String(cString: harf_config_font_family(cfg))
         configPt = CGFloat(harf_config_font_size(cfg))
@@ -103,7 +104,6 @@ final class Settings {
                 MainActor.assumeIsolated { Settings.shared.appearanceChanged() }
             }
         }
-        (NSApp.delegate as? AppDelegate)?.rebuildMenu()
     }
 
     /// The files changed. Several events arrive for one save, so wait a moment and read once.
@@ -136,20 +136,26 @@ final class Settings {
         return t
     }
 
-    /// The file "Open Config" shows: created, with every setting commented out, if there is none.
-    func openConfigFile() {
+    /// The config file, created (with every setting commented out) if there is none, and watched: the directory may not have
+    /// existed when `load` looked, in which case nothing was being watched.
+    func ensureConfigFile() -> String {
         let dir = config.map { String(cString: harf_config_dir($0)) } ?? (NSHomeDirectory() + "/.config/harf")
         let path = dir + "/config"
         let fm = FileManager.default
         try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
         if !fm.fileExists(atPath: path) { try? String(cString: harf_config_template()).write(toFile: path, atomically: true, encoding: .utf8) }
-        let url = URL(fileURLWithPath: path)
+        watcher.watch(directory: dir) { [weak self] in self?.reloadSoon() }
+        return path
+    }
+
+    /// Shows the config file in the user's text editor.
+    func openConfigFile() {
+        let url = URL(fileURLWithPath: ensureConfigFile())
         if let editor = NSWorkspace.shared.urlForApplication(toOpen: .plainText) {
             NSWorkspace.shared.open([url], withApplicationAt: editor, configuration: NSWorkspace.OpenConfiguration())
         } else {
             NSWorkspace.shared.open(url)
         }
-        if config == nil || String(cString: harf_config_dir(config!)) != dir { load() }   // start watching a directory that did not exist
     }
 }
 
