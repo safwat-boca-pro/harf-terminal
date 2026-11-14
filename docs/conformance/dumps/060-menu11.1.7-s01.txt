@@ -1,0 +1,25 @@
+# 060-menu11.1.7-s01  grid 80x24
+Test User-Defined Keys (DECUDK)
+Press 'q' to quit.  Function keys should echo their labels.
+(On a DEC terminal you must press SHIFT as well).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

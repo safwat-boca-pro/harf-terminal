@@ -439,6 +439,12 @@ if args.contains("--selftest") {
     MainActor.assumeIsolated { _ = NSApplication.shared; selfTest() }
 }
 
+if let i = args.firstIndex(of: "--conformance"), i + 1 < args.count {
+    setvbuf(stdout, nil, _IONBF, 0)
+    let dir = args[i + 1]
+    MainActor.assumeIsolated { _ = NSApplication.shared; conformance(dir: dir) }
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

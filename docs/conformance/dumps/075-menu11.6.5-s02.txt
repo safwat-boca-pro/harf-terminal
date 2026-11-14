@@ -1,0 +1,25 @@
+# 075-menu11.6.5-s02  grid 80x24
+
+
+
+
+
+
+                 *********************************************
+                 * The screen background should be black,    *
+                 * with a box made of asterisks and this     *
+                 * caption, in white (actually gray - it     *
+                 * is not bold).  Only the asterisk box      *
+                 * should be in color.                       *
+                 *                                           *
+                 *                                           *
+                 *                                           *
+                 *                                           *
+                 *********************************************
+
+
+
+
+
+Push <RETURN>
+

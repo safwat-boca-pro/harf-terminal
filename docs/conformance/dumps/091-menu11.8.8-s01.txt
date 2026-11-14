@@ -1,0 +1,25 @@
+# 091-menu11.8.8-s01  grid 80x24
+Test of Window modifying.
+Iconify
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

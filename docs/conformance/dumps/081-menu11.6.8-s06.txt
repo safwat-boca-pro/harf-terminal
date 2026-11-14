@@ -1,0 +1,25 @@
+# 081-menu11.6.8-s06  grid 80x24
+                   Color/Graphic rendition test pattern:
+
+
+vanilla                                bold
+
+     underline                              bold underline
+
+blink                                  bold blink
+
+     underline blink                        bold underline blink
+
+negative                               bold negative
+
+     underline negative                     bold underline negative
+
+blink negative                         bold blink negative
+
+     underline blink negative               bold underline blink negative
+
+     original foreground                    original background
+
+
+Light background. Push <RETURN>
+

@@ -1,0 +1,25 @@
+# 037-menu6.3-s01  grid 80x24
+Test of Device Status Report 5 (report terminal status).
+Report is: <27> [ 0 n  -- means "TERMINAL OK"
+
+Test of Device Status Report 6 (report cursor position).
+Report is: <27> [ 5 ; 1 R  -- OK
+
+
+Report is: <27> [ 5 ; 1 R  -- OK
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Push <RETURN>
+

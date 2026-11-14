@@ -1,0 +1,25 @@
+# 092-menu11.8.9-s01  grid 80x24
+Test of Window reporting.
+
+Report state of window (normal/iconified) (11):
+          
+         ERR
+Report position of window in pixels (13):
+          
+         ERR
+Report position of text-area in pixels (13;2):
+          
+         ERR
+Report size of text-area in pixels (14):
+          
+         ERR
+Report size of window in pixels (14;2):
+          
+         ERR
+Report size of screen in pixels (15):
+          
+         ERR
+Push <RETURN>
+
+
+

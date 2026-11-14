@@ -1,0 +1,25 @@
+# 034-menu6.2-s01  grid 80x24
+Test of LineFeed/NewLine mode.
+
+NewLine mode set. Push the RETURN key: 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

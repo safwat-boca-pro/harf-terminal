@@ -1,0 +1,25 @@
+# 084-menu11.6.9-s03  grid 80x24
+                   Extended/Graphic rendition test pattern:
+
+
+vanilla                                bold
+
+     underline                              bold underline
+
+blink                                  bold blink
+
+     underline blink                        bold underline blink
+
+negative                               bold negative
+
+     underline negative                     bold underline negative
+
+blink negative                         bold blink negative
+
+     underline blink negative               bold underline blink negative
+
+     original foreground                    original background
+
+concealed                              concealed negative <- concealed text
+Dark background. Push <RETURN>
+

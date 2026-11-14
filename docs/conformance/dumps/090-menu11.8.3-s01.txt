@@ -1,0 +1,25 @@
+# 090-menu11.8.3-s01  grid 80x24
+Please enter the new window name.  Newer xterms may beep when setting the title.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

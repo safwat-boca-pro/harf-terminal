@@ -1,0 +1,25 @@
+# 041-menu6.7-s01  grid 80x24
+
+Test of the "Request Terminal Parameters" feature, argument 0.
+
+
+Report is:  -- Bad format
+
+
+
+
+Test of the "Request Terminal Parameters" feature, argument 1.
+
+
+Report is:  -- Bad format
+
+
+
+
+
+
+
+
+
+
+Push <RETURN>

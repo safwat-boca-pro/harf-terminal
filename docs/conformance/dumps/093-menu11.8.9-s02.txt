@@ -1,0 +1,25 @@
+# 093-menu11.8.9-s02  grid 80x24
+Test of Window reporting.
+
+Report size of character in pixels (16):
+          
+         ERR
+Report size of window in chars (18):
+          
+         ERR
+Report icon label (20):
+          
+         ERR
+Report window label (21):
+          
+         ERR
+
+
+
+
+
+Push <RETURN>
+
+
+
+

@@ -1,0 +1,25 @@
+# 089-menu11.7.6-s01  grid 80x24
+                   *
+                ***
+             ***
+          ***
+       ***
+    ***
+ ***
+*
+
+
+
+
+
+
+
+
+
+
+
+
+----+----1----+----2----+----3----+----4----+----5----+----6----+----7----+----8
+Test Scroll-Up (SU)
+There should be a horizontal row of *'s above, on the top row.
+Push <RETURN>

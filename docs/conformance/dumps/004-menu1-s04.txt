@@ -1,0 +1,25 @@
+# 004-menu1-s04  grid 132x24  (the view is 80x24: columns past the window's edge are not visible in the picture)
+Test of autowrap, mixing control and print characters.
+The left/right margins should have letters in order:
+I                                                                                                                                  i
+J                                                                                                                                  j
+K                                                                                                                                  k
+L                                                                                                                                  l
+M                                                                                                                                  m
+N                                                                                                                                  n
+O                                                                                                                                  o
+P                                                                                                                                  p
+Q                                                                                                                                  q
+R                                                                                                                                  r
+S                                                                                                                                  s
+T                                                                                                                                  t
+U                                                                                                                                  u
+V                                                                                                                                  v
+W                                                                                                                                  w
+X                                                                                                                                  x
+Y                                                                                                                                  y
+Z                                                                                                                                  z
+
+Push <RETURN>
+
+

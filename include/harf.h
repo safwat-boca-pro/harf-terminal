@@ -89,6 +89,8 @@ void harf_term_clear_selection(HarfTerm *t);
 /* The terminal's current default background (a program's OSC 11 changes it) as R, G, B bytes: fill the margins
  * around the grid with it. */
 void harf_term_default_bg(HarfTerm *t, uint8_t rgb[3]);
+/* The terminal's real grid size (a program can change it, for example to 132 columns, without the view knowing). */
+void harf_term_grid(HarfTerm *t, uint16_t *cols, uint16_t *rows);
 /* Pastes text, framed for the terminal's paste mode (bracketed, newlines as CR). 0 = ok. */
 int harf_term_paste(HarfTerm *t, const uint8_t *utf8, size_t len);
 void harf_term_wake_handled(HarfTerm *t);

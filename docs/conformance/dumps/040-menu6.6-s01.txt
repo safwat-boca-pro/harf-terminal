@@ -1,0 +1,25 @@
+# 040-menu6.6-s01  grid 80x24
+Testing Tertiary Device Attributes (unit ID)
+
+          <27> P ! | 0 0 0 0 0 0 0 0 <27> \  ok
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Push <RETURN>
+

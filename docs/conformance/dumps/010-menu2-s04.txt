@@ -1,0 +1,25 @@
+# 010-menu2-s04  grid 80x24
+1234567890123456789012345678901234567890123456789012345678901234567890123456789
+
+  This is 80 column mode, light background.
+   This is 80 column mode, light background.
+    This is 80 column mode, light background.
+     This is 80 column mode, light background.
+      This is 80 column mode, light background.
+       This is 80 column mode, light background.
+        This is 80 column mode, light background.
+         This is 80 column mode, light background.
+          This is 80 column mode, light background.
+           This is 80 column mode, light background.
+            This is 80 column mode, light background.
+             This is 80 column mode, light background.
+              This is 80 column mode, light background.
+               This is 80 column mode, light background.
+                This is 80 column mode, light background.
+                 This is 80 column mode, light background.
+                  This is 80 column mode, light background.
+                   This is 80 column mode, light background.Push <RETURN>
+
+
+
+

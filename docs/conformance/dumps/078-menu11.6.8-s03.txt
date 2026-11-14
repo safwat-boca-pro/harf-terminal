@@ -1,0 +1,25 @@
+# 078-menu11.6.8-s03  grid 80x24
+
+
+
+
+
+
+
+
+
+
+
+Push <RETURN>
+Jump scroll down region [12..13] size 2 Line 29
+
+
+
+
+
+
+
+
+
+
+

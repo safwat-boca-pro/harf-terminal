@@ -1,0 +1,25 @@
+# 059-menu11.1.6-s02  grid 80x24
+Test Soft Terminal Reset (DECSTR)
+(VT220 & up)
+
+The terminal will now soft-reset
+Push <RETURN>
+Push <RETURN>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

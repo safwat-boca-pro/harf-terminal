@@ -1,0 +1,25 @@
+# 022-menu3.4-s01  grid 80x24
+
+
+         Menu 3.4: Specify G0 (now US ASCII)
+
+         Choose character-set:
+
+          0. US ASCII
+          1. DEC Special graphics and line drawing
+          2. DEC Supplemental
+
+          Enter choice number (0 - 2): 
+
+
+
+
+
+
+
+
+
+
+
+
+

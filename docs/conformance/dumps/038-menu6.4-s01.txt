@@ -1,0 +1,25 @@
+# 038-menu6.4-s01  grid 80x24
+Test of Device Attributes report (what are you)
+
+Report is: <27> [ ? 6 2 ; 2 2 c  VT200 family
+    22 = color
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Push <RETURN>
+

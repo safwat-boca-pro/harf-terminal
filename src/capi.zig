@@ -265,6 +265,15 @@ export fn harf_term_default_bg(t: *HarfTerm, rgb: *[3]u8) void {
     rgb.* = .{ bg.r, bg.g, bg.b };
 }
 
+/// The terminal's real grid size right now. A program can change it (DECCOLM, 132 columns) without the view knowing.
+export fn harf_term_grid(t: *HarfTerm, cols: *u16, rows: *u16) void {
+    const g = t.session.lock();
+    defer t.session.unlock();
+    const sz = g.size();
+    cols.* = sz.cols;
+    rows.* = sz.rows;
+}
+
 /// Re-arms the `wake` callback; call before reading the grid for a redraw.
 export fn harf_term_wake_handled(t: *HarfTerm) void {
     t.session.wakeHandled();
@@ -478,6 +487,25 @@ test "harf_term_mouse: a wheel's position-only call records the pointer only whi
     }
     _ = harf_term_mouse(on, p, 2, 0, 1, x, y);
     try std.testing.expectEqual((@as(u32, 5) << 16) | 2, on.session.pointer.load(.acquire));
+}
+
+test "harf_term_grid reports the grid, including a program's 132-column switch" {
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "printf '\\033[?40h\\033[?3h'; echo wide; sleep 5", null };
+    const t = harf_term_new(80, 24, 1 << 20, &argv, null) orelse return error.TermNotCreated;
+    defer harf_term_free(t);
+    var cols: u16 = 0;
+    var rows: u16 = 0;
+    harf_term_grid(t, &cols, &rows);
+    try std.testing.expect(rows == 24 and (cols == 80 or cols == 132));
+    var buf: [200]u8 = undefined;
+    var waited: u32 = 0;
+    while (harf_term_row_text(t, 0, &buf, buf.len) < 4 and waited < 10_000) : (waited += 5) {
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    harf_term_grid(t, &cols, &rows);
+    try std.testing.expectEqual(@as(u16, 132), cols); // the terminal followed the program, not the view
+    try std.testing.expectEqual(@as(u16, 24), rows);
 }
 
 test "harf_term_new rejects zero size" {

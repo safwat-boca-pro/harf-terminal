@@ -1,0 +1,25 @@
+# 087-menu11.7.4-s01  grid 80x24
+                                                           *
+                                                          *
+                                                         *
+                                                        *
+                                                       *
+                                                      *
+                                                     *
+                                                    *
+                                                   *
+                                                  *
+                                                 *
+                                                *
+                                               *
+                                              *
+                                             *
+                                            *
+                                           *
+                                          *
+                                         *
+                                        *
+----+----1----+----2----+----3----+----4----+----5----+----6----+----7----+----8
+Test Scroll-Left (SL)
+There should be a vertical column of *'s centered above.
+Push <RETURN>

@@ -1,0 +1,25 @@
+# 056-menu11.1.3-s01  grid 80x24
+Test 8-bit controls (S7C1T/S8C1T)
+
+
+
+This tests the VT200+ control sequence to direct the terminal to emit 8-bit
+control-sequences instead of <esc> sequences.
+
+
+
+8-bit controls enabled: <27> [ 1 ; 1 R  failed
+
+
+8-bit controls disabled: <27> [ 1 ; 1 R  ok
+
+
+
+
+
+
+
+
+
+Push <RETURN>
+

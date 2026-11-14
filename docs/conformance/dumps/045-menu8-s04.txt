@@ -1,0 +1,25 @@
+# 045-menu8-s04  grid 80x24
+AB
+
+
+Test of 'Delete Character'. The top line should be 'AB'. Push <RETURN>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

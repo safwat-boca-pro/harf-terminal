@@ -1,0 +1,25 @@
+# 057-menu11.1.5-s01  grid 80x24
+You did not specify a font-file with the -f option
+Push <RETURN>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

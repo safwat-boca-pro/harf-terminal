@@ -174,6 +174,14 @@ final class TerminalController {
         return NSColor(srgbRed: CGFloat(rgb[0]) / 255, green: CGFloat(rgb[1]) / 255, blue: CGFloat(rgb[2]) / 255, alpha: 1)
     }
 
+    /// The terminal's real grid (a program can change it, for example to 132 columns, behind the view's back).
+    func coreGrid() -> (cols: Int, rows: Int) {
+        guard let t = term else { return (0, 0) }
+        var cols: UInt16 = 0, rows: UInt16 = 0
+        harf_term_grid(t, &cols, &rows)
+        return (Int(cols), Int(rows))
+    }
+
     /// The window became key (true) or resigned (false).
     func setFocus(_ on: Bool) {
         guard let t = term else { return }

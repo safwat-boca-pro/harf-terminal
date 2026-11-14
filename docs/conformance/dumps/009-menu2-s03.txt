@@ -1,0 +1,25 @@
+# 009-menu2-s03  grid 132x24  (the view is 80x24: columns past the window's edge are not visible in the picture)
+12345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901
+
+  This is 132 column mode, light background.
+   This is 132 column mode, light background.
+    This is 132 column mode, light background.
+     This is 132 column mode, light background.
+      This is 132 column mode, light background.
+       This is 132 column mode, light background.
+        This is 132 column mode, light background.
+         This is 132 column mode, light background.
+          This is 132 column mode, light background.
+           This is 132 column mode, light background.
+            This is 132 column mode, light background.
+             This is 132 column mode, light background.
+              This is 132 column mode, light background.
+               This is 132 column mode, light background.
+                This is 132 column mode, light background.
+                 This is 132 column mode, light background.
+                  This is 132 column mode, light background.
+                   This is 132 column mode, light background.Push <RETURN>
+
+
+
+

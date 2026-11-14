@@ -1,0 +1,25 @@
+# 018-menu2-s12  grid 80x24
+This line should be at the top of the screen. Push <RETURN>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Origin mode test. This line should be at the bottom of the screen.

@@ -1,0 +1,25 @@
+# 024-menu3.6-s01  grid 80x24
+
+
+         Menu 3.6: Specify G2 (now ISO Latin-1)
+
+         Choose character-set:
+
+          0. US ASCII
+          1. DEC Special graphics and line drawing
+          2. DEC Supplemental
+
+          Enter choice number (0 - 2): 
+
+
+
+
+
+
+
+
+
+
+
+
+
