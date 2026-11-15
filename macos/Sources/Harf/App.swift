@@ -231,6 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         traceStep("applicationWillFinishLaunching")
+        Log.start()   // first, so config warnings land in the file
         Settings.shared.load()   // before any terminal exists (including launch-time open or Services); it builds the menu
         traceStep("main menu installed, configuration loaded")
         NSApp.servicesProvider = self
@@ -268,4 +269,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationWillTerminate(_ notification: Notification) { Log.info("quit") }
 }
