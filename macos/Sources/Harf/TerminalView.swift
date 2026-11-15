@@ -513,8 +513,11 @@ final class TerminalController {
     fileprivate func titleOnMain() {
         guard let t = term else { return }
         var buf = [UInt8](repeating: 0, count: 512)
-        let n = harf_term_title(t, &buf, buf.count)
-        onTitle(String(decoding: buf[0..<n], as: UTF8.self))
+        let cap = buf.count
+        let n = buf.withUnsafeMutableBufferPointer { bp in
+            bp.baseAddress!.withMemoryRebound(to: CChar.self, capacity: cap) { harf_term_title(t, $0, cap) }
+        }
+        onTitle(String(decoding: buf[0..<min(n, cap)], as: UTF8.self))
     }
 
     /// OSC 52: the core allowed a program to put text on the clipboard (policy, standard clipboard only).
