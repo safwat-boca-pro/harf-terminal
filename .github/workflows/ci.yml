@@ -11,6 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Zig (must match .zig-version)
         run: |
+          brew update   # the runner image's formula list is days old: it offered zig 0.17.0 while .zig-version says 0.17.1
           brew install zig
           test "$(zig version)" = "$(cat .zig-version)"
       - name: Zig tests
