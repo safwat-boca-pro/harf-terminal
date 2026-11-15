@@ -1,7 +1,6 @@
-# Project Brief: Arabic-first, Agent-friendly Terminal Emulator for macOS
+# Project Brief: Harf — Arabic-first, Agent-friendly Terminal Emulator for macOS
 
-> Handoff document for Claude Code. Read this fully before writing code.
-> Status: pre-implementation. Nothing is built yet. Working name: **TBD** (placeholder `<name>` below).
+> **Status: Implemented (v0.2.0).** Originally written as the pre-implementation handoff brief; updated to reflect shipped decisions, the actual repository layout, and remaining open items. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the chronological decisions log.
 
 ---
 
@@ -12,7 +11,7 @@ Build a **terminal emulator** (not a TUI app that runs inside one) for **macOS o
 1. **Snappy and light**: low memory and CPU footprint, near-zero idle cost.
 2. **Arabic-correct from day 1**: RTL, contextual shaping, and correct mixed Arabic/English (bidi) rendering, with cursor and selection that behave correctly.
 3. **Pleasant for developers**, especially those running AI coding agents (Claude Code, Codex) in it.
-4. **Open source** (default license: MIT; easy to change, decide before first public commit).
+4. **Open source** (MIT License).
 
 Why an emulator: only an emulator owns the renderer, so only an emulator can fix Arabic shaping and bidi. A TUI app just emits text and the host terminal decides how it looks.
 
@@ -22,7 +21,7 @@ Why an emulator: only an emulator owns the renderer, so only an emulator can fix
 
 | Area | Decision |
 |---|---|
-| Product | Terminal emulator, macOS Apple Silicon only (v1) |
+| Product | **Harf** — terminal emulator, macOS 14.0+ Apple Silicon only (v1) |
 | Core language | **Zig** (pin an exact compiler version, see §10) |
 | macOS shell | **Thin Swift/AppKit shell** (the way Ghostty is structured); Zig core exposes a small C ABI |
 | Rendering | **CPU-drawn (CoreGraphics + CoreText) into a layer-backed AppKit view, damage-tracked, no web view, no Metal.** *Changed 2026-11-13 by the owner (was: Metal + glyph atlas) to reach a ~30 MB footprint. Measured at equal window size, a CPU-drawn view is 5-13 MB lighter than Metal (docs/perf.md). Note: Terminal.app itself is ~50 MB at its default window; an earlier 17 MB reading was wrong.* |
@@ -30,7 +29,7 @@ Why an emulator: only an emulator owns the renderer, so only an emulator can fix
 | Bidi | Own UAX #9 implementation in Zig, validated against Unicode conformance files |
 | Grid model | Grid stays in **logical order**; reordering happens at display time |
 | Arabic | Must work from the first usable build, including mixed English/Arabic lines |
-| License | Open source; avoid GPL/LGPL dependencies (FriBidi is LGPL, so not used) |
+| License | MIT; no GPL/LGPL dependencies (uses `libghostty-vt` 1.0.1, MIT; FriBidi is LGPL, so not used) |
 | Performance budgets | See §7 (defaults accepted, with one caveat on RSS) |
 
 ---
@@ -165,21 +164,22 @@ Test matrix: shell, vim/neovim, tmux, htop, less, fzf, **Claude Code**, **Codex 
 
 ## 6. Developer UX
 
-### v1
+### v1 (shipped in v0.2.0, with noted gaps)
 
-- **OSC 133 shell integration**: jump between prompts, select/copy last command output, mark failed commands.
-- **Per-tab status**: running / idle / waiting for input, with a notification when a background agent finishes or asks for approval.
-- **Cmd-click on `path:line:col`** opens in the user's editor (configurable command).
-- **Tabs and splits** for parallel agent sessions, fast session restore.
-- **Scrollback search** that is bidi-aware (search in logical text, highlight in visual positions).
-- **Large-paste guard** (confirm before pasting very large or multi-line content).
-- **Default shortcuts** (all remappable; editing keys are in §5):
-  - Cmd+Up / Down: jump to previous / next prompt (OSC 133 marks).
-  - Cmd+K clear, Cmd+F find, Cmd+C / V copy and paste.
-  - Cmd+T / W new / close tab, Cmd+D split, Cmd+1..9 switch tab.
-  - Cmd-click opens OSC 8 hyperlinks (and `path:line:col`, above); Option-click at the prompt moves the cursor there by sending arrow keys.
-  - Later, depends on shell or kitty-protocol support: Cmd+Shift+Left / Right select to line edge, Cmd+Z undo at the prompt (`^_`).
-- Sensible defaults, plain-text config file, hot reload of config and themes, light/dark themes.
+- **OSC 133 shell integration (zsh)**: jump between prompts (`Cmd+Up` / `Cmd+Down`), select last command output (`Cmd+Shift+A`), and completion notifications when a command >= 10 s finishes while unfocused. *(Not built: bash/fish shims, failed-command row marks.)*
+- **Background completion notifications**: OSC 9 / OSC 777 and long-running OSC 133 commands notify when unfocused (`notifications = unfocused | always | off`). *(A tab-title running dot was tried and removed because long-lived programs like Claude Code, vim, and `tail -f` kept it permanently on; "waiting for input" is not built.)*
+- **Cmd-click on `path:line:col` and URLs**: opens files in the configured editor (`editor` setting or **Harf → Choose Editor…**), plus plain URL auto-coloring and OSC 8 hyperlinks, with `Cmd+Hover` preview.
+- **Tabs and splits** for parallel agent sessions (`Cmd+T`, `Cmd+D`, `Cmd+Shift+D`, starting in the focused pane's working directory). *(Session restore is not yet built.)*
+- **Scrollback search** (`Cmd+F`, ASCII case-insensitive via `libghostty-vt`; highlights all visible matches). *(Bidi-aware visual-position highlighting is still basic/grid-based.)*
+- **Large-paste guard** (`paste_guard = on`): confirms pastes over 100,000 bytes, or multi-line pastes when bracketed paste is off.
+- **Finder & folder integration**: drop files from Finder onto a terminal to type their shell-quoted paths; open folders via `open -a Harf <dir>`, CLI arguments, or Finder Services (**New Harf at Folder** / **New Harf Tab at Folder**).
+- **Default shortcuts** (all remappable via `keybind`; editing keys are in §5):
+  - `Cmd+Up` / `Down`: jump to previous / next prompt (OSC 133 marks).
+  - `Cmd+K` clear screen & scrollback, `Ctrl+L` clear visible screen, `Cmd+F` find, `Cmd+C` / `V` copy and paste.
+  - `Cmd+T` / `W` new / close tab or pane, `Cmd+D` / `Cmd+Shift+D` split, `Cmd+1..9` switch tab.
+  - `Cmd+Click` opens OSC 8 hyperlinks, plain URLs, and `path:line:col`.
+  - Not yet built: `Option+Click` at prompt (send arrow keys), `Cmd+Shift+Left/Right` select to line edge, `Cmd+Z` undo at prompt (`^_`).
+- Plain-text config (`~/.config/harf/config`), hot reload of config and themes, light/dark themes + system appearance tracking.
 
 ### v2 (parked, needs a permission model)
 
@@ -206,82 +206,64 @@ Test matrix: shell, vim/neovim, tmux, htop, less, fzf, **Claude Code**, **Codex 
 
 ---
 
-## 8. Roadmap and acceptance criteria
+## 8. Roadmap and status
 
-**Phase 0: Scaffolding and baselines**
-- Pinned Zig, `build.zig` producing a static lib + C header, Swift app shell that links it, CI, license, `ARCHITECTURE.md`.
-- Measure empty AppKit + Metal window RSS/CPU.
-- Done when: app opens a blank Metal window and calls one function in the Zig core.
-
-**Phase 1: Arabic render spike**
-- Window, CoreText shaping + fallback, hardcoded mixed lines, compare cell models (§4.3) across 3 to 4 fonts. (Spike first drew with Metal + atlas; the renderer is now CPU-drawn, see §2.) Owner chose model C, to be fixed for spacing, cursor and selection: docs/cell-model.md.
-- Done when: the owner confirms the sample strings in §4.7 look right and the cell model decision is documented.
-
-**Phase 2: Bidi (UAX #9)**
-- Full algorithm incl. isolates, brackets, numbers.
-- Done when: BidiTest.txt and BidiCharacterTest.txt pass in CI.
-
-**Phase 3: PTY + parser + grid (LTR only)**
-- Run zsh; pass core `vttest` cases; vim, tmux, htop, less work.
-- Decide: write own parser vs. evaluate reusing Ghostty's Zig terminal library (see §9).
-- Done when: daily-usable plain terminal, benchmarks recorded.
-
-**Phase 4: Layout integrated with the grid**
-- Per-row layout, logical/visual maps, cursor placement, base-direction policy (§4.4), typing behavior (§4.5).
-- Done when: Arabic typed at a zsh prompt and Arabic command output look correct; boxes do not mirror.
-
-**Phase 5: Agent compatibility (§5)**
-- Done when: Claude Code and Codex run without flicker or layout bugs, including with Arabic content.
-
-**Phase 6: Developer UX (§6, v1 list)**
-
-**Phase 7: Selection, copy/paste, IME and Arabic keyboard input, editor-style editing keys (§5) and remapping, polish, benchmarks against §7**
-- Phase 3 only needs raw key encoding; the Option/Cmd bindings land here (or earlier if the daily-usable bar in Phase 3 needs them).
+- **Phase 0 (Scaffolding and baselines):** Done. Zig `0.17.1` pinned, `build.zig` + `include/harf.h` + SwiftPM shell + `macos/build-app.sh`, CI, MIT license, `ARCHITECTURE.md`, `docs/perf.md`.
+- **Phase 1 (Arabic render spike):** Done. Owner chose model C ("C fit", per-word kashida justification), documented in `docs/cell-model.md`.
+- **Phase 2 (Bidi UAX #9):** Done. `src/bidi/bidi.zig` + `src/bidi/tables.zig`, validated against Unicode 18.0.0 (`BidiTest.txt`, `BidiCharacterTest.txt` via `test/fetch-ucd.sh`) in `zig build test`.
+- **Phase 3 (PTY + parser + grid):** Done. Adopted `libghostty-vt` 1.0.1 (`src/vt.zig`), `src/pty.zig`, `src/term.zig`, `src/draw.zig`, dirty-row invalidation, sRGB backing store (~25–26 MB footprint), `programs_test.zig`, `vttest` conformance (`docs/phase3-done.md`).
+- **Phase 4 (Arabic layout integrated with grid):** Done. `src/rowfacts.zig`, `src/rowlayout.zig`, logical-cell cursor, accepted in `docs/phase4-manual-check.md`.
+- **Phase 5 (Agent compatibility):** Done. Verified with Claude Code and Codex CLI (`docs/phase5-spike.md`), plus XTVERSION, XTWINOPS (`CSI 14/16/18/19 t`), OSC 8, OSC 52 (write-only, focused-pane gated), OSC 9/777, kitty key-release events.
+- **Phase 6 (Developer UX):** Shipped core v1 items (tabs/splits, find, config/themes/hot-reload, OSC 133 zsh integration, paste guard, `Cmd+Click` on paths/URLs, Finder folder/file integration). Remaining: session restore, `Option+Click` at prompt, bash/fish OSC 133.
+- **Phase 7 (Selection, editing keys, remapping, polish):** Largely done (logical selection/copy, editor-style editing keys, `keybind` remapping, app icon, logging). Remaining: visual (bidi-aware) mouse selection, ink centering, per-paragraph bidi across soft wraps.
 
 ---
 
-## 9. Open questions and things to verify
+## 9. Resolved decisions & remaining open items
 
-Do not rely on these without checking:
-
-1. **Parser reuse in Zig.** Earlier discussion mentioned Rust crates (`vte`, `alacritty_terminal`), which do not apply to a Zig core. Options: write a VT parser (Paul Williams' state machine) or evaluate Ghostty's Zig terminal library (`libghostty-vt`). Check its current status, API stability and license. Ghostty has no bidi layer as far as known, so bidi would be added on top. Verify.
-2. **Prior art for bidi in terminals.** Study VTE (GNOME Terminal), mlterm, Konsole, WezTerm, iTerm2, and the Terminal Working Group bidi spec. Verify what each currently supports.
-3. **Cell model** winner (§4.3) and whether Arabic glyphs look acceptable when snapped.
-4. **Base direction policy** for inline agent UIs (§4.4).
-5. **Typing behavior** at prompts (§4.5).
-6. **Who draws glyphs**: ~~Zig rasterizes into atlas bitmaps that Swift uploads~~ (2026-11-13) Zig draws glyph runs with CoreText straight into a CGContext passed across the C ABI; no atlas.
-7. **Name, final license, minimum macOS version.**
-8. **Fonts**: v1 relies on system fallback. Revisit bundling a monospace font with good Arabic coverage only if fallback quality is poor.
-9. **Hosting/distribution**: notarization, signing, auto-update (later).
+1. **Parser reuse in Zig (Resolved):** `libghostty-vt` 1.0.1 (MIT) is used behind a thin Zig C-ABI wrapper (`src/vt.zig`).
+2. **Prior art for bidi in terminals (Resolved):** Researched in `docs/bidi-prior-art.md` (VTE, Konsole, iTerm2, WezTerm, Terminal.app, mlterm).
+3. **Cell model (Resolved):** Model C ("C fit", per-word kashida justification) chosen; documented in `docs/cell-model.md`.
+4. **Base direction policy (Resolved for v1):** `src/rowfacts.zig` sets `auto` base direction to RTL only if the first non-blank cell is strong RTL and the row contains no box/block characters (`ltr`/`rtl` override supported).
+5. **Typing behavior (Resolved for v1):** Logical-cell cursor with C-fit word re-fitting accepted by the owner in Phase 4 (`docs/phase4-manual-check.md`).
+6. **Who draws glyphs (Resolved):** Zig draws glyph runs with CoreText straight into a `CGContext` passed across `include/harf.h` (`src/draw.zig`); no atlas.
+7. **Name, license, minimum macOS version (Resolved):** **Harf**, **MIT**, **macOS 14.0+**.
+8. **Fonts (Resolved for v1):** Relies on CoreText system fallback (no bundled font).
+9. **Hosting/distribution (Open):** Local unsigned app builds (`macos/build-app.sh`, tagged `v0.2.0`); notarization, signing, and auto-update remain future work.
 
 ---
 
-## 10. Proposed repo layout
+## 10. Current repo layout
 
 ```
-<name>/
+harf-terminal/
   build.zig
   build.zig.zon
-  .zig-version            # pinned compiler
+  .zig-version            # pinned compiler (0.17.1)
   LICENSE
+  NOTICE
+  README.md
   ARCHITECTURE.md
-  include/<name>.h        # C ABI header (generated or hand-written, kept in sync)
+  include/harf.h          # hand-written C ABI matching src/capi.zig
   src/
-    pty.zig
-    parser.zig
-    screen.zig            # grid, scrollback, damage tracking
-    bidi/                 # UAX #9 + tables + conformance tests
-    shape/                # CoreText bindings, cluster-to-cell map
-    atlas.zig
-    capi.zig
-    config.zig
-  macos/                  # Swift package / Xcode project (thin shell)
-  bench/                  # vtebench configs, latency harness
-  test/                   # golden layout tests, escape sequence tests
-  docs/
-    cell-model.md
-    perf.md
-    bidi-policy.md
+    capi.zig              # C ABI exports
+    config.zig            # key = value config, themes, keybinds
+    draw.zig              # CoreText/CoreGraphics painter + dirty rows
+    keys.zig              # key encoding
+    pty.zig               # forkpty + shell integration env
+    rowfacts.zig          # RTL detection & base direction policy
+    rowlayout.zig         # C-fit row shaping & cache
+    term.zig              # Session (I/O thread, selection, search, OSC 133/52/8/9)
+    vt.zig / vt_c.h       # libghostty-vt 1.0.1 wrapper
+    bidi/                 # UAX #9 + generated tables + conformance tests
+    shape/                # CoreText bindings, C-fit layout
+    programs_test.zig     # real-program PTY smoke tests
+    agents_spike_test.zig # Claude Code / Codex scripted harness
+  macos/                  # SwiftPM AppKit shell + build-app.sh + shell-integration/
+  bench/                  # footprint.sh, idle.sh, startup.sh
+  test/                   # fetch-ucd.sh + Unicode 18.0.0 data (git-ignored)
+  tools/                  # agent-proxy.py, gen-bidi-tables.sh, raw2png.py
+  docs/                   # cell-model.md, perf.md, logging.md, conformance/, phase checks
 ```
 
 ---
@@ -301,7 +283,7 @@ Do not rely on these without checking:
 
 ---
 
-## 12. First prompt to paste into Claude Code
+## 12. Historical: original Phase 0 prompt
 
 ```
 Read PROJECT_BRIEF.md in full. Then do Phase 0 only:

@@ -18,7 +18,8 @@ Harf pairs a **Zig** core (PTY, VT parser/grid, UAX #9 bidi, CoreText shaping, C
   - Windows, native tabs, and split panes (`Cmd+D` / `Cmd+Shift+D`).
   - Find bar (`Cmd+F`) across scrollback and active screen with all visible matches highlighted.
   - Editor-style cursor/edit shortcuts (`Option+Left/Right`, `Option+Backspace/Delete`, `Cmd+Left/Right`).
-  - OSC 8 clickable links (`Cmd+Click`), OSC 52 clipboard writes (gated to the focused pane), and OSC 9/777 notifications.
+  - OSC 8 clickable links, plain URLs, and `path:line:col` file paths (`Cmd+Click` with `Cmd+Hover` preview; **Harf → Choose Editor…**), OSC 52 clipboard writes (gated to the focused pane), and OSC 9/777 notifications.
+  - Paste guard (`paste_guard = on` by default) confirms pastes over 100 KB or multi-line pastes when bracketed paste is off.
   - Drop a file from Finder onto a terminal (or a split pane) to type its shell-quoted path at the cursor.
   - Open folders via `open -a Harf <dir>`, Finder drag-and-drop, CLI arguments, or Finder Services (**New Harf at Folder** / **New Harf Tab at Folder** under System Settings → Keyboard → Keyboard Shortcuts → Services → Files and Folders).
 - **Shell Integration (OSC 133)**:
@@ -99,6 +100,12 @@ scrollback_bytes = 1048576
 clipboard_write = allow       # allow | deny (reads are never allowed)
 notifications = unfocused     # unfocused | always | off
 shell_integration = auto      # auto | off
+paste_guard = on              # on | off
+
+# Editor for Cmd+Click on file paths (`path`, `path:line`, `path:line:col`)
+# editor = vscode://file{path}:{line}:{col}
+# editor = code --goto {path}:{line}:{col}
+# editor = app:/Applications/Sublime Text.app
 
 # Custom keybindings (use `unbind` to remove a default, or `send:TEXT` to send bytes)
 # keybind = cmd+t = new_tab
@@ -114,6 +121,7 @@ shell_integration = auto      # auto | off
 | `Cmd+]` / `Cmd+[` | Focus next / previous pane |
 | `Cmd+Shift+]` / `Cmd+Shift+[` | Next / previous tab (`Cmd+1`–`9` to jump) |
 | `Cmd+F` / `Cmd+G` / `Cmd+Shift+G` | Find / Next match / Previous match |
+| `Cmd+C` / `Cmd+V` | Copy / Paste |
 | `Cmd+K` / `Ctrl+L` | Clear screen & scrollback / Clear visible screen |
 | `Cmd+Up` / `Cmd+Down` | Jump to previous / next prompt (OSC 133) |
 | `Cmd+Shift+A` | Select last command output (OSC 133) |

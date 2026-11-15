@@ -8,7 +8,9 @@ this model and the cursor sits on its logical cell, so the drift is still there;
 `typing-bare.png` (one frame per letter). **Owner accepted the drift on 2026-11-14** (Decision 4; the manual check passed). Still open: ink centering and per-paragraph bidi across soft wraps.
 Observations below are the implementer's, not the owner's judgement.
 
-## What exists
+## What exists (Phase 1 spike — retired in Phase 3 slice 2)
+
+> **Note:** The Phase 1 spike harness (`src/atlas.zig`, `src/spike.zig`, `harf_spike_*`, the Metal renderer, and `--dump`) was retired in Phase 3 slice 2. The production terminal draws CPU-side into a `CGContext` via `src/draw.zig` and `src/rowlayout.zig` using **C fit** (Model D below).
 
 - Zig shapes each row with CoreText (`src/shape/layout.zig`), builds the **logical-to-visual cell map**
   (clusters: base letter + tashkeel; lam-alef is one glyph over two cells), rasterizes glyphs into an
@@ -68,13 +70,11 @@ Arabic-capable families has the monospace trait. (This machine's font set; other
 - Courier New is closest to the grid in every model (it is the only monospace-designed Arabic face), but its letterforms
   are the plainest.
 
-## Open decisions (owner)
+## Open decisions (owner — resolved)
 
-1. Which model, or a variant (e.g. B with a wider clamp, B with uniform per-word scale)? None looks "done" to me.
-2. Font policy for v1: accept whatever the cascade gives (Courier New), pick an explicit Arabic font
-   (SF Arabic / Geeza Pro), or revisit bundling a monospace-designed Arabic font (brief section 9.8).
-3. Whether the cursor/column cost of model C is acceptable. In C a run is not on a uniform grid, so cursor
-   placement and selection edges inside a run must be interpolated.
+1. ~~Which model, or a variant~~ -> **C fit** (Model D) accepted by the owner (2026-11-13).
+2. ~~Font policy for v1~~ -> Keep CoreText's system fallback cascade, no hardcoded Arabic font (2026-11-13).
+3. ~~Whether the cursor/column cost of model C is acceptable~~ -> Accepted in Phase 4 (`docs/phase4-manual-check.md`, 2026-11-14).
 
 ## Not done / caveats
 

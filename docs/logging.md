@@ -8,7 +8,7 @@ Harf writes a small log file so a problem leaves something to read after the fac
 
 ```
 2026-11-15T10:49:50Z WARN  previous run did not quit cleanly; look for Harf-*.ips in ~/Library/Logs/DiagnosticReports
-2026-11-15T10:49:50Z INFO  launch 0.0.1, Version 15.6.1 (Build 24G90)
+2026-11-15T10:49:50Z INFO  launch 0.2.0, Version 15.6.1 (Build 24G90)
 ```
 
 Format: UTC time, level (`INFO`, `WARN`, `ERROR`), message.

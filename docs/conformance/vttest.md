@@ -5,7 +5,7 @@ Each screen of `vttest` says on itself what a correct display is. **The "Owner" 
 
 ## Findings (Harf behavior, for you to rule on)
 
-- **F1. 132-column mode (DECCOLM).** vttest switches the terminal to 132 columns. The core grid becomes 132 wide, but the view and window stay 80 wide, so the right 52 columns are clipped; the PTY window size is not told (it still says 80). Affects the screens whose grid column below reads 132x24 (menu 1 screens 2 and 4, menu 2 screens 3 and 5, menu 8 screens 8 to 14). xterm and Terminal.app resize the window; Harf does nothing. Options: leave as a known gap for v1 (rare), resize the window to fit, or refuse the mode change. I have not chosen.
+- **F1. 132-column mode (DECCOLM) — Fixed after capture.** At the time these screenshots were taken, vttest switched the terminal to 132 columns while the view stayed 80 wide (clipping the right 52 columns). Fixed later via `followProgramGrid` (`ARCHITECTURE.md` 2026-11-14, `docs/phase3-done.md`), which resizes the window/view to fit DECCOLM 80/132. The captured screenshots in `docs/conformance/` predate this fix.
 - **F2. DECREQTPARM (terminal parameters report) is not answered** (menu 6.7). This is the library; the sequence is VT100-era and rarely used.
 - **F3. Blink is drawn steady** because the terminal has no timers (slice 3 decision).
 - **F4. The DEC "alternate character ROM" sets 1 and 2** (menu 3.8) show plain ASCII; they are VT100 hardware features.
