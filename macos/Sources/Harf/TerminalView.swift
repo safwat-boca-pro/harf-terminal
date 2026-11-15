@@ -445,7 +445,9 @@ final class TerminalController {
         let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-")
         return urls.map { url -> String in
             let p = url.path
-            return p.unicodeScalars.allSatisfy(safe.contains) ? p + " " : "'" + p.replacingOccurrences(of: "'", with: "'\\''") + "' "
+            if p.unicodeScalars.allSatisfy(safe.contains) { return p + " " }
+            // inside single quotes only ' needs care in sh, bash and zsh, but fish also reads \\ and \' there: close the quote around both
+            return "'" + p.map { $0 == "'" ? "'\\''" : $0 == "\\" ? "'\\\\'" : String($0) }.joined() + "' "
         }.joined()
     }
 

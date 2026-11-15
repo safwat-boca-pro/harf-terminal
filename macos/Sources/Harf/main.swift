@@ -590,8 +590,10 @@ func selfTest() -> Never {
     do {
         let pb = NSPasteboard(name: NSPasteboard.Name("harf.selftest.drop.\(getpid())"))
         pb.clearContents()
-        pb.writeObjects([URL(fileURLWithPath: "/tmp/a") as NSURL, URL(fileURLWithPath: "/tmp/it's here") as NSURL])
-        let want = "/tmp/a '/tmp/it'\\''s here' "
+        pb.writeObjects([URL(fileURLWithPath: "/tmp/a") as NSURL, URL(fileURLWithPath: "/tmp/it's here") as NSURL, URL(fileURLWithPath: "/tmp/x\\'y") as NSURL])
+        // a backslash goes outside the quotes ('\\'), where sh, bash, zsh and fish all read it as one literal backslash; inside single
+        // quotes fish would read \\ and \' as escapes, and a file name could end its quoting
+        let want = "/tmp/a '/tmp/it'\\''s here' '/tmp/x'\\\\''\\''y' "
         if pasting.dropText(from: pb) != want { fail("drop: got '\(pasting.dropText(from: pb) ?? "nil")', want '\(want)'") }
         pb.clearContents()
         pb.setString("not a file", forType: .string)
