@@ -19,6 +19,7 @@ Harf pairs a **Zig** core (PTY, VT parser/grid, UAX #9 bidi, CoreText shaping, C
   - Find bar (`Cmd+F`) across scrollback and active screen with all visible matches highlighted.
   - Editor-style cursor/edit shortcuts (`Option+Left/Right`, `Option+Backspace/Delete`, `Cmd+Left/Right`).
   - OSC 8 clickable links (`Cmd+Click`), OSC 52 clipboard writes (gated to the focused pane), and OSC 9/777 notifications.
+  - Drop a file from Finder onto a terminal (or a split pane) to type its shell-quoted path at the cursor.
   - Open folders via `open -a Harf <dir>`, Finder drag-and-drop, CLI arguments, or Finder Services (**New Harf at Folder** / **New Harf Tab at Folder** under System Settings → Keyboard → Keyboard Shortcuts → Services → Files and Folders).
 - **Shell Integration (OSC 133)**:
   - Bundled `zsh` integration (`shell_integration = auto` by default) for prompt jumping (`Cmd+Up` / `Cmd+Down`), selecting the last command's output (`Cmd+Shift+A`), and completion notifications for long-running commands.

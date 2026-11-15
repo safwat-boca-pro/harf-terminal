@@ -586,6 +586,23 @@ func selfTest() -> Never {
     pasting.paste("x y")
     pasting.view.handleKey(code: 36, mods: 0, characters: "\r", isRepeat: false) {}
     if !pump(5, until: { rows(pasting).contains("got:x y") }) { fail("paste: rows are '\(rows(pasting))'") }
+    // 3a. A file drop types the shell-quoted paths: plain stays plain, a space or apostrophe is single-quoted, none gives nil.
+    do {
+        let pb = NSPasteboard(name: NSPasteboard.Name("harf.selftest.drop.\(getpid())"))
+        pb.clearContents()
+        pb.writeObjects([URL(fileURLWithPath: "/tmp/a") as NSURL, URL(fileURLWithPath: "/tmp/it's here") as NSURL])
+        let want = "/tmp/a '/tmp/it'\\''s here' "
+        if pasting.dropText(from: pb) != want { fail("drop: got '\(pasting.dropText(from: pb) ?? "nil")', want '\(want)'") }
+        pb.clearContents()
+        pb.setString("not a file", forType: .string)
+        if pasting.dropText(from: pb) != nil { fail("drop: a pasteboard with no file URL gave text") }
+        pb.releaseGlobally()
+        guard let c = TerminalController(argv: ["/bin/sh", "-c", "read -r x; echo \"got:$x\""], frame: NSSize(width: 700, height: 420)) else { fail("cannot start the drop session") }
+        c.paste("'/tmp/it'\\''s here'")
+        c.view.handleKey(code: 36, mods: 0, characters: "\r", isRepeat: false) {}
+        if !pump(5, until: { rows(c).contains("got:'/tmp/it'\\''s here'") }) { fail("drop: rows are '\(rows(c))'") }
+        c.close()
+    }
     pasting.close()
 
     // 3b. The paste guard: a one-line paste never asks; text that would run lines in a program without bracketed paste asks first and

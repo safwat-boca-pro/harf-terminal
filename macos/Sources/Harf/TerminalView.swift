@@ -192,6 +192,7 @@ final class TerminalController {
     init?(argv: [String]?, frame: NSSize, scale: CGFloat = 2, cwd: String? = nil) {
         self.scale = scale
         view = TerminalView(frame: NSRect(origin: .zero, size: frame))
+        view.registerForDraggedTypes([.fileURL])
         target.controller = self
         guard makePainter() else { return nil }
         let size = fitGrid(frame)
@@ -435,6 +436,17 @@ final class TerminalController {
         let risk = Settings.shared.pasteGuard ? bytes.withUnsafeBufferPointer { harf_term_paste_check(t, $0.baseAddress, bytes.count) } : 0
         if risk == 0 { return send() }
         confirmPaste(pasteSummary(of: text, risk: risk)) { ok in if ok { send() } }
+    }
+
+    /// The text a file drop types: each path shell-quoted (single quotes, so sh, bash, zsh and fish agree), a space after each. Nil when
+    /// the pasteboard holds no file URL.
+    func dropText(from pb: NSPasteboard) -> String? {
+        guard let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty else { return nil }
+        let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-")
+        return urls.map { url -> String in
+            let p = url.path
+            return p.unicodeScalars.allSatisfy(safe.contains) ? p + " " : "'" + p.replacingOccurrences(of: "'", with: "'\\''") + "' "
+        }.joined()
     }
 
     /// Asks whether to paste: a sheet on the window. The self-test replaces it. With no window to attach a sheet to it answers no.
@@ -738,6 +750,14 @@ final class TerminalView: NSView {
 
     @objc func paste(_ sender: Any?) {
         if let s = NSPasteboard.general.string(forType: .string) { controller?.paste(s) }
+    }
+
+    // A file dropped from Finder types its quoted path, as a paste.
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let text = controller?.dropText(from: sender.draggingPasteboard) else { return false }
+        controller?.paste(text)
+        return true
     }
 
     /// Trackpad points convert to rows at the cell height; a wheel notch is three rows. The remainder
