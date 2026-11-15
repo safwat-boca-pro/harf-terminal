@@ -560,8 +560,8 @@ pub const template =
     \\# font_size = 14
     \\
     \\# Default content size for new windows, in points.
-    \\# window_width = 700
-    \\# window_height = 420
+    \\# window_width = 1000
+    \\# window_height = 720
     \\
     \\# dark, light, or the name of a file in ~/.config/harf/themes/ (it holds foreground, background, cursor_color and palette lines).
     \\# `dark:NAME, light:NAME` follows the system appearance.
@@ -713,8 +713,8 @@ test "settings" {
     const d = try parseOwned("");
     defer d.deinit();
     try testing.expectEqualStrings("Menlo", d.font_family);
-    try testing.expectEqual(@as(f32, 700), d.window_width);
-    try testing.expectEqual(@as(f32, 420), d.window_height);
+    try testing.expectEqual(@as(f32, 1000), d.window_width);
+    try testing.expectEqual(@as(f32, 720), d.window_height);
     try testing.expect(d.clipboard_write);
     try testing.expectEqual(Notifications.unfocused, d.notifications);
     try testing.expect(d.paste_guard);
@@ -746,8 +746,8 @@ test "window_width and window_height reject out-of-range or non-numeric values" 
     const c = try parseOwned("window_width = 50\nwindow_height = 20000\nwindow_width = nope\nwindow_height = NaN");
     defer c.deinit();
     try testing.expectEqual(@as(usize, 4), c.warnings.items.len);
-    try testing.expectEqual(@as(f32, 700), c.window_width);
-    try testing.expectEqual(@as(f32, 420), c.window_height);
+    try testing.expectEqual(@as(f32, 1000), c.window_width);
+    try testing.expectEqual(@as(f32, 720), c.window_height);
 }
 
 const FakeThemes = struct {
