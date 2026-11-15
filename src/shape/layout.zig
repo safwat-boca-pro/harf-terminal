@@ -1,8 +1,5 @@
 //! Per-row layout: CoreText shaping -> glyph list -> cell models (docs/cell-model.md).
 //!
-//! Spike scope: visual order comes from CoreText's own bidi (CTLine), NOT from our UAX #9
-//! (Phase 2). The cluster -> cell map is what survives into the real pipeline.
-//!
 //! Terms: a "cluster" is a base character plus its zero-width marks (tashkeel). A cluster
 //! occupies one cell; a glyph may cover several clusters (lam-alef ligature = 2 cells).
 const std = @import("std");
@@ -111,7 +108,7 @@ fn isArabic(cp: u21) bool {
         (cp >= 0xFE70 and cp <= 0xFEFF);
 }
 
-/// First-strong heuristic used by the spike's "auto" base direction.
+/// First-strong heuristic for "auto" base direction.
 fn strongRtl(cp: u21) ?bool {
     const digit = (cp >= 0x0660 and cp <= 0x0669) or (cp >= 0x06F0 and cp <= 0x06F9);
     if (isArabic(cp) and !isMark(cp) and !digit) return true;

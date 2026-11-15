@@ -705,7 +705,6 @@ test {
     _ = @import("rowfacts.zig");
     _ = @import("rowlayout.zig");
     _ = @import("programs_test.zig");
-    _ = @import("agents_spike_test.zig");
     _ = @import("config.zig");
 }
 

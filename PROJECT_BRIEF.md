@@ -258,12 +258,11 @@ harf-terminal/
     bidi/                 # UAX #9 + generated tables + conformance tests
     shape/                # CoreText bindings, C-fit layout
     programs_test.zig     # real-program PTY smoke tests
-    agents_spike_test.zig # Claude Code / Codex scripted harness
   macos/                  # SwiftPM AppKit shell + build-app.sh + shell-integration/
   bench/                  # footprint.sh, idle.sh, startup.sh
   test/                   # fetch-ucd.sh + Unicode 18.0.0 data (git-ignored)
-  tools/                  # agent-proxy.py, gen-bidi-tables.sh, raw2png.py
-  docs/                   # cell-model.md, perf.md, logging.md, conformance/, phase checks
+  tools/                  # gen-bidi-tables.sh
+  docs/                   # cell-model.md, perf.md, logging.md, bidi-prior-art.md, conformance/
 ```
 
 ---
