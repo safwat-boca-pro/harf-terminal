@@ -76,7 +76,7 @@ func chooseEditor() {
     if !Settings.shared.setEditor(editorTemplate(forBundleID: Bundle(url: app)?.bundleIdentifier, appPath: app.path)) { warn("could not write the config file") }
 }
 
-private func warn(_ what: String) { FileHandle.standardError.write(Data("harf: editor: \(what)\n".utf8)) }
+private func warn(_ what: String) { Log.warn("editor: \(what)") }
 
 /// The shell command mode runs through: `$SHELL` if it is a POSIX shell (the command goes in as `exec "$@"`, which fish, tcsh and
 /// nushell do not understand), else /bin/zsh.
@@ -89,7 +89,7 @@ func editorShell(env: String?) -> String {
 @MainActor
 func launchEditor(_ target: PathTarget) {
     func open(_ file: URL, with app: URL) {
-        NSWorkspace.shared.open([file], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+        NSWorkspace.shared.open([file], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration()) { @Sendable _, error in   // called off the main thread: not main-actor isolated
             if let error { warn("\(app.lastPathComponent): \(error.localizedDescription)") }
         }
     }
@@ -105,7 +105,7 @@ func launchEditor(_ target: PathTarget) {
         // through the login shell so the user's PATH finds `code` and friends; the words are arguments to `exec`, never a command line
         let process = Process()
         process.executableURL = URL(fileURLWithPath: editorShell(env: ProcessInfo.processInfo.environment["SHELL"]))
-        process.terminationHandler = { p in
+        process.terminationHandler = { @Sendable p in   // called off the main thread
             if p.terminationStatus != 0 { warn("\(argv[0]) exited with status \(p.terminationStatus) (is it in your PATH?)") }
         }
         process.arguments = ["-l", "-c", "exec \"$@\"", "harf"] + argv

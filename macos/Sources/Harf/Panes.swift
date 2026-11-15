@@ -219,6 +219,7 @@ final class WindowController: NSObject, NSWindowDelegate {
         c.onBell = { NSSound.beep() }
         c.onNotify = { [weak c] title, body in Notifier.post(title: title, body: body, focused: c?.hasKeyboard() ?? false) }
         c.onExit = { [weak self, weak pane] status in
+            Log.info("pane exited, status \(status)")
             guard let self, let pane else { return }
             // A clean exit closes the pane (the last one closes the window). A failure keeps it, so the last output stays readable.
             if status == 0 { self.close(pane: pane) } else { pane.title = "Harf (exited (\(status)))"; if self.focusedPane() === pane { self.window.title = pane.title } }

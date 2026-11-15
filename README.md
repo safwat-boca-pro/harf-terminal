@@ -119,6 +119,10 @@ shell_integration = auto      # auto | off
 | `Cmd+=` / `Cmd+-` / `Cmd+0` | Increase / decrease / reset font size |
 | `Cmd+,` / `Cmd+Shift+,` | Open config / Reload config |
 
+## Troubleshooting
+
+Harf writes a log to `~/Library/Logs/Harf/harf.log`: launch, quit, config warnings, failed notifications and editor launches, pane exits. If the last run ended without a `quit` line, the next launch says so, and macOS keeps the crash report as `Harf-*.ips` in `~/Library/Logs/DiagnosticReports`. See [docs/logging.md](docs/logging.md).
+
 ## Architecture
 
 ```

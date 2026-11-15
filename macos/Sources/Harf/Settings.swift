@@ -113,7 +113,7 @@ final class Settings {
             bindings[Trigger(mods: k.mods, key: key)] = Binding(action: action, arg: arg)
         }
         warnings = (0..<harf_config_warning_count(cfg)).compactMap { harf_config_warning(cfg, $0).map { String(cString: $0) } }
-        for w in warnings { FileHandle.standardError.write(Data("harf: config: \(w)\n".utf8)) }
+        for w in warnings { Log.warn("config: \(w)") }
         for c in controllers.allObjects { c.applySettings() }
         watcher.watch(directory: String(cString: harf_config_dir(cfg))) { [weak self] in self?.reloadSoon() }
         if appearanceObserver == nil {

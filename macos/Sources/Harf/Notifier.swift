@@ -13,13 +13,15 @@ enum Notifier {
         }
         guard Bundle.main.bundleIdentifier != nil else { return }   // not running as an app bundle: no notification center
         let heading = title.isEmpty ? "Harf" : title
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in   // asks once; later calls just answer
-            guard granted else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { @Sendable granted, error in   // asks once; later calls just answer. Called on a UserNotifications queue, so it must not be main-actor isolated (it crashed the app once, docs/logging.md)
+            guard granted else { Log.info("notification not shown: not authorized\(error.map { " (\($0.localizedDescription))" } ?? "")"); return }
             let content = UNMutableNotificationContent()
             content.title = heading
             content.body = body
             if heading != "Harf" { content.subtitle = "Harf" }   // text from a program must say which terminal it came from
-            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)) { error in
+                if let error { Log.warn("notification: \(error.localizedDescription)") }
+            }
         }
     }
 }
