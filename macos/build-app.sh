@@ -23,4 +23,6 @@ cp "$ROOT/macos/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources"
 cp "$ROOT/macos/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp -R "$ROOT/macos/shell-integration" "$APP/Contents/Resources/shell-integration"
+# Seal Info.plist and resources into the signature; ad-hoc is the ceiling without a Developer ID.
+codesign --force --deep --sign - "$APP"
 echo "$APP"
