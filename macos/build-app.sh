@@ -23,6 +23,9 @@ cp "$ROOT/macos/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources"
 cp "$ROOT/macos/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp -R "$ROOT/macos/shell-integration" "$APP/Contents/Resources/shell-integration"
-# Seal Info.plist and resources into the signature; ad-hoc is the ceiling without a Developer ID.
-codesign --force --deep --sign - "$APP"
+# Seal Info.plist and resources into the signature. A stable identity keeps macOS privacy grants
+# (Local Network) across rebuilds; without the "Harf Local Signing" certificate, fall back to ad hoc.
+SIGN_ID="Harf Local Signing"
+security find-identity -v -p codesigning | grep -q "$SIGN_ID" || SIGN_ID=-
+codesign --force --deep --sign "$SIGN_ID" "$APP"
 echo "$APP"
