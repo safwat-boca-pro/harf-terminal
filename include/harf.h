@@ -101,7 +101,8 @@ int harf_term_mouse(HarfTerm *t, HarfPainter *p, int action, int button, uint32_
  * focus events (mode 1004) is told. 0 = ok. */
 int harf_term_focus(HarfTerm *t, int focused);
 /* A left-button selection gesture at a pixel of the grid (use it when harf_term_mouse returned 0).
- * phase: 0 press, 1 drag, 2 release. click_count: 1, 2 (word) or 3 (line). 0 = ok. */
+ * phase: 0 press, 1 drag, 2 release. click_count: 1, 2 (word) or 3 (line). mods uses HARF_MOD_*;
+ * HARF_MOD_SHIFT on press continues an existing selection. 0 = ok. */
 int harf_term_selection_event(HarfTerm *t, HarfPainter *p, int phase, int click_count, uint32_t mods, double x_px, double y_px);
 /* The OSC 8 hyperlink under a pixel of the grid: copies its URI (no NUL) into out and returns its length, or 0 if there is
  * none or it does not fit cap. */

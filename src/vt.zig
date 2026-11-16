@@ -200,7 +200,7 @@ pub const CommandKind = enum { prompt_start, input_start, output_start, command_
 pub const Rgb = struct { r: u8, g: u8, b: u8 };
 
 /// What the terminal answers to XTVERSION (CSI > q). Keep the number in step with build.zig.zon.
-pub const xtversion = "Harf 0.3.1";
+pub const xtversion = "Harf 0.3.2";
 
 /// Harf's default colors (the slice 2 theme): foreground 0.92, background (0.06, 0.06, 0.07).
 pub const theme_fg: Rgb = .{ .r = 235, .g = 235, .b = 235 };
@@ -416,6 +416,9 @@ pub const Terminal = struct {
     sel_dragged: bool = false,
     /// Clicks in the gesture's press: 1 drags by character, 2 by word, 3 or more by line.
     sel_clicks: u8 = 1,
+    /// True when the current click sequence started by extending an existing selection (Shift+click),
+    /// so repeat clicks keep extending instead of replacing it, and unit drags keep `sel_anchor` fixed.
+    sel_extending: bool = false,
     /// A selection exists as of the last `update` (cells ask whether they are in it only then).
     selection_active: bool = false,
     mouse_encoder: c.GhosttyMouseEncoder,
@@ -888,6 +891,16 @@ pub const Terminal = struct {
         if (sel) |*v| _ = c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_SELECTION, v) else _ = c.ghostty_terminal_set(self.handle, c.GHOSTTY_TERMINAL_OPT_SELECTION, null);
     }
 
+    fn screenCoord(self: *Terminal, ref: *const c.GhosttyGridRef) ?c.GhosttyPointCoordinate {
+        var pt = std.mem.zeroes(c.GhosttyPointCoordinate);
+        if (c.ghostty_terminal_point_from_grid_ref(self.handle, ref, c.GHOSTTY_POINT_TAG_SCREEN, &pt) != c.GHOSTTY_SUCCESS) return null;
+        return pt;
+    }
+
+    fn pointOrder(ax: u16, ay: u32, bx: u16, by: u32) std.math.Order {
+        return if (ay != by) std.math.order(ay, by) else std.math.order(ax, bx);
+    }
+
     /// A left press at a viewport cell. One click only marks where a drag would start (and clears any
     /// selection); two select the word, three or more the line.
     pub fn selectionPress(self: *Terminal, col: u16, row: u16, click_count: u8) void {
@@ -895,10 +908,52 @@ pub const Terminal = struct {
         self.sel_anchor = .{ .x = pos.col, .y = @intCast(self.viewport().offset + pos.row) };
         self.sel_dragged = false;
         self.sel_clicks = click_count;
+        self.sel_extending = false;
         if (click_count <= 1) return self.setSelection(null);
         const ref = self.gridRef(c.GHOSTTY_POINT_TAG_VIEWPORT, pos.col, pos.row) orelse return;
         const sel = self.unitAround(ref, click_count) orelse return;
         self.setSelection(sel);
+    }
+
+    /// A Shift+left press at a viewport cell: continues an existing selection to `(col, row)` (keeping its
+    /// opposite end anchored when clicking outside it, or keeping `sel.start` anchored when clicking inside).
+    /// Falls back to `selectionPress` when no selection exists or when a multi-click sequence started fresh.
+    pub fn selectionExtend(self: *Terminal, col: u16, row: u16, click_count: u8) void {
+        var cur = std.mem.zeroes(c.GhosttySelection);
+        if ((click_count > 1 and !self.sel_extending) or
+            c.ghostty_terminal_get(self.handle, c.GHOSTTY_TERMINAL_DATA_SELECTION, &cur) != c.GHOSTTY_SUCCESS)
+        {
+            return self.selectionPress(col, row, click_count);
+        }
+        var ordered = std.mem.zeroes(c.GhosttySelection);
+        if (c.ghostty_terminal_selection_ordered(self.handle, &cur, c.GHOSTTY_SELECTION_ORDER_FORWARD, &ordered) != c.GHOSTTY_SUCCESS) {
+            return self.selectionPress(col, row, click_count);
+        }
+        const pos = self.clampCell(col, row);
+        const here_ref = self.gridRef(c.GHOSTTY_POINT_TAG_VIEWPORT, pos.col, pos.row) orelse return;
+        const here_pt = self.screenCoord(&here_ref) orelse return;
+        const lo_pt = self.screenCoord(&ordered.start) orelse return self.selectionPress(col, row, click_count);
+        const hi_pt = self.screenCoord(&ordered.end) orelse return self.selectionPress(col, row, click_count);
+        const cur_start_pt = self.screenCoord(&cur.start) orelse lo_pt;
+
+        const Anchor = struct { ref: c.GhosttyGridRef, pt: c.GhosttyPointCoordinate };
+        const anchor: Anchor = if (pointOrder(here_pt.x, here_pt.y, lo_pt.x, lo_pt.y) == .lt)
+            .{ .ref = ordered.end, .pt = hi_pt }
+        else if (pointOrder(here_pt.x, here_pt.y, hi_pt.x, hi_pt.y) == .gt)
+            .{ .ref = ordered.start, .pt = lo_pt }
+        else
+            .{ .ref = cur.start, .pt = cur_start_pt };
+
+        const end_ref = if (click_count <= 1) here_ref else blk: {
+            const unit = self.unitAround(here_ref, click_count) orelse c.GhosttySelection{ .start = here_ref, .end = here_ref, .rectangle = false };
+            break :blk if (pointOrder(here_pt.x, here_pt.y, anchor.pt.x, anchor.pt.y) == .lt) unit.start else unit.end;
+        };
+
+        self.sel_anchor = .{ .x = anchor.pt.x, .y = anchor.pt.y };
+        self.sel_dragged = true;
+        self.sel_clicks = click_count;
+        self.sel_extending = true;
+        self.setSelection(.{ .start = anchor.ref, .end = end_ref, .rectangle = false });
     }
 
     /// The word (two clicks) or line (three or more) around `ref`.
@@ -937,9 +992,17 @@ pub const Terminal = struct {
     fn dragByUnit(self: *Terminal, ax: u16, ay: u32, col: u16, row: u16, here_y: u32) void {
         const first = self.gridRef(c.GHOSTTY_POINT_TAG_SCREEN, ax, ay) orelse return;
         const here = self.gridRef(c.GHOSTTY_POINT_TAG_VIEWPORT, col, row) orelse return;
-        const pressed = self.unitAround(first, self.sel_clicks) orelse return;
         const under = self.unitAround(here, self.sel_clicks) orelse c.GhosttySelection{ .start = here, .end = here, .rectangle = false };
-        const forward = here_y > ay or (here_y == ay and col >= ax);
+        const forward = pointOrder(col, here_y, ax, ay) != .lt;
+        if (self.sel_extending) {
+            self.setSelection(.{
+                .start = first,
+                .end = if (forward) under.end else under.start,
+                .rectangle = false,
+            });
+            return;
+        }
+        const pressed = self.unitAround(first, self.sel_clicks) orelse return;
         self.setSelection(.{
             .start = if (forward) pressed.start else under.start,
             .end = if (forward) under.end else pressed.end,
@@ -954,6 +1017,7 @@ pub const Terminal = struct {
     }
 
     pub fn clearSelection(self: *Terminal) void {
+        self.sel_extending = false;
         self.setSelection(null);
     }
 
@@ -2523,6 +2587,149 @@ test "a plain click clears the selection; clearSelection too" {
     std.testing.allocator.free(again);
     t.clearSelection();
     try std.testing.expect(!t.hasSelection());
+}
+
+fn expectSelection(t: *Terminal, want: []const u8) !void {
+    const got = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings(want, got);
+}
+
+test "Shift+click continues an existing selection forward, backward, and repeatedly" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 40, .rows = 5 });
+    defer t.deinit();
+    t.write("alpha beta gamma delta");
+
+    // Drag forward "beta" (6..9), release, then Shift+click past it and again further right.
+    t.selectionPress(6, 0, 1);
+    t.selectionDrag(9, 0);
+    t.selectionRelease();
+    try expectSelection(t, "beta");
+
+    t.selectionExtend(13, 0, 1);
+    t.selectionRelease();
+    try expectSelection(t, "beta gam");
+
+    t.selectionExtend(21, 0, 1);
+    t.selectionRelease();
+    try expectSelection(t, "beta gamma delta");
+
+    // Shift+click inside shrinks from the active end (anchor at 6 stays fixed).
+    t.selectionExtend(15, 0, 1);
+    t.selectionRelease();
+    try expectSelection(t, "beta gamma");
+
+    // Shift+click before the selection keeps the right end (15) anchored and extends left.
+    t.selectionExtend(0, 0, 1);
+    t.selectionRelease();
+    try expectSelection(t, "alpha beta gamma");
+
+    // Shift+click inside a reversed selection keeps its right anchor (15) fixed.
+    t.selectionExtend(6, 0, 1);
+    t.selectionRelease();
+    try expectSelection(t, "beta gamma");
+}
+
+test "Shift+click preserves a backward drag when extending past either end" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 40, .rows = 5 });
+    defer t.deinit();
+    t.write("alpha beta gamma");
+
+    // Backward drag across "beta" (9 -> 6), release, then Shift+click right into "gamma".
+    t.selectionPress(9, 0, 1);
+    t.selectionDrag(6, 0);
+    t.selectionRelease();
+    try expectSelection(t, "beta");
+
+    t.selectionExtend(15, 0, 1);
+    t.selectionRelease();
+    try expectSelection(t, "beta gamma");
+}
+
+test "Shift+click extends from word/line selection, drags after Shift+press, and handles Shift+double-click" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 40, .rows = 5 });
+    defer t.deinit();
+    t.write("alpha beta gamma\r\nsecond line");
+
+    // Double-click "beta", release, then Shift+click before it: keeps end of "beta".
+    t.selectionPress(7, 0, 2);
+    t.selectionRelease();
+    try expectSelection(t, "beta");
+    t.selectionExtend(0, 0, 1);
+    t.selectionRelease();
+    try expectSelection(t, "alpha beta");
+
+    // Dragging after a Shift+click continues adjusting from the same anchor, even across it.
+    t.selectionPress(6, 0, 1);
+    t.selectionDrag(9, 0);
+    t.selectionRelease();
+    t.selectionExtend(13, 0, 1);
+    t.selectionDrag(15, 0);
+    t.selectionRelease();
+    try expectSelection(t, "beta gamma");
+    t.selectionExtend(12, 0, 1);
+    t.selectionDrag(2, 0);
+    t.selectionRelease();
+    try expectSelection(t, "pha b");
+
+    // Shift+double-click extends to the whole word on repeat click.
+    t.selectionPress(0, 0, 1);
+    t.selectionDrag(4, 0);
+    t.selectionRelease();
+    t.selectionExtend(13, 0, 1);
+    t.selectionRelease();
+    t.selectionExtend(13, 0, 2);
+    t.selectionRelease();
+    try expectSelection(t, "alpha beta gamma");
+
+    // Shift+click across lines.
+    t.selectionExtend(5, 1, 1);
+    t.selectionRelease();
+    try expectSelection(t, "alpha beta gamma\nsecond");
+}
+
+test "Shift+click with no selection starts a fresh selection (including double-click)" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 30, .rows = 5 });
+    defer t.deinit();
+    t.write("alpha beta gamma");
+
+    t.selectionExtend(7, 0, 1);
+    t.selectionRelease();
+    try std.testing.expect(!t.hasSelection());
+
+    t.selectionExtend(7, 0, 2);
+    t.selectionRelease();
+    try expectSelection(t, "beta");
+
+    // A fresh triple-click with Shift still selects the whole line instead of extending the word.
+    t.selectionExtend(7, 0, 3);
+    t.selectionRelease();
+    try expectSelection(t, "alpha beta gamma");
+}
+
+test "Shift+click extends selection across scrolled viewport" {
+    const t = try Terminal.init(std.testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer t.deinit();
+    fillHistory(t, 20);
+    _ = t.update();
+
+    var bot_buf: [64]u8 = undefined;
+    const bot_text = t.rowText(3, &bot_buf);
+    try std.testing.expect(bot_text.len > 0);
+    t.selectionPress(0, 3, 1);
+    t.selectionDrag(@intCast(bot_text.len - 1), 3);
+    t.selectionRelease();
+    t.scrollViewport(-16);
+    _ = t.update();
+
+    var row_buf: [64]u8 = undefined;
+    const top_text = t.rowText(2, &row_buf);
+    t.selectionExtend(0, 2, 1);
+    t.selectionRelease();
+    const got = try t.selectionText(std.testing.allocator);
+    defer std.testing.allocator.free(got);
+    try std.testing.expect(std.mem.startsWith(u8, got, top_text));
+    try std.testing.expect(std.mem.endsWith(u8, got, bot_text));
 }
 
 test "selection survives scrolling the viewport" {

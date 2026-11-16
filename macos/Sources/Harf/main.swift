@@ -556,8 +556,8 @@ func selfTest() -> Never {
         if !pump(5, until: { sel.rowText(1).contains("بالعالم") }) { fail("selection: rows are '\(sel.rowText(0))|\(sel.rowText(1))'") }
         let cell = sel.cellSizePt
         func at(_ col: Double, _ row: Double) -> NSPoint { NSPoint(x: sel.insetPt + cell.width * (col + 0.5), y: 420 - (sel.insetPt + cell.height * (row + 0.5))) }
-        func ev(_ type: NSEvent.EventType, _ p: NSPoint, clicks: Int = 1) -> NSEvent {
-            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: 0, windowNumber: win.windowNumber, context: nil,
+        func ev(_ type: NSEvent.EventType, _ p: NSPoint, clicks: Int = 1, mods: NSEvent.ModifierFlags = []) -> NSEvent {
+            guard let e = NSEvent.mouseEvent(with: type, location: p, modifierFlags: mods, timestamp: 0, windowNumber: win.windowNumber, context: nil,
                                              eventNumber: 0, clickCount: clicks, pressure: 1) else { fail("cannot make a mouse event") }
             return e
         }
@@ -569,6 +569,23 @@ func selfTest() -> Never {
         sel.view.mouseUp(with: ev(.leftMouseUp, at(4, 0)))
         sel.copySelection(to: pb)
         if pb.string(forType: .string) != "hello" { fail("selection: copied '\(pb.string(forType: .string) ?? "nil")', want 'hello'") }
+        // Shift+click after releasing continues the selection forward (and again further).
+        sel.view.mouseDown(with: ev(.leftMouseDown, at(8, 0), mods: .shift))
+        sel.view.mouseUp(with: ev(.leftMouseUp, at(8, 0), mods: .shift))
+        sel.copySelection(to: pb)
+        if pb.string(forType: .string) != "hello wor" { fail("shift-selection forward: copied '\(pb.string(forType: .string) ?? "nil")', want 'hello wor'") }
+        sel.view.mouseDown(with: ev(.leftMouseDown, at(10, 0), mods: .shift))
+        sel.view.mouseUp(with: ev(.leftMouseUp, at(10, 0), mods: .shift))
+        sel.copySelection(to: pb)
+        if pb.string(forType: .string) != "hello world" { fail("shift-selection repeat: copied '\(pb.string(forType: .string) ?? "nil")', want 'hello world'") }
+        // Select "world", release, then Shift+click backward to "hello" keeps "world" in the selection.
+        sel.view.mouseDown(with: ev(.leftMouseDown, at(6, 0)))
+        sel.view.mouseDragged(with: ev(.leftMouseDragged, at(10, 0)))
+        sel.view.mouseUp(with: ev(.leftMouseUp, at(10, 0)))
+        sel.view.mouseDown(with: ev(.leftMouseDown, at(0, 0), mods: .shift))
+        sel.view.mouseUp(with: ev(.leftMouseUp, at(0, 0), mods: .shift))
+        sel.copySelection(to: pb)
+        if pb.string(forType: .string) != "hello world" { fail("shift-selection backward: copied '\(pb.string(forType: .string) ?? "nil")', want 'hello world'") }
         // The Arabic row reads right to left, so its logical start is at the right: drag in reading order, right to
         // left across the 13 cells it occupies. The copy is the logical text. (A left-to-right drag selects the
         // logical range between its endpoints, which is the minimal copy of slice 3; visual selection is Phase 7.)

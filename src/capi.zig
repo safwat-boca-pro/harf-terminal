@@ -308,10 +308,9 @@ export fn harf_term_focus(t: *HarfTerm, focused: c_int) c_int {
 }
 
 /// A selection gesture with the left button, at a pixel of the grid. phase: 0 press, 1 drag, 2 release.
-/// `click_count` is the click count of the event (1 click, 2 word, 3 line). Use it when `harf_term_mouse`
-/// returned 0. 0 on success.
+/// `click_count` is the click count of the event (1 click, 2 word, 3 line). `mods` uses `HARF_MOD_*`;
+/// Shift on press continues an existing selection. Use it when `harf_term_mouse` returned 0. 0 on success.
 export fn harf_term_selection_event(t: *HarfTerm, p: *draw.Painter, phase: c_int, click_count: c_int, mods: u32, x_px: f64, y_px: f64) c_int {
-    _ = mods;
     var col: u16 = 0;
     var row: u16 = 0;
     {
@@ -321,7 +320,7 @@ export fn harf_term_selection_event(t: *HarfTerm, p: *draw.Painter, phase: c_int
         col = cell.col;
         row = cell.row;
     }
-    t.session.selection(@intCast(@max(0, @min(2, phase))), @intCast(@max(1, @min(255, click_count))), col, row);
+    t.session.selection(@intCast(@max(0, @min(2, phase))), @intCast(@max(1, @min(255, click_count))), mods, col, row);
     return 0;
 }
 
@@ -578,6 +577,27 @@ test "selection through the C ABI: a click on a shaped Arabic row selects the le
     defer harf_free(text);
     // logical letters 1 and 2 (U+0631 U+062D), wherever they are drawn
     try std.testing.expectEqualStrings("\u{631}\u{62D}", text[0..len]);
+    // Shift+click on letter 3 (U+0628) extends the selection to letters 1..3
+    var x3: f64 = 0;
+    {
+        const g = t.session.lock();
+        defer t.session.unlock();
+        const m = p.metrics();
+        var px: f64 = 0;
+        while (px < m.cell_w * 5) : (px += 1) {
+            if (p.cellAt(g, px, m.cell_h * 0.5).col == 3) {
+                x3 = px;
+                break;
+            }
+        }
+    }
+    try std.testing.expect(x3 > 0);
+    try std.testing.expectEqual(@as(c_int, 0), harf_term_selection_event(t, p, 0, 1, 1, x3, 5));
+    try std.testing.expectEqual(@as(c_int, 0), harf_term_selection_event(t, p, 2, 1, 1, x3, 5));
+    var ext_len: usize = 0;
+    const ext = harf_term_selection_text(t, &ext_len) orelse return error.NoSelection;
+    defer harf_free(ext);
+    try std.testing.expectEqualStrings("\u{631}\u{62D}\u{628}", ext[0..ext_len]);
     harf_term_clear_selection(t);
     try std.testing.expect(harf_term_selection_text(t, &len) == null);
 }

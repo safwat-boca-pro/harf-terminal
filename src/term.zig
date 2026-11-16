@@ -193,12 +193,13 @@ pub const Session = struct {
     }
 
     /// A left-button selection gesture at a viewport cell. phase: 0 press, 1 drag, 2 release.
-    pub fn selection(self: *Session, phase: u8, click_count: u8, col: u16, row: u16) void {
+    /// `mods` uses `keys.Mods`: Shift on press continues an existing selection.
+    pub fn selection(self: *Session, phase: u8, click_count: u8, mods: u32, col: u16, row: u16) void {
         {
             const t = self.lock();
             defer self.unlock();
             switch (phase) {
-                0 => t.selectionPress(col, row, click_count),
+                0 => if (mods & keys.Mods.shift != 0) t.selectionExtend(col, row, click_count) else t.selectionPress(col, row, click_count),
                 1 => t.selectionDrag(col, row),
                 else => t.selectionRelease(),
             }
@@ -1304,9 +1305,9 @@ const HasSelection = struct {
 };
 
 fn selectFirstCells(s: *Session) void {
-    s.selection(0, 1, 0, 0); // press
-    s.selection(1, 1, 3, 0); // drag
-    s.selection(2, 1, 3, 0); // release
+    s.selection(0, 1, 0, 0, 0); // press
+    s.selection(1, 1, 0, 3, 0); // drag
+    s.selection(2, 1, 0, 3, 0); // release
 }
 
 test "typing, keys and paste clear the selection; lone modifier keys and Cmd+C do not" {
@@ -1332,6 +1333,18 @@ test "typing, keys and paste clear the selection; lone modifier keys and Cmd+C d
     selectFirstCells(s);
     try s.paste("p");
     try std.testing.expect(!sel.now());
+}
+
+test "Session.selection with Shift extends an existing selection" {
+    const s = try Session.start(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf 'hello world'; sleep 5" } });
+    defer s.deinit();
+    try std.testing.expect(waitFor(10_000, Row{ .s = s, .want = "hello world" }, Row.ok));
+    selectFirstCells(s); // selects "hell" (0..3)
+    s.selection(0, 1, keys.Mods.shift, 10, 0);
+    s.selection(2, 1, keys.Mods.shift, 10, 0);
+    const txt = (try s.selectionText(std.testing.allocator)) orelse return error.NoSelection;
+    defer std.testing.allocator.free(txt);
+    try std.testing.expectEqualStrings("hello world", txt);
 }
 
 const wheel_up_event = "1b5b3c36343b313b314d"; // ESC [ < 64 ; 1 ; 1 M
