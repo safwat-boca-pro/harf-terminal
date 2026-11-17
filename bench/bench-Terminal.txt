@@ -1,0 +1,9 @@
+app: /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal pid=69138
+idle_footprint_MB: 62
+seq_2M_lines: 2.50s
+cat_50MB: 1.54s
+ansi_colors_20k: 0.07s
+app_cpu_seconds_during_load: 4.32
+loaded_footprint_MB: 86
+idle_cpu_pct_20s: 1.00
+final_footprint_MB: 78

@@ -1,0 +1,9 @@
+app: /Applications/Harf.app/Contents/MacOS/Harf pid=74111
+idle_footprint_MB: 47
+seq_2M_lines: 3.13s
+cat_50MB: 1.76s
+ansi_colors_20k: 0.08s
+app_cpu_seconds_during_load: 5.08
+loaded_footprint_MB: 77
+idle_cpu_pct_20s: 0.15
+final_footprint_MB: 65
