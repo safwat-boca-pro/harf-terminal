@@ -35,4 +35,9 @@ Per-thread samples out of 1374 (2 s at 1 ms):
 
 Conclusion: the extra CPU/time versus Terminal.app is not parsing or drawing. It is change detection: every frame re-reads and re-hashes the whole visible grid cell by cell under the session lock, which also stalls the parser thread. The gap grows with window size.
 
-Candidate fixes (not applied): use ghostty's per-row dirty flags from the render state to skip unchanged rows instead of hashing all of them; hash only rows flagged dirty; shorten the lock (copy then hash outside it); coalesce frames while output is flooding.
+Suggested fixes (not applied), in order of expected payoff:
+1. Use ghostty's per-row dirty flags from the render state and skip unchanged rows instead of hashing all of them. Biggest win: removes most of the main thread's ~75%.
+2. Copy the visible cells under the lock, then hash outside it, so the parser thread is not stalled on the session mutex.
+3. Coalesce frames while output is flooding (e.g. cap redraw rate during sustained PTY reads).
+
+Next step: implement (1), rerun `bench/bench.sh` in a fresh Harf and compare against the table above (target: `seq` within ~10% of Terminal.app).
