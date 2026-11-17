@@ -23,3 +23,16 @@ The 4 Claude instances + helpers under it used ~2.4 GB RSS; Harf itself is <8% o
 - Throughput: Harf trails on heavy output (+14–25% time, +18% CPU). Colour parsing is not the bottleneck.
 - Idle CPU: single samples are noisy; repeat before concluding.
 - Not measured: input latency, battery drain on DC power, multi-run variance.
+
+## Profile of `seq 1 2000000` (macOS `sample`, 2 s, fresh instance) — `bench/profile-seq.txt`, `bench/profile-seq.sh`
+Per-thread samples out of 1374 (2 s at 1 ms):
+
+- **Main thread: ~1030 (75%)** in `TerminalController.invalidateChangedRows` -> `harf_term_dirty_rows` (`capi.zig:255`).
+  That call holds the session lock and, for every visible row, runs `Painter.gather` (`draw.zig:400`: one `cellInRow` -> `readCell` -> `ghostty_render_state_row_cells_get` C-API call per column) and then `rowHash` (Wyhash) to see whether the row changed.
+  Top self-time frames: `Wyhash.update` 324, `ghostty_render_state_row_cells_get` 262, `readCell` 162, `Painter.gather` 60, `rowHash` 58.
+- **PTY/parser thread: 1012 (74%) blocked in `__psynch_mutexwait`** — waiting for that same session lock. Actual parsing (`ghostty_terminal_vt_write`) is only ~31 samples (2%).
+- Render/GPU threads: idle.
+
+Conclusion: the extra CPU/time versus Terminal.app is not parsing or drawing. It is change detection: every frame re-reads and re-hashes the whole visible grid cell by cell under the session lock, which also stalls the parser thread. The gap grows with window size.
+
+Candidate fixes (not applied): use ghostty's per-row dirty flags from the render state to skip unchanged rows instead of hashing all of them; hash only rows flagged dirty; shorten the lock (copy then hash outside it); coalesce frames while output is flooding.
